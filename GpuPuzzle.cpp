@@ -7,16 +7,15 @@
 #include "Math.h"
 #include "Utils.h"
 #include "Ec.h"
-#include "GpuCore.cu"
 
 #define BYTES_PER_THREAD (2ull*4ull*sizeof(uint64_t))
 
-extern __constant__ uint32_t c_target_words[5];
-extern __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
-extern __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
-extern __constant__ uint64_t c_Jx[4];
-extern __constant__ uint64_t c_Jy[4];
 void CallGpuKernel(TKparams& Kparams);
+cudaError_t CudaCopyTargetWords(uint32_t value[5]);
+cudaError_t CudaCopyGx(void* value, size_t size);
+cudaError_t CudaCopyGy(void* value, size_t size);
+cudaError_t CudaCopyJx(uint64_t value[4]);
+cudaError_t CudaCopyJy(uint64_t value[4]);
 
 struct THparams
 {
@@ -363,7 +362,8 @@ bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash16
         target_words[2] = (uint32_t)hash160[ 8] | ((uint32_t)hash160[ 9] << 8) | ((uint32_t)hash160[10] << 16) | ((uint32_t)hash160[11] << 24);
         target_words[3] = (uint32_t)hash160[12] | ((uint32_t)hash160[13] << 8) | ((uint32_t)hash160[14] << 16) | ((uint32_t)hash160[15] << 24);
         target_words[4] = (uint32_t)hash160[16] | ((uint32_t)hash160[17] << 8) | ((uint32_t)hash160[18] << 16) | ((uint32_t)hash160[19] << 24);
-        cudaMemcpyToSymbol(c_target_words, target_words, sizeof(target_words));
+        //cudaMemcpyToSymbol(c_target_words, target_words, sizeof(target_words));
+		CudaCopyTargetWords(&target_words);
     }
 	
 	// p(x,y)
@@ -485,10 +485,14 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
     ck(cudaMemcpy(d_Px,        		hParams->px,  		threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy px");
     ck(cudaMemcpy(d_Py,        		hParams->py,  		threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy py");
 
-	ck(cudaMemcpyToSymbol(c_Gx, 	hParams->gx, 		(batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gx");
-	ck(cudaMemcpyToSymbol(c_Gy, 	hParams->gy, 		(batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gy");
-	ck(cudaMemcpyToSymbol(c_Jx, 	hParams->bx, 		4 * sizeof(uint64_t)), "ToSymbol c_Jx");
-	ck(cudaMemcpyToSymbol(c_Jy, 	hParams->by, 		4 * sizeof(uint64_t)), "ToSymbol c_Jy");
+	//ck(cudaMemcpyToSymbol(c_Gx, 	hParams->gx, 		(batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gx");
+	//ck(cudaMemcpyToSymbol(c_Gy, 	hParams->gy, 		(batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gy");
+	//ck(cudaMemcpyToSymbol(c_Jx, 	hParams->bx, 		4 * sizeof(uint64_t)), "ToSymbol c_Jx");
+	//ck(cudaMemcpyToSymbol(c_Jy, 	hParams->by, 		4 * sizeof(uint64_t)), "ToSymbol c_Jy");
+	ck(CudaCopyGx(hParams->gx, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gx");
+	ck(CudaCopyGy(hParams->gy, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gy");
+	ck(CudaCopyJx(hParams->bx), "ToSymbol c_Jx");
+	ck(CudaCopyJx(hParams->by), "ToSymbol c_Jy");
 
 	kParams->scalars = d_start_scalars;
 	kParams->counts = d_counts;

@@ -194,3 +194,23 @@ void CallGpuKernel(TKparams& Kparams) {
 		Kparams.batches_per_launch
 	);
 }
+
+cudaError_t CudaCopyTargetWords(uint32_t value[5]) {
+	return cudaMemcpyToSymbol(c_target_words, value, sizeof(value));
+}
+
+cudaError_t CudaCopyGx(void* value, size_t size) {
+	return cudaMemcpyToSymbol(c_Gx, value, size);
+}
+
+cudaError_t CudaCopyGy(void* value, size_t size) {
+	return cudaMemcpyToSymbol(c_Gy, value, size);
+}
+
+cudaError_t CudaCopyJx(uint64_t value[4]) {
+	return cudaMemcpyToSymbol(c_Jx, value, sizeof(value));
+}
+
+cudaError_t CudaCopyJy(uint64_t value[4]) {
+	return cudaMemcpyToSymbol(c_Jy, value, sizeof(value));
+}
