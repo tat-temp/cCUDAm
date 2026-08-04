@@ -12,10 +12,10 @@
 
 void CallGpuKernel(TKparams& Kparams);
 cudaError_t CudaCopyTargetWords(uint32_t value[5]);
-cudaError_t CudaCopyGx(void* value, size_t size);
-cudaError_t CudaCopyGy(void* value, size_t size);
-cudaError_t CudaCopyJx(void* value);
-cudaError_t CudaCopyJy(void* value);
+cudaError_t CudaCopyGx(const void* value, size_t size);
+cudaError_t CudaCopyGy(const void* value, size_t size);
+cudaError_t CudaCopyJx(const void* value);
+cudaError_t CudaCopyJy(const void* value);
 
 struct THparams
 {

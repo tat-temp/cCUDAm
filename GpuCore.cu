@@ -199,18 +199,18 @@ cudaError_t CudaCopyTargetWords(uint32_t value[5]) {
 	return cudaMemcpyToSymbol(c_target_words, value, sizeof(value));
 }
 
-cudaError_t CudaCopyGx(void* value, size_t size) {
+cudaError_t CudaCopyGx(const void* value, size_t size) {
 	return cudaMemcpyToSymbol(c_Gx, value, size);
 }
 
-cudaError_t CudaCopyGy(void* value, size_t size) {
+cudaError_t CudaCopyGy(const void* value, size_t size) {
 	return cudaMemcpyToSymbol(c_Gy, value, size);
 }
 
-cudaError_t CudaCopyJx(void* value) {
+cudaError_t CudaCopyJx(const void* value) {
 	return cudaMemcpyToSymbol(c_Jx, value, 4 * sizeof(uint64_t));
 }
 
-cudaError_t CudaCopyJy(void* value) {
+cudaError_t CudaCopyJy(const void* value) {
 	return cudaMemcpyToSymbol(c_Jy, value, 4 * sizeof(uint64_t));
 }
