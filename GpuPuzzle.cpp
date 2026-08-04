@@ -11,7 +11,7 @@
 #define BYTES_PER_THREAD (2ull*4ull*sizeof(uint64_t))
 
 void CallGpuKernel(TKparams& Kparams);
-cudaError_t CudaCopyTargetWords(uint32_t value[5]);
+cudaError_t CudaCopyTargetWords(const void* value);
 cudaError_t CudaCopyGx(const void* value, size_t size);
 cudaError_t CudaCopyGy(const void* value, size_t size);
 cudaError_t CudaCopyJx(const void* value);

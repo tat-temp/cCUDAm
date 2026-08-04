@@ -195,8 +195,8 @@ void CallGpuKernel(TKparams& Kparams) {
 	);
 }
 
-cudaError_t CudaCopyTargetWords(uint32_t value[5]) {
-	return cudaMemcpyToSymbol(c_target_words, value, sizeof(value));
+cudaError_t CudaCopyTargetWords(const void* value) {
+	return cudaMemcpyToSymbol(c_target_words, value, 5 * sizeof(uint32_t));
 }
 
 cudaError_t CudaCopyGx(const void* value, size_t size) {
