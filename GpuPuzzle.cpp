@@ -491,8 +491,8 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 	//ck(cudaMemcpyToSymbol(c_Jy, 	hParams->by, 		4 * sizeof(uint64_t)), "ToSymbol c_Jy");
 	ck(CudaCopyGx(hParams->gx, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gx");
 	ck(CudaCopyGy(hParams->gy, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gy");
-	ck(CudaCopyJx(hParams->bx), "ToSymbol c_Jx");
-	ck(CudaCopyJx(hParams->by), "ToSymbol c_Jy");
+	ck(CudaCopyJx(&hParams->bx), "ToSymbol c_Jx");
+	ck(CudaCopyJx(&hParams->by), "ToSymbol c_Jy");
 
 	kParams->scalars = d_start_scalars;
 	kParams->counts = d_counts;
