@@ -23,7 +23,7 @@
 #include "Utils.h"
 #include "Math.h"
 #include "Ec.h"
-#include "GPUPuzzle.h"
+#include "GpuPuzzle.h"
 
 struct TOutParams {
 	uint32_t runtime_points_batch_size;
