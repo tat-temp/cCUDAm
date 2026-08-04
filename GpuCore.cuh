@@ -1,11 +1,5 @@
 #pragma once
 
-__device__ __constant__ uint32_t c_target_words[5];
-__device__ __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
-__device__ __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
-__device__ __constant__ uint64_t c_Jx[4];
-__device__ __constant__ uint64_t c_Jy[4];
-
 __device__ __forceinline__ bool ge256_u64(const uint64_t a[4], uint64_t b) {
     if (a[3] | a[2] | a[1]) return true;  // >= 2^64
     return a[0] >= b;

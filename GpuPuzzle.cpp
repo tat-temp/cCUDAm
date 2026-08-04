@@ -7,10 +7,15 @@
 #include "Math.h"
 #include "Utils.h"
 #include "Ec.h"
-#include "GpuCore.cuh"
+#include "GpuCore.cu"
 
 #define BYTES_PER_THREAD (2ull*4ull*sizeof(uint64_t))
 
+extern __constant__ uint32_t c_target_words[5];
+extern __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
+extern __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
+extern __constant__ uint64_t c_Jx[4];
+extern __constant__ uint64_t c_Jy[4];
 void CallGpuKernel(TKparams& Kparams);
 
 struct THparams
