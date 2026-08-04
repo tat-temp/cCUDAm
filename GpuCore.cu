@@ -68,7 +68,7 @@ __global__ void TestKernel(
         }
 		
 		uint64_t inverse[5];
-		sub_mod((uint64_t*)inverse, (const uint64_t*)c_Gx[0], x1);      // d0 = c_Gx[0] - x1, straight into inverse[0..3]
+		sub_mod((uint64_t*)inverse, &c_Gx[0], x1);      // d0 = c_Gx[0] - x1, straight into inverse[0..3]
         mul_mod(inverse, inverse, subp[0]);
 		
 		inv_mod((uint32_t*)inverse);

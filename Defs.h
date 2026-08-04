@@ -3,7 +3,7 @@
 #include <cstdint>
 
 //#define NO_GPU_MODE				1
-//#define DEBUG_MODE				1
+#define DEBUG_MODE				0
 
 #define SHOW_STAT_INTERVAL_SECS	5
 

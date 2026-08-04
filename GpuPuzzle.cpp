@@ -36,7 +36,7 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t b
 bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize);
 void ClearHParams(THparams* hParams);
 void ClearKParams(TKparams* kParams);
-bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash160, uint64_t threadsTotal, uint64_t batchSize);
+bool PrepareHost(THparams* hParams, const uint64_t* start, const uint64_t* range, const uint8_t* hash160, uint64_t threadsTotal, uint64_t batchSize);
 bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTotal, uint64_t batchSize);
 
 bool GpuPuzzle::Start() {
@@ -59,7 +59,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
     std::memset(&this->Kparams, 0, sizeof(TKparams));
 
 #ifndef NO_GPU_MODE	
-	if (cudaGetDevice(&CudaIndex) != cudaSuccess || cudaGetDeviceProperties(&prop, CudaIndex) != cudaSuccess) {
+	if (cudaGetDeviceProperties(&prop, CudaIndex) != cudaSuccess) {
         std::cerr << "CUDA init error\n";
 		return result;
     }
@@ -80,7 +80,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	uint64_t threadsPerBlock = PickThreadsPerBlock(&prop);
 	uint64_t threadsTotal = GetThreadsCount(&prop, pRange, blockPerSm, threadsPerBlock, batchSize);
 
-#ifdef DEBUG_MODE
+#if DEBUG_MODE > 0
 	printf("GPU %d: Threads/Block: %llu Total threads: %llu\r\n", CudaIndex, (unsigned long long)threadsPerBlock, (unsigned long long)threadsTotal);
 #endif
 	
@@ -88,7 +88,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 		return result;
 	}
 
-	if (!PrepareHost(&hParams, pRange, pHash, threadsTotal, batchSize)) {
+	if (!PrepareHost(&hParams, pStart, pRange, pHash, threadsTotal, batchSize)) {
 		return result;
 	}
 
@@ -101,9 +101,12 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	}
 #endif
 
-	Kparams.BlockCnt = SMCnt;
+	Kparams.BlockCnt = SMCnt * blockPerSm;
 	Kparams.BlockSize = threadsPerBlock;
 	Kparams.points_per_run = batchSize * threadsTotal * dwSlices;
+	Kparams.batch_size = batchSize;
+	Kparams.batches_per_launch = dwSlices;
+	Kparams.threads_total = threadsTotal;
 
 	result = true;
 	
@@ -277,7 +280,7 @@ void ClearKParams(TKparams* kParams) {
 #endif
 }
 
-bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash160, uint64_t threadsTotal, uint64_t batchSize) {
+bool PrepareHost(THparams* hParams, const uint64_t* start, const uint64_t* range, const uint8_t* hash160, uint64_t threadsTotal, uint64_t batchSize) {
 	uint64_t per_thread_cnt[4];
 	uint64_t r1 = 0ull;
 	uint64_t* h_counts256     = nullptr;
@@ -303,7 +306,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash16
 
 	// h_counts256
 	{
-#ifdef DEBUG_MODE
+#if DEBUG_MODE > 0
 		printf("\r\n---Points/thread---\r\n");
 #endif
 		for (uint64_t i = 0; i < threadsTotal; ++i) {
@@ -315,7 +318,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash16
 			if (i < r1) {
 				add_256_u64((const uint64_t*)&h_counts256[i*4], (uint64_t)1, (uint64_t*)&h_counts256[i*4]);
 			}
-#ifdef DEBUG_MODE
+#if DEBUG_MODE > 0
 			printf("[%6" PRIu64 "]: %s\r\n", i, formatHex256(&h_counts256[i*4]).c_str());
 #endif
 		}
@@ -324,11 +327,11 @@ bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash16
 	// h_start_scalars
 	half = (uint32_t)batchSize >> 1;
     {
-#ifdef DEBUG_MODE
+#if DEBUG_MODE > 0
 		printf("\r\n---Start scalars---\r\n");
 #endif
 
-        uint64_t cur[4] = { range[0], range[1], range[2], range[3] };
+        uint64_t cur[4] = { start[0], start[1], start[2], start[3] };
 		
         for (uint64_t i = 0; i < threadsTotal; ++i) {
             uint64_t scalar_effective[4]; add_256_u64((const uint64_t*)&cur, (uint64_t)half, (uint64_t*)&scalar_effective); 
@@ -343,7 +346,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash16
 				add_256_u64((const uint64_t*)&next, (uint64_t)1, (uint64_t*)&next);
 			}
 			
-#ifdef DEBUG_MODE
+#if DEBUG_MODE > 0
 			printf("[%6" PRIu64 "]: %s\r\n", i, formatHex256(&h_start_scalars[i*4]).c_str());
 #endif
 			
@@ -353,7 +356,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash16
 	
 	// c_target_words
 	{
-#ifdef DEBUG_MODE
+#if DEBUG_MODE > 0
 		printf("\r\n---Target hash (truncated)---\r\n%s\r\n", formatHex256((uint64_t*)hash160).c_str());
 #endif
         uint32_t target_words[5];
@@ -368,7 +371,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash16
 	
 	// p(x,y)
 	{
-#ifdef DEBUG_MODE
+#if DEBUG_MODE > 0
 		printf("\r\n---Start points---\r\n");
 #endif
 
@@ -389,7 +392,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash16
 			h_py[i*4+2] = p.y.data[2];
 			h_py[i*4+3] = p.y.data[3];
 			
-#ifdef DEBUG_MODE
+#if DEBUG_MODE > 0
 			printf("[%6" PRIu64 "]: x:%s\r\n", i, formatHex256(&h_px[i*4]).c_str());
 			printf("[%6" PRIu64 "]: y:%s\r\n", i, formatHex256(&h_py[i*4]).c_str());
 #endif
@@ -398,7 +401,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash16
 	
 	// B pointer
 	{
-#ifdef DEBUG_MODE
+#if DEBUG_MODE > 0
 		printf("\r\n---B (batch size point)---\r\n");
 #endif
 
@@ -411,14 +414,14 @@ bool PrepareHost(THparams* hParams, const uint64_t* range, const uint8_t* hash16
 		std::memcpy(&hParams->bx, p.x.data, 32);
 		std::memcpy(&hParams->by, p.y.data, 32);
 
-#ifdef DEBUG_MODE
+#if DEBUG_MODE > 0
 		printf("x:%s\r\n", formatHex256((const uint64_t*)&p.x.data).c_str());
 		printf("y:%s\r\n", formatHex256((const uint64_t*)&p.y.data).c_str());
 #endif
 
 	}
 
-//#ifdef DEBUG_MODE
+//#if DEBUG_MODE > 0
 //	for (uint64_t i = 0; i < threadsTotal; ++i) {
 //		printf("[%6" PRIu64 "]: threads: %s\r\n", i, formatHex256(&h_counts256[i*4]).c_str());
 //		printf("[%6" PRIu64 "]: start:   %s\r\n", i, formatHex256(&h_start_scalars[i*4]).c_str());
@@ -492,7 +495,7 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 	ck(CudaCopyGx(hParams->gx, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gx");
 	ck(CudaCopyGy(hParams->gy, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gy");
 	ck(CudaCopyJx(&hParams->bx), "ToSymbol c_Jx");
-	ck(CudaCopyJx(&hParams->by), "ToSymbol c_Jy");
+	ck(CudaCopyJy(&hParams->by), "ToSymbol c_Jy");
 
 	kParams->scalars = d_start_scalars;
 	kParams->counts = d_counts;
