@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include "defs.h"
+#include "Defs.h"
 
 class EcInt
 {
