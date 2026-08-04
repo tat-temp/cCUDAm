@@ -1,7 +1,7 @@
 #pragma once
 
 #include "EcInt.h"
-#include "defs.h"
+#include "Defs.h"
 
 #define STATS_WND_SIZE	16
 
