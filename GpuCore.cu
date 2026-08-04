@@ -207,10 +207,10 @@ cudaError_t CudaCopyGy(void* value, size_t size) {
 	return cudaMemcpyToSymbol(c_Gy, value, size);
 }
 
-cudaError_t CudaCopyJx(uint64_t value[4]) {
-	return cudaMemcpyToSymbol(c_Jx, value, sizeof(value));
+cudaError_t CudaCopyJx(void* value) {
+	return cudaMemcpyToSymbol(c_Jx, value, 4 * sizeof(uint64_t));
 }
 
-cudaError_t CudaCopyJy(uint64_t value[4]) {
-	return cudaMemcpyToSymbol(c_Jy, value, sizeof(value));
+cudaError_t CudaCopyJy(void* value) {
+	return cudaMemcpyToSymbol(c_Jy, value, 4 * sizeof(uint64_t));
 }
