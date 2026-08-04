@@ -1,0 +1,420 @@
+#include <cstdint>
+#include <cstring>
+#include <cstdio>
+#include <immintrin.h>
+
+#include "Defs.h"
+#include "Utils.h"
+#include "EcInt.h"
+
+#define P_REV	0x00000001000003D1
+
+EcInt g_P; //FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE FFFFFC2F
+
+void Mul256_by_64(u64* input, u64 multiplier, u64* result)
+{
+	u64 h1, h2;
+	result[0] = _umul128(input[0], multiplier, &h1);
+	u8 carry = _addcarry_u64(0, _umul128(input[1], multiplier, &h2), h1, result + 1);
+	carry = _addcarry_u64(carry, _umul128(input[2], multiplier, &h1), h2, result + 2);
+	carry = _addcarry_u64(carry, _umul128(input[3], multiplier, &h2), h1, result + 3);
+	_addcarry_u64(carry, 0, h2, result + 4);
+}
+
+void Add320_to_256(u64* in_out, u64* val)
+{
+	u8 c = _addcarry_u64(0, in_out[0], val[0], in_out);
+	c = _addcarry_u64(c, in_out[1], val[1], in_out + 1);
+	c = _addcarry_u64(c, in_out[2], val[2], in_out + 2);
+	c = _addcarry_u64(c, in_out[3], val[3], in_out + 3);
+	_addcarry_u64(c, 0, val[4], in_out + 4);
+}
+
+void Mul320_by_64(u64* input, u64 multiplier, u64* result)
+{
+	u64 h1, h2;
+	result[0] = _umul128(input[0], multiplier, &h1);
+	u8 carry = _addcarry_u64(0, _umul128(input[1], multiplier, &h2), h1, result + 1);
+	carry = _addcarry_u64(carry, _umul128(input[2], multiplier, &h1), h2, result + 2);
+	carry = _addcarry_u64(carry, _umul128(input[3], multiplier, &h2), h1, result + 3);
+	_addcarry_u64(carry, _umul128(input[4], multiplier, &h1), h2, result + 4);
+}
+
+void EcInt::LoadFromBuffer32(u8* buffer)
+{
+	std::memcpy(data, buffer, 32);
+}
+
+EcInt::EcInt()
+{
+	SetZero();
+}
+
+void EcInt::Assign(EcInt& val)
+{
+	memcpy(data, val.data, sizeof(data));
+}
+
+void EcInt::Set(u64 val)
+{
+	SetZero();
+	data[0] = val;
+}
+
+void EcInt::SetZero()
+{
+	memset(data, 0, sizeof(data));
+}
+
+bool EcInt::SetHexStr(const char* str)
+{
+	SetZero();
+	int len = (int)strlen(str);
+	if (len > 64)
+		return false;
+	char s[64];
+	memset(s, '0', 64);
+	memcpy(s + 64 - len, str, len);
+	for (int i = 0; i < 32; i++)
+	{
+		int n = 62 - 2 * i;
+		u8 b;
+		if (!parse_u8(s + n, &b))
+			return false;
+		((u8*)data)[i] = b;
+	}
+	return true;
+}
+
+void EcInt::GetHexStr(char* str)
+{
+	for (int i = 0; i < 32; i++)
+		sprintf(str + 2 * i, "%02X", ((u8*)data)[31 - i]);
+	str[64] = 0;
+}
+
+u16 EcInt::GetU16(int index)
+{
+	return (u16)(data[index / 4] >> (16 * (index % 4)));
+}
+
+//returns carry
+bool EcInt::Add(EcInt& val)
+{
+	u8 c = _addcarry_u64(0, data[0], val.data[0], data + 0);
+	c = _addcarry_u64(c, data[1], val.data[1], data + 1);
+	c = _addcarry_u64(c, data[2], val.data[2], data + 2);
+	c = _addcarry_u64(c, data[3], val.data[3], data + 3);
+	return _addcarry_u64(c, data[4], val.data[4], data + 4) != 0;
+}
+
+//returns carry
+bool EcInt::Sub(EcInt& val)
+{
+	u8 c = _subborrow_u64(0, data[0], val.data[0], data + 0);
+	c = _subborrow_u64(c, data[1], val.data[1], data + 1);
+	c = _subborrow_u64(c, data[2], val.data[2], data + 2);
+	c = _subborrow_u64(c, data[3], val.data[3], data + 3);
+	return _subborrow_u64(c, data[4], val.data[4], data + 4) != 0;
+}
+
+void EcInt::Neg()
+{
+	u8 c = _subborrow_u64(0, 0, data[0], data + 0);
+	c = _subborrow_u64(c, 0, data[1], data + 1);
+	c = _subborrow_u64(c, 0, data[2], data + 2);
+	c = _subborrow_u64(c, 0, data[3], data + 3);
+	_subborrow_u64(c, 0, data[4], data + 4);
+}
+
+void EcInt::Neg256()
+{
+	u8 c = _subborrow_u64(0, 0, data[0], data + 0);
+	c = _subborrow_u64(c, 0, data[1], data + 1);
+	c = _subborrow_u64(c, 0, data[2], data + 2);
+	c = _subborrow_u64(c, 0, data[3], data + 3);
+	data[4] = 0;
+}
+
+bool EcInt::IsLessThanU(EcInt& val)
+{
+	int i = 4;
+	while (i >= 0)
+	{
+		if (data[i] != val.data[i])
+			break;
+		i--;
+	}
+	if (i < 0)
+		return false;
+	return data[i] < val.data[i];
+}
+
+bool EcInt::IsLessThanI(EcInt& val)
+{
+	if ((data[4] >> 63) && !(val.data[4] >> 63))
+		return true;
+	if (!(data[4] >> 63) && (val.data[4] >> 63))
+		return false;
+
+	int i = 4;
+	while (i >= 0)
+	{
+		if (data[i] != val.data[i])
+			break;
+		i--;
+	}
+	if (i < 0)
+		return false;
+	return data[i] < val.data[i];
+}
+
+bool EcInt::IsEqual(EcInt& val)
+{
+	return memcmp(val.data, this->data, 40) == 0;
+}
+
+bool EcInt::IsZero()
+{
+	return ((data[0] == 0) && (data[1] == 0) && (data[2] == 0) && (data[3] == 0) && (data[4] == 0));
+}
+
+void EcInt::AddModP(EcInt& val)
+{
+	Add(val);
+	if (!IsLessThanU(g_P)) 
+		Sub(g_P);
+}
+
+void EcInt::SubModP(EcInt& val)
+{
+	if (Sub(val))
+		Add(g_P);
+}
+
+//assume value < P
+void EcInt::NegModP()
+{
+	Neg();
+	Add(g_P);
+}
+
+void EcInt::ShiftRight(int nbits)
+{
+	int offset = nbits / 64;
+	if (offset)
+	{
+		for (int i = 0; i < 5 - offset; i++)
+			data[i] = data[i + offset];
+		for (int i = 5 - offset; i < 5; i++)
+			data[i] = 0;
+		nbits -= 64 * offset;
+	}
+	data[0] = __shiftright128(data[0], data[1], nbits);
+	data[1] = __shiftright128(data[1], data[2], nbits);
+	data[2] = __shiftright128(data[2], data[3], nbits);
+	data[3] = __shiftright128(data[3], data[4], nbits);
+	data[4] = ((i64)data[4]) >> nbits;
+}
+
+void EcInt::ShiftLeft(int nbits)
+{
+	int offset = nbits / 64;
+	if (offset)
+	{
+		for (int i = 4; i >= offset; i--)
+			data[i] = data[i - offset];
+		for (int i = offset - 1; i >= 0; i--)
+			data[i] = 0;
+		nbits -= 64 * offset;
+	}
+	data[4] = __shiftleft128(data[3], data[4], nbits);
+	data[3] = __shiftleft128(data[2], data[3], nbits);
+	data[2] = __shiftleft128(data[1], data[2], nbits);
+	data[1] = __shiftleft128(data[0], data[1], nbits);
+	data[0] = data[0] << nbits;
+}
+
+void EcInt::MulModP(EcInt& val)
+{	
+	u64 buff[8], tmp[5], h;
+	//calc 512 bits
+	Mul256_by_64(val.data, data[0], buff);
+	Mul256_by_64(val.data, data[1], tmp);
+	Add320_to_256(buff + 1, tmp);
+	Mul256_by_64(val.data, data[2], tmp);
+	Add320_to_256(buff + 2, tmp);
+	Mul256_by_64(val.data, data[3], tmp);
+	Add320_to_256(buff + 3, tmp);
+	//fast mod P
+	Mul256_by_64(buff + 4, P_REV, tmp);
+	u8 c = _addcarry_u64(0, buff[0], tmp[0], buff);
+	c = _addcarry_u64(c, buff[1], tmp[1], buff + 1);
+	c = _addcarry_u64(c, buff[2], tmp[2], buff + 2);
+	tmp[4] += _addcarry_u64(c, buff[3], tmp[3], buff + 3);
+	c = _addcarry_u64(0, buff[0], _umul128(tmp[4], P_REV, &h), data);
+	c = _addcarry_u64(c, buff[1], h, data + 1);
+	c = _addcarry_u64(c, 0, buff[2], data + 2);
+	data[4] = _addcarry_u64(c, buff[3], 0, data + 3);
+	while (data[4])
+		Sub(g_P);
+}
+
+void EcInt::Mul_u64(EcInt& val, u64 multiplier)
+{
+	Assign(val);
+	Mul320_by_64(data, (u64)multiplier, data);
+}
+
+void EcInt::Mul_i64(EcInt& val, i64 multiplier)
+{
+	Assign(val);
+	if (multiplier < 0)
+	{
+		Neg();
+		multiplier = -multiplier;
+	}
+	Mul320_by_64(data, (u64)multiplier, data);
+}
+
+#define APPLY_DIV_SHIFT() kbnt -= index; val >>= index; matrix[0] <<= index; matrix[1] <<= index; 
+	
+// https://tches.iacr.org/index.php/TCHES/article/download/8298/7648/4494
+//a bit tricky
+void DIV_62(i64& kbnt, i64 modp, i64 val, i64* matrix)
+{
+	int index, cnt;
+	_BitScanForward64((u32*)&index, val | 0x4000000000000000);
+	APPLY_DIV_SHIFT();
+	cnt = 62 - index;
+	while (cnt > 0)
+	{
+		if (kbnt < 0)
+		{
+			kbnt = -kbnt;
+			i64 tmp = -modp; modp = val; val = tmp;
+			tmp = -matrix[0]; matrix[0] = matrix[2]; matrix[2] = tmp;
+			tmp = -matrix[1]; matrix[1] = matrix[3]; matrix[3] = tmp;
+		}
+		int thr = cnt;
+		if ((kbnt + 1) < cnt)
+			thr = (int)(kbnt + 1);
+		i64 mul = (-modp * val) & ((UINT64_MAX >> (64 - thr)) & 0x07);
+		val += (modp * mul);
+		matrix[2] += (matrix[0] * mul);
+		matrix[3] += (matrix[1] * mul);
+		_BitScanForward64((u32*)&index, val | (1ull << cnt));
+		APPLY_DIV_SHIFT();
+		cnt -= index;
+	}
+}
+
+void EcInt::InvModP()
+{
+	i64 matrix[4];
+	EcInt result, a, tmp, tmp2;
+	EcInt modp, val;
+	i64 kbnt = -1;
+	matrix[1] = matrix[2] = 0;
+	matrix[0] = matrix[3] = 1;	
+	DIV_62(kbnt, g_P.data[0], data[0], matrix);
+	modp.Mul_i64(g_P, matrix[0]);
+	tmp.Mul_i64(*this, matrix[1]);
+	modp.Add(tmp);
+	modp.ShiftRight(62);
+	val.Mul_i64(g_P, matrix[2]);
+	tmp.Mul_i64(*this, matrix[3]);
+	val.Add(tmp);
+	val.ShiftRight(62);
+	if (matrix[1] >= 0)
+		result.Set(matrix[1]);
+	else
+	{
+		result.Set(-matrix[1]);
+		result.Neg();
+	}
+	if (matrix[3] >= 0)
+		a.Set(matrix[3]);
+	else
+	{ 
+		a.Set(-matrix[3]);
+		a.Neg();
+	}
+	Mul320_by_64(g_P.data, (result.data[0] * 0xD838091DD2253531) & 0x3FFFFFFFFFFFFFFF, tmp.data);
+	result.Add(tmp);
+	result.ShiftRight(62);
+	Mul320_by_64(g_P.data, (a.data[0] * 0xD838091DD2253531) & 0x3FFFFFFFFFFFFFFF, tmp.data);
+	a.Add(tmp);
+	a.ShiftRight(62);
+	
+	while (val.data[0] || val.data[1] || val.data[2] || val.data[3])
+	{
+		matrix[1] = matrix[2] = 0;
+		matrix[0] = matrix[3] = 1;	
+		DIV_62(kbnt, modp.data[0], val.data[0], matrix);
+		tmp.Mul_i64(modp, matrix[0]);
+		tmp2.Mul_i64(val, matrix[1]);
+		tmp.Add(tmp2);
+		tmp2.Mul_i64(val, matrix[3]);
+		val.Mul_i64(modp, matrix[2]);
+		val.Add(tmp2);
+		val.ShiftRight(62);
+		modp = tmp;
+		modp.ShiftRight(62);
+		tmp.Mul_i64(result, matrix[0]);
+		tmp2.Mul_i64(a, matrix[1]);
+		tmp.Add(tmp2);
+		tmp2.Mul_i64(a, matrix[3]);
+		a.Mul_i64(result, matrix[2]);
+		a.Add(tmp2);
+		Mul320_by_64(g_P.data, (a.data[0] * 0xD838091DD2253531) & 0x3FFFFFFFFFFFFFFF, tmp2.data);
+		a.Add(tmp2);
+		a.ShiftRight(62);	
+		Mul320_by_64(g_P.data, (tmp.data[0] * 0xD838091DD2253531) & 0x3FFFFFFFFFFFFFFF, tmp2.data);
+		result = tmp;
+		result.Add(tmp2);
+		result.ShiftRight(62);
+	}
+	Assign(result);
+	if (modp.data[4] >> 63)
+	{
+		Neg();
+		modp.Neg();	
+	}
+
+	if (modp.data[0] == 1) 
+	{
+		if (data[4] >> 63)
+			Add(g_P);
+		if (data[4] >> 63)
+			Add(g_P);
+		if (!IsLessThanU(g_P))
+			Sub(g_P);
+		if (!IsLessThanU(g_P))
+			Sub(g_P);
+	}
+	else
+		SetZero(); //error
+}
+
+// x = a^ { (p + 1) / 4 } mod p
+void EcInt::SqrtModP()
+{
+	EcInt one, res;
+	one.Set(1);
+	EcInt exp = g_P;
+	exp.Add(one);
+	exp.ShiftRight(2);
+	res.Set(1);
+	EcInt cur = *this;
+	while (!exp.IsZero())
+	{
+		if (exp.data[0] & 1)
+			res.MulModP(cur);
+		EcInt tmp = cur;
+		tmp.MulModP(cur);
+		cur = tmp;
+		exp.ShiftRight(1);
+	}
+	*this = res;
+}
