@@ -14,6 +14,7 @@
 #include <csignal>
 #include <atomic>
 #include <vector>
+#include <atomic>
 #include <cinttypes> // Required for PRIu64
 
 #include "cuda_runtime.h"
@@ -49,7 +50,7 @@ struct TInParams {
 static volatile sig_atomic_t g_sigint = 0;
 static int g_gpucnt = 0;
 static bool g_inited = false;
-static int g_threadcnt = 0;
+static std::atomic<int> g_threadcnt{0};
 static GpuPuzzle* g_GpuPuzzles[MAX_GPU_CNT];
 
 static void handle_sigint(int) {
@@ -356,7 +357,8 @@ uint32_t __stdcall puzzle_thr_proc(void* data)
 {
 	GpuPuzzle* puzzle = (GpuPuzzle*)data;
 	puzzle->Execute();
-	InterlockedDecrement(&g_threadcnt);
+	//InterlockedDecrement(&g_threadcnt);
+	g_threadcnt.fetch_sub(1, std::memory_order_acq_rel);
 	return 0;
 }
 #else
@@ -364,7 +366,8 @@ void* puzzle_thr_proc(void* data)
 {
 	GpuPuzzle* puzzle = (GpuPuzzle*)data;
 	puzzle->Execute();
-	__sync_fetch_and_sub(&g_threadcnt, 1);
+	//__sync_fetch_and_sub(&g_threadcnt, 1);
+	g_threadcnt.fetch_sub(1, std::memory_order_acq_rel);
 	return 0;
 }
 #endif
@@ -464,7 +467,7 @@ bool find_key(TOutParams& pParams) {
 	u64 tm0 = tm_stats;
 	
 	// wait cycle
-	while (g_threadcnt && !g_sigint) {
+	while (g_threadcnt.load(std::memory_order_acquire) && !g_sigint) {
 		sleep(1);
 		
 		if (GetTickCount64() - tm_stats > SHOW_STAT_INTERVAL_SECS * 1000)

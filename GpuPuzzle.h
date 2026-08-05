@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "EcInt.h"
 #include "Defs.h"
 
@@ -8,7 +10,7 @@
 class GpuPuzzle
 {
 private:
-	bool m_stopFlag;
+	std::atomic<bool> m_stopFlag;
 	EcInt m_start;
 	EcInt m_end;
 	
