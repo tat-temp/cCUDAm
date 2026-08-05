@@ -12,6 +12,8 @@
 #define BYTES_PER_THREAD (2ull*4ull*sizeof(uint64_t))
 
 cudaError_t CallGpuKernel(TKparams& Kparams);
+cudaError_t CudaSetupKernel();
+
 cudaError_t CallGpuMulKernel(
 	uint64_t blocks,
 	uint64_t blockSize,
@@ -77,6 +79,10 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	if (err != cudaSuccess) {
 		return result;
 	}
+	
+	cudaSetDeviceFlags(cudaDeviceMapHost);
+	cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+	
 #else
 	std::cout << "======================================\r\n";
 	std::cout << std::left << std::setw(20) << " Device (GPU)       " << " : " << CudaIndex << "\r\n";
@@ -573,6 +579,8 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 	ck(CudaCopyGy(hParams->gy, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gy");
 	ck(CudaCopyJx(&hParams->bx), "ToSymbol c_Jx");
 	ck(CudaCopyJy(&hParams->by), "ToSymbol c_Jy");
+	
+	ck(CudaSetupKernel(), "setup MainKernel");
 
 	kParams->scalars = d_start_scalars;
 	kParams->counts = d_counts;

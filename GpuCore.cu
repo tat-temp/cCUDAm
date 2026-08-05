@@ -286,3 +286,7 @@ cudaError_t CudaCopyJx(const void* value) {
 cudaError_t CudaCopyJy(const void* value) {
 	return cudaMemcpyToSymbol(c_Jy, value, 4 * sizeof(uint64_t));
 }
+
+cudaError_t CudaSetupKernel() {
+	return cudaFuncSetCacheConfig(TestKernel, cudaFuncCachePreferL1);
+}
