@@ -71,21 +71,17 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	bool result = false;
 	cudaError_t err;
 	cudaDeviceProp prop{};
+	uint64_t threadsPerBlock;
+	uint64_t threadsTotal;
 
     std::memset(m_speed_stat, 0, sizeof(m_speed_stat));
     std::memset(&hParams, 0, sizeof(THparams));
     std::memset(&this->Kparams, 0, sizeof(TKparams));
 
 #ifndef NO_GPU_MODE	
-	if (cudaGetDeviceProperties(&prop, CudaIndex) != cudaSuccess) {
-        std::cerr << "CUDA init error\n";
-		return result;
-    }
+	ck(cudaGetDeviceProperties(&prop, CudaIndex), "CUDA init error");
 	
-	err = cudaSetDevice(CudaIndex);
-	if (err != cudaSuccess) {
-		return result;
-	}
+	ck(cudaSetDevice(CudaIndex), "cudaSetDevice failed");
 	
 	ck(cudaSetDeviceFlags(cudaDeviceMapHost | cudaDeviceScheduleBlockingSync), "set device flags");
 	ck(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1), "set cache config");
@@ -103,8 +99,8 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 #endif
 
 	//cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
-	uint64_t threadsPerBlock = PickThreadsPerBlock(&prop);
-	uint64_t threadsTotal = GetThreadsCount(&prop, pRange, blockPerSm, threadsPerBlock, batchSize, (uint64_t)dwSlices);
+	threadsPerBlock = PickThreadsPerBlock(&prop);
+	threadsTotal = GetThreadsCount(&prop, pRange, blockPerSm, threadsPerBlock, batchSize, (uint64_t)dwSlices);
 
 #if DEBUG_MODE > 0
 	std::cout << "GPU " << CudaIndex << ": Threads/Block: " << threadsPerBlock << " Total threads: " << threadsTotal << "\r\n";
