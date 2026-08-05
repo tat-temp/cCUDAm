@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cstring>
 #include <cinttypes> // Required for PRIu64
+#include <thread> // Required for std::this_thread::sleep_for
 #include <cuda_runtime.h>
 
 #include "GpuPuzzle.h"
@@ -70,7 +71,11 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 		return result;
 	}
 #else
-	std::cout << "GPU " << CudaIndex << ": Points/Batch: " << batchSize << " Blocks/SM " << blockPerSm << " Slices: " << dwSlices << "\r\n";
+	std::cout << "GPU: " << CudaIndex <<
+		" Points/Batch: " << batchSize <<
+		" Blocks/SM: " << blockPerSm <<
+		" Slices: " << dwSlices <<
+		"\r\n";
 
 	prop.maxThreadsPerBlock = 1024;
 	prop.totalGlobalMem = (uint64_t)32 * 1024 * 1024 * 1024;
@@ -115,6 +120,17 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	Kparams.batches_per_launch = dwSlices;
 	Kparams.threads_total = threadsTotal;
 
+	std::cout << "******************************" << "\r\n" <<
+		         "*        GPU" << std::setw(2) << CudaIndex << "               *" << "\r\n" <<
+			     "******************************" << "\r\n" <<
+     	" Blocks: " << Kparams.BlockCnt << "\r\n" <<
+		" Threads: " << Kparams.threads_total << "\r\n" <<
+		" Threads/Block: " << Kparams.BlockSize << "\r\n" <<
+		" Batch size: " << Kparams.batch_size << "\r\n" <<
+		" Batches/thread: " << Kparams.batches_per_launch << "\r\n" <<
+		" Points/run: " << Kparams.points_per_run <<  "\r\n" <<
+		"\r\n";
+
 	result = true;
 	
 LExit:
@@ -155,7 +171,7 @@ void GpuPuzzle::Execute() {
 #ifndef NO_GPU_MODE
 		CallGpuKernel(Kparams);
 #else
-		sleep(1);
+		std::this_thread::sleep_for(std::chrono::milliseconds(11));
 #endif
 		
 		{

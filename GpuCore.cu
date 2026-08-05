@@ -2,6 +2,7 @@
 #include "Math.cuh"
 #include "GpuCore.cuh"
 #include "GpuHash.cuh"
+#include "GpuHash.cu"
 #include "Math.cuh"
 
 #define BLOCK_CNT	gridDim.x
