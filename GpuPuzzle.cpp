@@ -11,8 +11,8 @@
 
 #define BYTES_PER_THREAD (2ull*4ull*sizeof(uint64_t))
 
-void CallGpuKernel(TKparams& Kparams);
-void CallGpuMulKernel(
+cudaError_t CallGpuKernel(TKparams& Kparams);
+cudaError_t CallGpuMulKernel(
 	uint64_t blocks,
 	uint64_t blockSize,
 	const uint64_t* scalars,
@@ -174,7 +174,17 @@ void GpuPuzzle::Execute() {
 		u64 t1 = GetTickCount64();
 
 #ifndef NO_GPU_MODE
-		CallGpuKernel(Kparams);
+		#define ck(e, msg) { \
+			if (e != cudaSuccess) { \
+				std::cerr << msg << ": " << cudaGetErrorString(e) << "\n"; \
+				goto LExit; \
+			} \
+		}; 
+	
+		ck(CallGpuKernel(Kparams), "gpuMainKernel call");
+		
+		ck(cudaDeviceSynchronize(), "gpuMainKernel sync");
+        ck(cudaGetLastError(), "gpuMainKernel launch");
 #else
 		std::this_thread::sleep_for(std::chrono::milliseconds(11));
 #endif
@@ -186,12 +196,13 @@ void GpuPuzzle::Execute() {
 			
 			uint64_t cur_speed = (uint64_t)(pnt_cnt / (1000 * tm));
 			//printf("GPU %d kernel time %d ms, speed %d MH\r\n", CudaIndex, (int)tm, cur_speed);
-			//std::cout << "GPU " << CudaIndex << " kernel time " << tm << " ms, speed " << cur_speed << " MH Idx: " << m_stat_idx << "\r\n";
+			std::cout << "GPU " << CudaIndex << " kernel time " << tm << " ms, speed " << cur_speed << " MH Idx: " << m_stat_idx << "\r\n";
 
 			m_speed_stat[m_stat_idx] = cur_speed;
 			m_stat_idx = (m_stat_idx + 1) % STATS_WND_SIZE;
 		}
 	}
+LExit:
 
 	Release();
 }
@@ -514,7 +525,7 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 #endif
 		uint64_t mulBlocks = (uint64_t)((threadsTotal + threadsPerBlock - 1) / threadsPerBlock);;
 		
-		CallGpuMulKernel(mulBlocks, threadsPerBlock, d_start_scalars, d_Px, d_Py, (uint32_t)threadsTotal);
+		ck(CallGpuMulKernel(mulBlocks, threadsPerBlock, d_start_scalars, d_Px, d_Py, (uint32_t)threadsTotal), "GpuMulKernel call");
 
 		ck(cudaDeviceSynchronize(), "gpuMulKernel sync");
         ck(cudaGetLastError(), "gpuMulKernel launch");

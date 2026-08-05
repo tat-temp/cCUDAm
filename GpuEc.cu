@@ -208,17 +208,25 @@ extern "C" __global__ void scalarMulKernelBase(const uint64_t* scalars_in, uint6
     scalarMulBaseAffine(scalar, outx, outy);
 }
 
-void CallGpuMulKernel(
+cudaError_t CallGpuMulKernel(
 	uint64_t blocks,
 	uint64_t blockSize,
 	const uint64_t* scalars,
 	uint64_t* x,
 	uint64_t* y,
 	uint32_t count) {
+	cudaError_t err;
+	
 	scalarMulKernelBase <<< blocks, blockSize, 0 >>> (
 		scalars,
 		x,
 		y,
 		count
 	);
+	
+	err = cudaGetLastError();
+	
+	if (err != cudaSuccess) return err;
+	
+	return cudaSuccess;
 }
