@@ -27,6 +27,7 @@ struct THparams
 	const uint64_t* gy;
 	uint64_t bx[4];
 	uint64_t by[4];
+	const uint8_t* hash160;
 };
 
 uint64_t PickThreadsPerBlock(cudaDeviceProp* prop);
@@ -36,10 +37,10 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t b
 bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize);
 void ClearHParams(THparams* hParams);
 void ClearKParams(TKparams* kParams);
-bool PrepareHost(THparams* hParams, const uint64_t* start, const uint64_t* range, const uint8_t* hash160, uint64_t threadsTotal, uint64_t batchSize);
+bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize);
 bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTotal, uint64_t batchSize);
 
-void GpuPuzzle::GpuPuzzle() {
+void GpuPuzzle() {
 	
 }
 
@@ -92,7 +93,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 		return result;
 	}
 
-	if (!PrepareHost(&hParams, pStart, pRange, pHash, threadsTotal, batchSize)) {
+	if (!PrepareHost(&hParams, pStart, pHash, pRange, threadsTotal, batchSize)) {
 		return result;
 	}
 
@@ -284,7 +285,7 @@ void ClearKParams(TKparams* kParams) {
 #endif
 }
 
-bool PrepareHost(THparams* hParams, const uint64_t* start, const uint64_t* range, const uint8_t* hash160, uint64_t threadsTotal, uint64_t batchSize) {
+bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize) {
 	uint64_t per_thread_cnt[4];
 	uint64_t r1 = 0ull;
 	uint64_t* h_counts256     = nullptr;
@@ -358,21 +359,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint64_t* range
         }
     }
 	
-	// c_target_words
-	{
-#if DEBUG_MODE > 0
-		printf("\r\n---Target hash (truncated)---\r\n%s\r\n", formatHex256((uint64_t*)hash160).c_str());
-#endif
-        uint32_t target_words[5];
-        target_words[0] = (uint32_t)hash160[ 0] | ((uint32_t)hash160[ 1] << 8) | ((uint32_t)hash160[ 2] << 16) | ((uint32_t)hash160[ 3] << 24);
-        target_words[1] = (uint32_t)hash160[ 4] | ((uint32_t)hash160[ 5] << 8) | ((uint32_t)hash160[ 6] << 16) | ((uint32_t)hash160[ 7] << 24);
-        target_words[2] = (uint32_t)hash160[ 8] | ((uint32_t)hash160[ 9] << 8) | ((uint32_t)hash160[10] << 16) | ((uint32_t)hash160[11] << 24);
-        target_words[3] = (uint32_t)hash160[12] | ((uint32_t)hash160[13] << 8) | ((uint32_t)hash160[14] << 16) | ((uint32_t)hash160[15] << 24);
-        target_words[4] = (uint32_t)hash160[16] | ((uint32_t)hash160[17] << 8) | ((uint32_t)hash160[18] << 16) | ((uint32_t)hash160[19] << 24);
-        //cudaMemcpyToSymbol(c_target_words, target_words, sizeof(target_words));
-		CudaCopyTargetWords(&target_words);
-    }
-	
 	// p(x,y)
 	{
 #if DEBUG_MODE > 0
@@ -438,6 +424,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint64_t* range
 	hParams->scalars = h_start_scalars;
 	hParams->px = h_px;
 	hParams->py = h_py;
+	hParams->hash160 = hash160;
 	
 	result = true;
 	
@@ -492,6 +479,20 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
     ck(cudaMemcpy(d_Px,        		hParams->px,  		threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy px");
     ck(cudaMemcpy(d_Py,        		hParams->py,  		threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy py");
 
+	// c_target_words
+	{
+#if DEBUG_MODE > 0
+		printf("\r\n---Target hash (truncated)---\r\n%s\r\n", formatHex256((uint64_t*)hash160).c_str());
+#endif
+        uint32_t target_words[5];
+        target_words[0] = (uint32_t)hParams->hash160[ 0] | ((uint32_t)hParams->hash160[ 1] << 8) | ((uint32_t)hParams->hash160[ 2] << 16) | ((uint32_t)hParams->hash160[ 3] << 24);
+        target_words[1] = (uint32_t)hParams->hash160[ 4] | ((uint32_t)hParams->hash160[ 5] << 8) | ((uint32_t)hParams->hash160[ 6] << 16) | ((uint32_t)hParams->hash160[ 7] << 24);
+        target_words[2] = (uint32_t)hParams->hash160[ 8] | ((uint32_t)hParams->hash160[ 9] << 8) | ((uint32_t)hParams->hash160[10] << 16) | ((uint32_t)hParams->hash160[11] << 24);
+        target_words[3] = (uint32_t)hParams->hash160[12] | ((uint32_t)hParams->hash160[13] << 8) | ((uint32_t)hParams->hash160[14] << 16) | ((uint32_t)hParams->hash160[15] << 24);
+        target_words[4] = (uint32_t)hParams->hash160[16] | ((uint32_t)hParams->hash160[17] << 8) | ((uint32_t)hParams->hash160[18] << 16) | ((uint32_t)hParams->hash160[19] << 24);
+        //cudaMemcpyToSymbol(c_target_words, target_words, sizeof(target_words));
+		ck(CudaCopyTargetWords(&target_words), "ToSymbol c_target_words");
+    }
 	//ck(cudaMemcpyToSymbol(c_Gx, 	hParams->gx, 		(batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gx");
 	//ck(cudaMemcpyToSymbol(c_Gy, 	hParams->gy, 		(batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gy");
 	//ck(cudaMemcpyToSymbol(c_Jx, 	hParams->bx, 		4 * sizeof(uint64_t)), "ToSymbol c_Jx");
