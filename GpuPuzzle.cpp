@@ -262,7 +262,7 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t b
 	uint64_t maxThreadsByMem;
 
 	maxThreadsByMem = GetMaxThreadsByMem(prop);
-    printf("maxThreadsByMem: %llu\r\n", (unsigned long long)maxThreadsByMem);
+    //printf("maxThreadsByMem: %llu\r\n", (unsigned long long)maxThreadsByMem);
 	
 	// max threads required
     div_256_u64(range, (uint64_t)batchSize * slises, q_div_batch, &r_div_batch);
@@ -270,22 +270,23 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t b
 		add_256_u64(q_div_batch, (uint64_t)1, q_div_batch);
 	}
 	maxThreadsByRange = q_div_batch[0];
-	printf("maxThreadsByRange: %llu\r\n", (unsigned long long)maxThreadsByRange);
+	//printf("maxThreadsByRange: %llu\r\n", (unsigned long long)maxThreadsByRange);
 
 	// user upper
 	maxThreadsByUser = (uint64_t)prop->multiProcessorCount * blockPerSm * threadsPerBlock;
     if (maxThreadsByUser == 0ull) maxThreadsByUser = UINT64_MAX;
-	printf("maxThreadsByUser: %llu\r\n", (unsigned long long)maxThreadsByUser);
+	//printf("maxThreadsByUser: %llu\r\n", (unsigned long long)maxThreadsByUser);
 	
 	// effective upper
 	upper = maxThreadsByMem;
     if (maxThreadsByRange < upper) upper = maxThreadsByRange;
     if (maxThreadsByUser  < upper) upper = maxThreadsByUser;
-	printf("upper: %llu\r\n", (unsigned long long)upper);
+	//printf("upper: %llu\r\n", (unsigned long long)upper);
 	
 	uint64_t res = PickThreadsTotal(upper, threadsPerBlock, maxThreadsByRange);
-	printf("res: %llu\r\n", (unsigned long long)res);
-	return res;
+	//printf("res: %llu\r\n", (unsigned long long)res);
+	//return res;
+	return 340;
 }
 
 bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize) {
