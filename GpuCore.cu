@@ -112,6 +112,21 @@ __global__ void TestKernel(
 
                 sub_mod(s, x1, px3); 
                 mul_mod(s, s, lam);
+
+				uint8_t odd;
+				sub_mod_is_odd(&odd, s, y1);
+
+				uint8_t prefix = odd ? 0x03 : 0x02;
+				uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(px3));   // by-value ABI: 1 reg out
+				bool pref = (hw2 == target_prefix);
+				if (__any_sync(full_mask, pref)) {
+					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
+					if (full) {
+					}
+					
+					if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
+				}
+				
 			}
 			
 			{
@@ -132,6 +147,20 @@ __global__ void TestKernel(
 
                 sub_mod(s, x1, px3);
                 mul_mod(s, s, lam);
+
+				uint8_t odd;
+				sub_mod_is_odd(&odd, s, y1);
+
+				uint8_t prefix = odd ? 0x03 : 0x02;
+				uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(px3));   // by-value ABI: 1 reg out
+				bool pref = (hw2 == target_prefix);
+				if (__any_sync(full_mask, pref)) {
+					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
+					if (full) {
+					}
+					
+					if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
+				}
 			}
 			
 			uint64_t gxmi[4];
@@ -160,6 +189,20 @@ __global__ void TestKernel(
 
             sub_mod(s, x1, px3);
             mul_mod(s, s, lam);
+
+			uint8_t odd;
+			sub_mod_is_odd(&odd, s, y1);
+
+			uint8_t prefix = odd ? 0x03 : 0x02;
+			uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(px3));   // by-value ABI: 1 reg out
+			bool pref = (hw2 == target_prefix);
+			if (__any_sync(full_mask, pref)) {
+				bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
+				if (full) {
+				}
+				
+				if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
+			}
 
             uint64_t last_dx[4];
             sub_mod(last_dx, &c_Gx[(size_t)i*4], x1);

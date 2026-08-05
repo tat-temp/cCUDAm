@@ -128,6 +128,21 @@ __device__ __forceinline__ void sub_mod3(uint64_t* r, const uint64_t* a, const u
     }
 }
 
+__device__ __forceinline__ void sub_mod_is_odd(uint8_t* parity, const uint64_t* a, const uint64_t* b)
+{
+	uint32_t borrow;
+	uint64_t r[4]; 
+	
+    sub_cc_64(r[0], a[0], b[0]);
+    subc_cc_64(r[1], a[1], b[1]);
+    subc_cc_64(r[2], a[2], b[2]);
+    subc_cc_64(r[3], a[3], b[3]);
+	
+    subc_32(borrow, 0, 0);
+	
+    *parity = (r[0] & 1) ^ (borrow & 1);
+}
+
 //mul 256bit by 64bit
 __device__ __forceinline__ void mul_256_by_64(uint64_t* res, uint64_t* val256, uint64_t val64)
 {
