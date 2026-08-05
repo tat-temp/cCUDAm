@@ -291,8 +291,7 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t b
 	
 	uint64_t res = PickThreadsTotal(upper, threadsPerBlock, maxThreadsByRange);
 	//printf("res: %llu\r\n", (unsigned long long)res);
-	//return res;
-	return 340 * 256;
+	return res;
 }
 
 bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize) {
@@ -301,17 +300,17 @@ bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_
 	uint64_t qq[4];
 	uint64_t rr = 0ull;
 
-    //div_256_u64(range, threadsTotal, per_thread_cnt, &r_u64);
-	//if (r_u64 != 0ull) {
-	//	std::cerr << "Internal error: range_len not divisible by threadsTotal.\n";
-	//	return false;
-	//}
+    div_256_u64(range, threadsTotal, per_thread_cnt, &r_u64);
+	if (r_u64 != 0ull) {
+		std::cerr << "Internal error: range_len not divisible by threadsTotal.\n";
+		return false;
+	}
 	
-	//div_256_u64(per_thread_cnt, batchSize, qq, &rr);
-    //if (rr != 0ull) {
-	//	std::cerr << "Internal error: per-thread count is not a multiple of batch size.\n";
-	//	return false;
-	//}
+	div_256_u64(per_thread_cnt, batchSize, qq, &rr);
+    if (rr != 0ull) {
+		std::cerr << "Internal error: per-thread count is not a multiple of batch size.\n";
+		return false;
+	}
 	
 	return true;
 }
