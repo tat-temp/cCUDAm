@@ -1,6 +1,7 @@
 #include "Defs.h"
 #include "Math.cuh"
 #include "GpuCore.cuh"
+#include "GpuHash.cuh"
 #include "Math.cuh"
 
 #define BLOCK_CNT	gridDim.x
@@ -31,12 +32,12 @@ __global__ void TestKernel(
     if (gid >= threadsTotal) return;
 	
 	//const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));
-    //const unsigned full_mask = 0xFFFFFFFFu;
+    const unsigned full_mask = 0xFFFFFFFFu;
 	
 	// Filter on hash160 WORD 2, not word 0: word 2 is the cheapest of the five to produce
     // (its RIPEMD-160 inputs are final 7 rounds earlier -- see CUDAHash.cu). Any single word
     // is an equally selective 32-bit filter, so this is a free choice.
-    //const uint32_t target_prefix = c_target_words[2];
+    const uint32_t target_prefix = c_target_words[2];
 	
 	uint64_t x1[4], y1[4], s1[4], rem[4];
 	// GS: cache lane ????
@@ -49,9 +50,11 @@ __global__ void TestKernel(
 	
 	uint32_t batches_done = 0;
 	while (batches_done < batches_per_launch && ge256_u64(rem, (uint64_t)B)) {
-		//uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
-		//uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(x1));   // by-value ABI: 1 reg out
-        //bool pref = (hw2 == target_prefix);
+		uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
+		uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(x1));   // by-value ABI: 1 reg out
+        bool pref = (hw2 == target_prefix);
+		if (__any_sync(full_mask, pref)) {
+		}
 		
 		uint64_t subp[MAX_BATCH_SIZE / 2][4];
 		uint64_t acc[4], tmp[4];

@@ -47,7 +47,7 @@ $(TARGET): $(CPP_OBJECTS) $(CU_OBJECTS)
 %.o: %.cpp $(HDRS)
 	$(CC) $(CCFLAGS) -c $< -o $@
 
-%.o: %.cu $(HDRS)
+%.o: %.cu $(HDRS) GpuHash.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 # ---- Codegen inspection (no effect on the shipped binary), like cCUDA's ptxinfo target ----
