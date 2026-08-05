@@ -9,7 +9,7 @@ CC        := g++
 # `make sass SM=89`, or a space-separated list `make SM="86 89"`. Empty = all archs above.
 SM ?= $(sm)
 ifeq ($(strip $(SM)),)
-SM_ARCHS  := 89 120
+SM_ARCHS  := 120
 else
 SM_ARCHS  := $(SM)
 endif

@@ -78,11 +78,11 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 		return result;
 	}
 #else
-	std::cout << "GPU: " << CudaIndex <<
-		" Points/Batch: " << batchSize <<
-		" Blocks/SM: " << blockPerSm <<
-		" Slices: " << dwSlices <<
-		"\r\n";
+	std::cout << "======================================\r\n";
+	std::cout << std::left << std::setw(20) << " Device (GPU)       " << " : " << CudaIndex << "\r\n";
+	std::cout << std::left << std::setw(20) << " Points/Batch       " << " : " << batchSize << "\r\n";
+	std::cout << std::left << std::setw(20) << " Blocks/SM          " << " : " << blockPerSm << "\r\n";
+	std::cout << std::left << std::setw(20) << " Slices             " << " : " << dwSlices << "\r\n";
 
 	prop.maxThreadsPerBlock = 1024;
 	prop.totalGlobalMem = (uint64_t)32 * 1024 * 1024 * 1024;
@@ -120,7 +120,8 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	}
 #endif
 
-	Kparams.BlockCnt = SMCnt * blockPerSm;
+	Kparams.BlockCnt = threadsTotal / threadsPerBlock; //SMCnt * blockPerSm;
+	if (threadsTotal % threadsPerBlock) Kparams.BlockCnt++;
 	Kparams.BlockSize = threadsPerBlock;
 	Kparams.points_per_run = batchSize * threadsTotal * dwSlices;
 	Kparams.batch_size = batchSize;
@@ -128,13 +129,13 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	Kparams.threads_total = threadsTotal;
 
 	std::cout << "**************************************\r\n";
-	std::cout << std::left << std::setw(20) << "Device (GPU)        " << " : " << CudaIndex << "\r\n";
-	std::cout << std::left << std::setw(20) << "Blocks              " << " : " << Kparams.BlockCnt << "\r\n";
-	std::cout << std::left << std::setw(20) << "Threads             " << " : " << Kparams.threads_total << "\r\n";
-	std::cout << std::left << std::setw(20) << "Threads/Block       " << " : " << Kparams.BlockSize << "\r\n";
-	std::cout << std::left << std::setw(20) << "Batch size          " << " : " << Kparams.batch_size << "\r\n";
-	std::cout << std::left << std::setw(20) << "Batches/thread      " << " : " << Kparams.batches_per_launch << "\r\n";
-	std::cout << std::left << std::setw(20) << "Points/run          " << " : " << Kparams.points_per_run <<  "\r\n";
+	std::cout << std::left << std::setw(20) << " Device (GPU)       " << " : " << CudaIndex << "\r\n";
+	std::cout << std::left << std::setw(20) << " Blocks             " << " : " << Kparams.BlockCnt << "\r\n";
+	std::cout << std::left << std::setw(20) << " Threads            " << " : " << Kparams.threads_total << "\r\n";
+	std::cout << std::left << std::setw(20) << " Threads/Block      " << " : " << Kparams.BlockSize << "\r\n";
+	std::cout << std::left << std::setw(20) << " Batch size         " << " : " << Kparams.batch_size << "\r\n";
+	std::cout << std::left << std::setw(20) << " Batches/thread     " << " : " << Kparams.batches_per_launch << "\r\n";
+	std::cout << std::left << std::setw(20) << " Points/run         " << " : " << Kparams.points_per_run <<  "\r\n";
 	
 	result = true;
 	
@@ -255,31 +256,36 @@ uint64_t PickThreadsTotal(uint64_t upper, uint64_t threadsPerBlock, uint64_t tot
 uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t blockPerSm, uint64_t threadsPerBlock, uint64_t batchSize, uint64_t slises) {
 	uint64_t q_div_batch[4];
 	uint64_t r_div_batch = 0ull;
-	uint64_t total_batches_u64;
-	uint64_t userUpper;
+	uint64_t maxThreadsByRange;
+	uint64_t maxThreadsByUser;
 	uint64_t upper;
 	uint64_t maxThreadsByMem;
 
 	maxThreadsByMem = GetMaxThreadsByMem(prop);
-    //printf("maxThreadsByMem: %llu\r\n", (unsigned long long)maxThreadsByMem);
+    printf("maxThreadsByMem: %llu\r\n", (unsigned long long)maxThreadsByMem);
 	
 	// max threads required
     div_256_u64(range, (uint64_t)batchSize * slises, q_div_batch, &r_div_batch);
-	total_batches_u64 = q_div_batch[0];
-	//printf("total_batches_u64: %llu\r\n", (unsigned long long)total_batches_u64);
+	if (r_div_batch) {
+		add_256_u64(q_div_batch, (uint64_t)1, q_div_batch);
+	}
+	maxThreadsByRange = q_div_batch[0];
+	printf("maxThreadsByRange: %llu\r\n", (unsigned long long)maxThreadsByRange);
 
 	// user upper
-	userUpper = (uint64_t)prop->multiProcessorCount * blockPerSm * threadsPerBlock;
-    if (userUpper == 0ull) userUpper = UINT64_MAX;
-	//printf("userUpper: %llu\r\n", (unsigned long long)userUpper);
+	maxThreadsByUser = (uint64_t)prop->multiProcessorCount * blockPerSm * threadsPerBlock;
+    if (maxThreadsByUser == 0ull) maxThreadsByUser = UINT64_MAX;
+	printf("maxThreadsByUser: %llu\r\n", (unsigned long long)maxThreadsByUser);
 	
 	// effective upper
 	upper = maxThreadsByMem;
-    if (total_batches_u64 < upper) upper = total_batches_u64;
-    if (userUpper         < upper) upper = userUpper;
-	//printf("upper: %llu\r\n", (unsigned long long)upper);
+    if (maxThreadsByRange < upper) upper = maxThreadsByRange;
+    if (maxThreadsByUser  < upper) upper = maxThreadsByUser;
+	printf("upper: %llu\r\n", (unsigned long long)upper);
 	
-	return PickThreadsTotal(upper, threadsPerBlock, total_batches_u64);
+	uint64_t res = PickThreadsTotal(upper, threadsPerBlock, maxThreadsByRange);
+	printf("res: %llu\r\n", (unsigned long long)res);
+	return res;
 }
 
 bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize) {

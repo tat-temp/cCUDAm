@@ -132,20 +132,42 @@ int parse_params(TInParams& pParams, int argc, char** argv) {
     pParams.runtime_batches_per_sm    = 512;
     pParams.slices_per_launch         = 64;
 	
+	auto parse_grid = [](const std::string& s, uint32_t& a_out, uint32_t& b_out)->bool {
+        size_t comma = s.find(',');
+        if (comma == std::string::npos) return false;
+        auto trim = [](std::string& z){
+            size_t p1 = z.find_first_not_of(" \t");
+            size_t p2 = z.find_last_not_of(" \t");
+            if (p1 == std::string::npos) { z.clear(); return; }
+            z = z.substr(p1, p2 - p1 + 1);
+        };
+        std::string a_str = s.substr(0, comma);
+        std::string b_str = s.substr(comma + 1);
+        trim(a_str); trim(b_str);
+        if (a_str.empty() || b_str.empty()) return false;
+        char* endp=nullptr;
+        unsigned long aa = std::strtoul(a_str.c_str(), &endp, 10); if (*endp) return false;
+        endp=nullptr;
+        unsigned long bb = std::strtoul(b_str.c_str(), &endp, 10); if (*endp) return false;
+        if (aa == 0ul || bb == 0ul) return false;
+        if (aa > (1ul<<20) || bb > (1ul<<20)) return false;
+        a_out=(uint32_t)aa; b_out=(uint32_t)bb; return true;
+    };
+	
 	for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if      (arg == "--target-hash160" && i + 1 < argc) pParams.target_hash_hex = argv[++i];
         else if (arg == "--address"        && i + 1 < argc) pParams.address_b58     = argv[++i];
         else if (arg == "--range"          && i + 1 < argc) pParams.range_hex       = argv[++i];
-        //else if (arg == "--grid"           && i + 1 < argc) {
-        //    uint32_t a=0,b=0;
-        //    if (!parse_grid(argv[++i], a, b)) {
-        //        std::cerr << "Error: --grid expects \"A,B\" (positive integers).\n";
-        //        return EXIT_FAILURE;
-        //    }
-        //    pParams.runtime_points_batch_size = a;
-        //    pParams.runtime_batches_per_sm    = b;
-        //}
+        else if (arg == "--grid"           && i + 1 < argc) {
+            uint32_t a=0, b=0;
+            if (!parse_grid(argv[++i], a, b)) {
+                std::cerr << "Error: --grid expects \"A,B\" (positive integers).\n";
+                return EXIT_FAILURE;
+            }
+            pParams.runtime_points_batch_size = a;
+            pParams.runtime_batches_per_sm    = b;
+        }
         else if (arg == "--slices" && i + 1 < argc) {
             char* endp=nullptr;
             unsigned long v = std::strtoul(argv[++i], &endp, 10);
