@@ -173,8 +173,8 @@ void GpuPuzzle::Stop() {
 	m_stopFlag = true;
 }
 
-int GpuPuzzle::GetStatsSpeed() {
-	int res = m_speed_stat[0];
+uint64_t GpuPuzzle::GetStatsSpeed() {
+	uint64_t res = m_speed_stat[0];
 	for (int i = 1; i < STATS_WND_SIZE; i++) {
 		res += m_speed_stat[i];
 	}

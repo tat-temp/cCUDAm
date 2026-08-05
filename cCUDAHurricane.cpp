@@ -289,7 +289,7 @@ void init_gpus() {
 		g_gpucnt++;
 	}
 	
-	g_inited = true;
+	g_inited = g_gpucnt > 0;
 	
 	printf("Total GPUs for work: %d\r\n", g_gpucnt);
 }

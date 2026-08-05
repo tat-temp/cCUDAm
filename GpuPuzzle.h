@@ -29,5 +29,5 @@ public:
 	void Stop();
 	void Execute();
 
-	int GetStatsSpeed();
+	uint64_t GetStatsSpeed();
 };
