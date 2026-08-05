@@ -32,12 +32,16 @@ struct THparams
 uint64_t PickThreadsPerBlock(cudaDeviceProp* prop);
 uint64_t GetMaxThreadsByMem(cudaDeviceProp* prop);
 uint64_t PickThreadsTotal(uint64_t upper, uint64_t threadsPerBlock, uint64_t totalBatches);
-uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t blockPerSm, uint64_t threadsPerBlock, uint64_t batchSize);
+uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t blockPerSm, uint64_t threadsPerBlock, uint64_t batchSize, uint64_t slises);
 bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize);
 void ClearHParams(THparams* hParams);
 void ClearKParams(TKparams* kParams);
 bool PrepareHost(THparams* hParams, const uint64_t* start, const uint64_t* range, const uint8_t* hash160, uint64_t threadsTotal, uint64_t batchSize);
 bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTotal, uint64_t batchSize);
+
+void GpuPuzzle::GpuPuzzle() {
+	
+}
 
 bool GpuPuzzle::Start() {
 	
@@ -78,7 +82,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	
 	//cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
 	uint64_t threadsPerBlock = PickThreadsPerBlock(&prop);
-	uint64_t threadsTotal = GetThreadsCount(&prop, pRange, blockPerSm, threadsPerBlock, batchSize);
+	uint64_t threadsTotal = GetThreadsCount(&prop, pRange, blockPerSm, threadsPerBlock, batchSize, (uint64_t)dwSlices);
 
 #if DEBUG_MODE > 0
 	printf("GPU %d: Threads/Block: %llu Total threads: %llu\r\n", CudaIndex, (unsigned long long)threadsPerBlock, (unsigned long long)threadsTotal);
@@ -204,7 +208,7 @@ uint64_t PickThreadsTotal(uint64_t upper, uint64_t threadsPerBlock, uint64_t tot
 	return 0ull;
 }
 
-uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t blockPerSm, uint64_t threadsPerBlock, uint64_t batchSize) {
+uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t blockPerSm, uint64_t threadsPerBlock, uint64_t batchSize, uint64_t slises) {
 	uint64_t q_div_batch[4];
 	uint64_t r_div_batch = 0ull;
 	uint64_t total_batches_u64;
@@ -216,7 +220,7 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t b
     //printf("maxThreadsByMem: %llu\r\n", (unsigned long long)maxThreadsByMem);
 	
 	// max threads required
-    div_256_u64(range, batchSize, q_div_batch, &r_div_batch);
+    div_256_u64(range, (uint64_t)batchSize * slises, q_div_batch, &r_div_batch);
 	total_batches_u64 = q_div_batch[0];
 	//printf("total_batches_u64: %llu\r\n", (unsigned long long)total_batches_u64);
 

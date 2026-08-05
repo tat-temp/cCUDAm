@@ -299,7 +299,7 @@ __device__ __forceinline__ void add_320_to_256s(uint32_t* res, uint64_t _v1, uin
 	addc_32(res[9], 0, 0);
 }
 
-// r = a ^ 0.5 (mod P)
+// r = a ^ 2 (mod P)
 __device__ __forceinline__ void sqr_mod(uint64_t* r, uint64_t* aTmp)
 {
 	uint64_t buff[8], tmp[5], tmp2[2], tmp3, mm;
