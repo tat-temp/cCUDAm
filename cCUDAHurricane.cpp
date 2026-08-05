@@ -348,7 +348,7 @@ int init_g_points(TOutParams& pOutParams) {
 		}
 	}
 	
-	return (pOutParams.Gx == nullptr || pOutParams.Gy == nullptr) ? 0 : 1;
+	return (pOutParams.Gx == nullptr || pOutParams.Gy == nullptr) ? 1 : 0;
 }
 
 #ifdef _WIN32
