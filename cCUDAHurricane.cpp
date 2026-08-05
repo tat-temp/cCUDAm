@@ -74,14 +74,14 @@ int main(int argc, char** argv) {
 	TInParams inParams = {0};
 	TOutParams outParams = {0};
 	
-	printf("********************************************************************************\r\n");
-	printf("*                    CUDAHurricane v1.0 (c) 2026                               *\r\n");
-	printf("********************************************************************************\r\n\r\n");
+	std::cout << "********************************************************************************\r\n" <<
+				"*                    CUDAHurricane v1.0 (c) 2026                               *\r\n" <<
+				"********************************************************************************\r\n\r\n";
 
 #ifdef _WIN32
-	printf("Windows version\r\n");
+	std::cout << "Windows version\r\n";
 #else
-	printf("Linux version\r\n");
+	std::cout << "Linux version\r\n";
 #endif
 
 	Ec::InitEc();
@@ -237,7 +237,7 @@ void init_gpus() {
 		
 		g_inited = true;
 	
-		printf("Total GPUs for work: %d\r\n", g_gpucnt);
+		std::cout << "Total GPUs for work: "<< g_gpucnt << "\r\n";
 		
 		return;
 	}
@@ -249,7 +249,7 @@ void init_gpus() {
 	}
 	
 	if (!gcnt) {
-		printf("No suitable CUDA devices found.\r\n");
+		std::cout << "No suitable CUDA devices found.\r\n";
 		return;
 	}
 	
@@ -257,14 +257,14 @@ void init_gpus() {
 	cudaDriverGetVersion(&drv);
 	sprintf(drvver, "%d.%d/%d.%d", drv / 1000, (drv % 100) / 10, rt / 1000, (rt % 100) / 10);
 	
-	printf("CUDA devices: %d, CUDA driver/runtime: %s\r\n", gcnt, drvver);
+	std::cout << "CUDA devices: " << gcnt << ", CUDA driver/runtime: " << drvver << "\r\n";
 	
 	for (int i = 0; i < gcnt; i++)
 	{
 		cudaStatus = cudaSetDevice(i);
 		if (cudaStatus != cudaSuccess)
 		{
-			printf("cudaSetDevice for gpu %d failed!\r\n", i);
+			std::cout << "cudaSetDevice for gpu " << i << " failed!\r\n";
 			continue;
 		}
 
@@ -273,11 +273,14 @@ void init_gpus() {
 
 		cudaDeviceProp deviceProp;
 		cudaGetDeviceProperties(&deviceProp, i);
-		printf("GPU %d: %s, %.2f GB, %d CUs, cap %d.%d, PCI %d, L2 size: %d KB\r\n", i, deviceProp.name, ((float)(deviceProp.totalGlobalMem / (1024 * 1024))) / 1024.0f, deviceProp.multiProcessorCount, deviceProp.major, deviceProp.minor, deviceProp.pciBusID, deviceProp.l2CacheSize / 1024);
+		std::cout << "GPU " << i << ": " << deviceProp.name <<", " <<
+			std::fixed << std::setprecision(2) << std::setw(10) << ((float)(deviceProp.totalGlobalMem / (1024 * 1024))) / 1024.0f << " GB, " <<
+			deviceProp.multiProcessorCount << " CUs, cap " << deviceProp.major << "." << deviceProp.minor <<
+			", PCI " << deviceProp.pciBusID << ", L2 size: " << deviceProp.l2CacheSize / 1024 << " KB\r\n";
 		
 		if (deviceProp.major < 6)
 		{
-			printf("GPU %d - not supported, skip\r\n", i);
+			std::cout << "GPU " << i << " - not supported, skip\r\n";
 			continue;
 		}
 
@@ -291,7 +294,7 @@ void init_gpus() {
 	
 	g_inited = g_gpucnt > 0;
 	
-	printf("Total GPUs for work: %d\r\n", g_gpucnt);
+	std::cout << "Total GPUs for work: " << g_gpucnt << "\r\n";
 }
 
 int init_g_points(TOutParams& pOutParams) {
@@ -362,7 +365,9 @@ void show_stat(u64 tm_start, u64 range) {
 	int hours = (int)(sec - days * (3600 * 24)) / 3600;
 	int min = (int)(sec - days * (3600 * 24) - hours * 3600) / 60;
 	 
-	printf("Speed: %" PRIu64 " MKeys/s, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm\r\n", speed, days, hours, min, exp_days, exp_hours, exp_min);
+	std::cout << "Speed: " << speed << " MKeys/s, Time: " <<
+		days << "d:" << std::setw(2) << hours << "h:" << std::setw(2) << min << "m/" <<
+		exp_days << "d:" << std::setw(2) << exp_hours << "h:" << std::setw(2) << exp_min << "m\r\n";
 }
 
 bool find_key(TOutParams& pParams) {
@@ -405,9 +410,9 @@ bool find_key(TOutParams& pParams) {
 			pParams.slices_per_launch))
 		{
 			g_GpuPuzzles[i]->Failed = true;
-			printf("GPU %d: Prepare failed\r\n", g_GpuPuzzles[i]->CudaIndex);
+			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << ": Prepare failed\r\n";
 		} else {
-			printf("GPU %d: Prepared. start: %s length: %s\r\n", g_GpuPuzzles[i]->CudaIndex, formatHex256(current).c_str(), formatHex256(chunk_effective).c_str());
+			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << ": Prepared. start: " << formatHex256(current) << " length: " << formatHex256(chunk_effective) << "\r\n";
 			g_threadcnt++;
 		}
 		
@@ -417,7 +422,7 @@ bool find_key(TOutParams& pParams) {
 	for (int i = 0; i < g_gpucnt; i++)
 	{
 		if (g_GpuPuzzles[i]->Failed) {
-			printf("GPU %d: Skip work.\r\n", g_GpuPuzzles[i]->CudaIndex);
+			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << ": Skip work.\r\n";
 			continue;
 		}
 #ifdef _WIN32
@@ -441,7 +446,7 @@ bool find_key(TOutParams& pParams) {
 		}
 	}
 	
-	printf("Stopping work ...\r\n");
+	std::cout << "Stopping work ...\r\n";
 	for (int i = 0; i < g_gpucnt; i++) {
 		if (g_GpuPuzzles[i]->Failed) {
 			continue;

@@ -20,6 +20,8 @@ private:
 	bool Start();
 	void Release();
 public:
+	GpuPuzzle() : m_stopFlag(false), m_stat_idx(0), m_speed_stat{},
+              CudaIndex(0), SMCnt(0), Failed(false) { Kparams = {}; }
 	int CudaIndex; //gpu index in cuda
 	int SMCnt;
 	bool Failed;

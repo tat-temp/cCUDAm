@@ -40,10 +40,6 @@ void ClearKParams(TKparams* kParams);
 bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize);
 bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTotal, uint64_t batchSize);
 
-void GpuPuzzle() {
-	
-}
-
 bool GpuPuzzle::Start() {
 	
 	return true;
@@ -74,22 +70,28 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 		return result;
 	}
 #else
-	printf("GPU %d: Batch: %llu Blocks/SM %llu Slices: %i\r\n", CudaIndex, (unsigned long long)batchSize, (unsigned long long)blockPerSm, dwSlices);
+	std::cout << "GPU " << CudaIndex << ": Points/Batch: " << batchSize << " Blocks/SM " << blockPerSm << " Slices: " << dwSlices << "\r\n";
 
 	prop.maxThreadsPerBlock = 1024;
 	prop.totalGlobalMem = (uint64_t)32 * 1024 * 1024 * 1024;
 	prop.multiProcessorCount = 170;
 #endif
-	
+
 	//cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
 	uint64_t threadsPerBlock = PickThreadsPerBlock(&prop);
 	uint64_t threadsTotal = GetThreadsCount(&prop, pRange, blockPerSm, threadsPerBlock, batchSize, (uint64_t)dwSlices);
 
 #if DEBUG_MODE > 0
-	printf("GPU %d: Threads/Block: %llu Total threads: %llu\r\n", CudaIndex, (unsigned long long)threadsPerBlock, (unsigned long long)threadsTotal);
+	std::cout << "GPU " << CudaIndex << ": Threads/Block: " << threadsPerBlock << " Total threads: " << threadsTotal << "\r\n";
 #endif
+
+	if (threadsTotal == 0llu) {
+		std::cerr << "Search interval is too small for the specified parameters\r\n";
+		return result;
+	}
 	
 	if (!AreRunParametersValid(pRange, threadsTotal, batchSize)) {
+		std::cerr << "Parametera validation failed.\r\n";
 		return result;
 	}
 
@@ -152,6 +154,8 @@ void GpuPuzzle::Execute() {
 
 #ifndef NO_GPU_MODE
 		CallGpuKernel(Kparams);
+#else
+		sleep(1);
 #endif
 		
 		{
@@ -159,8 +163,9 @@ void GpuPuzzle::Execute() {
 			u64 tm = t2 - t1;
 			if (!tm) tm = 1;
 			
-			uint64_t cur_speed = (uint64_t)(pnt_cnt / (tm * 1000));
+			uint64_t cur_speed = (uint64_t)(1000 * pnt_cnt / tm);
 			//printf("GPU %d kernel time %d ms, speed %d MH\r\n", CudaIndex, (int)tm, cur_speed);
+			//std::cout << "GPU " << CudaIndex << " kernel time " << tm << " ms, speed " << cur_speed << " MH Idx: " << m_stat_idx << "\r\n";
 
 			m_speed_stat[m_stat_idx] = cur_speed;
 			m_stat_idx = (m_stat_idx + 1) % STATS_WND_SIZE;
@@ -216,7 +221,7 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t b
 	uint64_t userUpper;
 	uint64_t upper;
 	uint64_t maxThreadsByMem;
-	
+
 	maxThreadsByMem = GetMaxThreadsByMem(prop);
     //printf("maxThreadsByMem: %llu\r\n", (unsigned long long)maxThreadsByMem);
 	
@@ -312,7 +317,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	// h_counts256
 	{
 #if DEBUG_MODE > 0
-		printf("\r\n---Points/thread---\r\n");
+		std::cout << "\r\n---Points/thread---\r\n";
 #endif
 		for (uint64_t i = 0; i < threadsTotal; ++i) {
 			h_counts256[i*4+0] = per_thread_cnt[0];
@@ -324,7 +329,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 				add_256_u64((const uint64_t*)&h_counts256[i*4], (uint64_t)1, (uint64_t*)&h_counts256[i*4]);
 			}
 #if DEBUG_MODE > 0
-			printf("[%6" PRIu64 "]: %s\r\n", i, formatHex256(&h_counts256[i*4]).c_str());
+			std::cout << "[%6" << i << "]: " << formatHex256(&h_counts256[i*4]) << "\r\n";
 #endif
 		}
 	}
@@ -333,7 +338,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	half = (uint32_t)batchSize >> 1;
     {
 #if DEBUG_MODE > 0
-		printf("\r\n---Start scalars---\r\n");
+		std::cout << "\r\n---Start scalars---\r\n";
 #endif
 
         uint64_t cur[4] = { start[0], start[1], start[2], start[3] };
@@ -352,7 +357,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 			}
 			
 #if DEBUG_MODE > 0
-			printf("[%6" PRIu64 "]: %s\r\n", i, formatHex256(&h_start_scalars[i*4]).c_str());
+			std::cout << "[%6" << i << "]: " << formatHex256(&h_start_scalars[i*4]) << "\r\n";
 #endif
 			
             cur[0]=next[0]; cur[1]=next[1]; cur[2]=next[2]; cur[3]=next[3];
@@ -362,7 +367,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	// p(x,y)
 	{
 #if DEBUG_MODE > 0
-		printf("\r\n---Start points---\r\n");
+		std::cout << "\r\n---Start points---\r\n";
 #endif
 
 		EcPoint p;
@@ -383,8 +388,8 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 			h_py[i*4+3] = p.y.data[3];
 			
 #if DEBUG_MODE > 0
-			printf("[%6" PRIu64 "]: x:%s\r\n", i, formatHex256(&h_px[i*4]).c_str());
-			printf("[%6" PRIu64 "]: y:%s\r\n", i, formatHex256(&h_py[i*4]).c_str());
+			std::cout << "[%6" << i << "]: x:" << formatHex256(&h_px[i*4]) << "\r\n";
+			std::cout << "[%6" << i << "]: y:" << formatHex256(&h_py[i*4]) << "\r\n";
 #endif
 		}
 	}
@@ -392,7 +397,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	// B pointer
 	{
 #if DEBUG_MODE > 0
-		printf("\r\n---B (batch size point)---\r\n");
+		std::cout << "\r\n---B (batch size point)---\r\n";
 #endif
 
 		EcPoint p;
@@ -405,8 +410,8 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 		std::memcpy(&hParams->by, p.y.data, 32);
 
 #if DEBUG_MODE > 0
-		printf("x:%s\r\n", formatHex256((const uint64_t*)&p.x.data).c_str());
-		printf("y:%s\r\n", formatHex256((const uint64_t*)&p.y.data).c_str());
+		std::cout << "x:" << formatHex256((const uint64_t*)&p.x.data) << "\r\n";
+		std::cout << "y:" << formatHex256((const uint64_t*)&p.y.data) << "\r\n";
 #endif
 
 	}
@@ -482,7 +487,7 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 	// c_target_words
 	{
 #if DEBUG_MODE > 0
-		printf("\r\n---Target hash (truncated)---\r\n%s\r\n", formatHex256((uint64_t*)hash160).c_str());
+		std::cout << "\r\n---Target hash (truncated)---\r\n" << formatHex256((uint64_t*)hash160) << "\r\n";
 #endif
         uint32_t target_words[5];
         target_words[0] = (uint32_t)hParams->hash160[ 0] | ((uint32_t)hParams->hash160[ 1] << 8) | ((uint32_t)hParams->hash160[ 2] << 16) | ((uint32_t)hParams->hash160[ 3] << 24);
