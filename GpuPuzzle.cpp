@@ -196,7 +196,7 @@ void GpuPuzzle::Execute() {
 			
 			uint64_t cur_speed = (uint64_t)(pnt_cnt / (1000 * tm));
 			//printf("GPU %d kernel time %d ms, speed %d MH\r\n", CudaIndex, (int)tm, cur_speed);
-			std::cout << "GPU " << CudaIndex << " kernel time " << tm << " ms, speed " << cur_speed << " MH Idx: " << m_stat_idx << "\r\n";
+			//std::cout << "GPU " << CudaIndex << " kernel time " << tm << " ms, speed " << cur_speed << " MH Idx: " << m_stat_idx << "\r\n";
 
 			m_speed_stat[m_stat_idx] = cur_speed;
 			m_stat_idx = (m_stat_idx + 1) % STATS_WND_SIZE;
