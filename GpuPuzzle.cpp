@@ -163,7 +163,7 @@ void GpuPuzzle::Execute() {
 			u64 tm = t2 - t1;
 			if (!tm) tm = 1;
 			
-			uint64_t cur_speed = (uint64_t)(1000 * pnt_cnt / tm);
+			uint64_t cur_speed = (uint64_t)(pnt_cnt / (1000 * tm));
 			//printf("GPU %d kernel time %d ms, speed %d MH\r\n", CudaIndex, (int)tm, cur_speed);
 			//std::cout << "GPU " << CudaIndex << " kernel time " << tm << " ms, speed " << cur_speed << " MH Idx: " << m_stat_idx << "\r\n";
 
@@ -487,7 +487,7 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 	// c_target_words
 	{
 #if DEBUG_MODE > 0
-		std::cout << "\r\n---Target hash (truncated)---\r\n" << formatHex256((uint64_t*)hash160) << "\r\n";
+		std::cout << "\r\n---Target hash (truncated)---\r\n" << formatHex256((uint64_t*)hParams->hash160) << "\r\n";
 #endif
         uint32_t target_words[5];
         target_words[0] = (uint32_t)hParams->hash160[ 0] | ((uint32_t)hParams->hash160[ 1] << 8) | ((uint32_t)hParams->hash160[ 2] << 16) | ((uint32_t)hParams->hash160[ 3] << 24);
