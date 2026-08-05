@@ -30,6 +30,7 @@ struct TOutParams {
     uint32_t runtime_batches_per_sm;
     uint32_t slices_per_launch;
 	uint64_t range_start[4];
+	uint64_t range_end[4];
 	uint64_t range[4];
 	uint8_t target_hash160[20];
 	uint64_t* Gx;
@@ -186,6 +187,7 @@ int validate_params(TInParams& pInParams, TOutParams& pOutParams, char** argv) {
 	std::string start_hex;
     std::string end_hex;
 	size_t colon_pos;
+	uint64_t range_start[4];
 	uint64_t range_end[4];
 	
 	if (pInParams.range_hex.empty() || (pInParams.target_hash_hex.empty() && pInParams.address_b58.empty())) {
@@ -208,12 +210,15 @@ int validate_params(TInParams& pInParams, TOutParams& pOutParams, char** argv) {
     start_hex = pInParams.range_hex.substr(0, colon_pos);
     end_hex   = pInParams.range_hex.substr(colon_pos + 1);
 
-    if (!hexToLE64(start_hex, pOutParams.range_start) || !hexToLE64(end_hex, range_end)) {
+    if (!hexToLE64(start_hex, range_start) || !hexToLE64(end_hex, range_end)) {
         std::cerr << "Error: invalid range hex\n"; return EXIT_FAILURE;
     }
 	
-	sub_256(range_end, pOutParams.range_start, pOutParams.range);
+	sub_256(range_end, range_start, pOutParams.range);
 	add_256(pOutParams.range, num_256_1, pOutParams.range);
+std::cout << "XXX1: " << formatHex256(range_start) << "\r\n";
+std::cout << "XXX2: " << formatHex256(range_end) << "\r\n";
+std::cout << "XXX3: " << formatHex256(pOutParams.range) << "\r\n";
 
     if (!pInParams.address_b58.empty()) {
         if (!decode_p2pkh_address(pInParams.address_b58, pOutParams.target_hash160)) {
@@ -234,6 +239,9 @@ int validate_params(TInParams& pInParams, TOutParams& pOutParams, char** argv) {
         std::cerr << "Error: batch size must be <= " << MAX_BATCH_SIZE << " (kernel limit).\n";
         return EXIT_FAILURE;
     }
+	
+	std::memcpy(pOutParams.range_start, range_start, sizeof(pOutParams.range_start));
+	std::memcpy(pOutParams.range_end, range_end, sizeof(pOutParams.range_end));
 	
 	pOutParams.runtime_points_batch_size = pInParams.runtime_points_batch_size;
 	pOutParams.runtime_batches_per_sm = pInParams.runtime_batches_per_sm;
