@@ -386,9 +386,8 @@ void show_stat(u64 tm_start, u64 range) {
 	u64 days = sec / (3600 * 24);
 	int hours = (int)(sec - days * (3600 * 24)) / 3600;
 	int min = (int)(sec - days * (3600 * 24) - hours * 3600) / 60;
-	 
-	std::cout << "Range: " << range << "\r\n";
-	std::cout << "Speed: " << speed << " MKeys/s, Time: " <<
+
+	std::cout << "Range: " << range << " " << "Speed: " << speed << " MKeys/s, Time: " <<
 		days << "d:" << std::setw(2) << hours << "h:" << std::setw(2) << min << "m/" <<
 		exp_days << "d:" << std::setw(2) << exp_hours << "h:" << std::setw(2) << exp_min << "m\r\n";
 	std::cout.flush();
