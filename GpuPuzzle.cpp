@@ -87,8 +87,8 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 		return result;
 	}
 	
-	cudaSetDeviceFlags(cudaDeviceMapHost | cudaDeviceScheduleBlockingSync);
-	cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+	ck(cudaSetDeviceFlags(cudaDeviceMapHost | cudaDeviceScheduleBlockingSync), "set device flags");
+	ck(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1), "set cache config");
 	
 #else
 	std::cout << "======================================\r\n";
