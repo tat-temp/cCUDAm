@@ -471,7 +471,7 @@ bool find_key(TOutParams& pParams) {
 		
 		if (GetTickCount64() - tm_stats > SHOW_STAT_INTERVAL_SECS * 1000)
 		{
-			show_stat(tm0, pParams.range);
+			show_stat(tm0, pParams.range[0]);
 			tm_stats = GetTickCount64();
 		}
 	}
