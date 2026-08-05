@@ -286,7 +286,7 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t b
 	uint64_t res = PickThreadsTotal(upper, threadsPerBlock, maxThreadsByRange);
 	//printf("res: %llu\r\n", (unsigned long long)res);
 	//return res;
-	return 340;
+	return 340 * 256;
 }
 
 bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize) {
