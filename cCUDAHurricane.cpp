@@ -216,9 +216,6 @@ int validate_params(TInParams& pInParams, TOutParams& pOutParams, char** argv) {
 	
 	sub_256(range_end, range_start, pOutParams.range);
 	add_256(pOutParams.range, num_256_1, pOutParams.range);
-std::cout << "XXX1: " << formatHex256(range_start) << "\r\n";
-std::cout << "XXX2: " << formatHex256(range_end) << "\r\n";
-std::cout << "XXX3: " << formatHex256(pOutParams.range) << "\r\n";
 
     if (!pInParams.address_b58.empty()) {
         if (!decode_p2pkh_address(pInParams.address_b58, pOutParams.target_hash160)) {
@@ -402,7 +399,6 @@ void show_stat(u64 tm_start, u64 range) {
 }
 
 bool find_key(TOutParams& pParams) {
-    uint64_t range[4];
     uint64_t current[4];
     uint64_t chunk[4];
     uint64_t chunk_effective[4];
@@ -475,7 +471,7 @@ bool find_key(TOutParams& pParams) {
 		
 		if (GetTickCount64() - tm_stats > SHOW_STAT_INTERVAL_SECS * 1000)
 		{
-			show_stat(tm0, range[0]);
+			show_stat(tm0, pParams.range);
 			tm_stats = GetTickCount64();
 		}
 	}
