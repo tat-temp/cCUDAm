@@ -12,8 +12,9 @@
 #define BYTES_PER_THREAD (2ull*4ull*sizeof(uint64_t))
 
 #define ck(e, msg) { \
-    if (e != cudaSuccess) { \
-        std::cerr << msg << ": " << cudaGetErrorString(e) << "\n"; \
+	cudaError_t _ck_e = (e); \
+    if (_ck_e != cudaSuccess) { \
+        std::cerr << msg << ": " << cudaGetErrorString(_ck_e) << "\n"; \
         goto LExit; \
     } \
 }; \
@@ -69,7 +70,6 @@ void GpuPuzzle::Release() {
 bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const uint8_t* pHash, const uint64_t* gx, const uint64_t* gy, uint64_t batchSize, uint64_t blockPerSm, uint32_t dwSlices) {
 	THparams hParams;
 	bool result = false;
-	cudaError_t err;
 	cudaDeviceProp prop{};
 	uint64_t threadsPerBlock;
 	uint64_t threadsTotal;
