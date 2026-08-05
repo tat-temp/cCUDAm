@@ -15,6 +15,16 @@ __device__ __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
 __device__ __constant__ uint64_t c_Jx[4];
 __device__ __constant__ uint64_t c_Jy[4];
 
+
+#define FLUSH_THRESHOLD 65536u
+//#define WARP_FLUSH_HASHES() do { \
+//    unsigned long long v = warp_reduce_add_ull((unsigned long long)local_hashes); \
+//    if (lane == 0 && v) atomicAdd(hashes_accum, v); \
+//    local_hashes = 0; \
+//} while (0)
+#define WARP_FLUSH_HASHES()
+#define MAYBE_WARP_FLUSH() do { if ((local_hashes & (FLUSH_THRESHOLD - 1u)) == 0u) WARP_FLUSH_HASHES(); } while (0)
+		
 extern "C" __launch_bounds__(THREADS_PER_BLOCK, BLOCKS_PER_SM)
 __global__ void TestKernel(
 	uint64_t* __restrict__ Px,
@@ -55,6 +65,11 @@ __global__ void TestKernel(
 		uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(x1));   // by-value ABI: 1 reg out
         bool pref = (hw2 == target_prefix);
 		if (__any_sync(full_mask, pref)) {
+			bool full = pref && hash160_full_match(prefix, u256_of(x1), c_target_words);
+			if (full) {
+			}
+			
+			if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
 		}
 		
 		uint64_t subp[MAX_BATCH_SIZE / 2][4];
