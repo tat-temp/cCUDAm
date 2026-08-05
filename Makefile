@@ -1,5 +1,6 @@
 CUDA_PATH ?= /usr/local/cuda
 NVCC      := $(CUDA_PATH)/bin/nvcc
+CUOBJDUMP ?= $(CUDA_PATH)/bin/cuobjdump
 CC        := g++
 
 # Target GPU architectures (SASS): Turing (75), Ampere (86), Ada (89), Blackwell (120).
@@ -51,19 +52,35 @@ $(TARGET): $(CPP_OBJECTS) $(CU_OBJECTS)
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 # ---- Codegen inspection (no effect on the shipped binary), like cCUDA's ptxinfo target ----
+# Each device TU is compiled separately: nvcc rejects -o together with -c when given more
+# than one input, so these must iterate over $(GPU_SRC) rather than pass it as one list.
+# GpuHash.cu is #included by GpuCore.cu, so its kernels are covered by that TU's report.
+PTXINFO_OBJS := $(GPU_SRC:.cu=-ptxinfo.o)
+SASS_OBJS    := $(GPU_SRC:.cu=-sass.o)
+
 # Verbose ptxas resource report -- registers/thread, spill stores/loads, stack frame -- for
-# every kernel, printed once per target arch. All device kernels live in RCGpuCore.cu, so
-# compiling just that TU with the shipped flags yields the same usage as the release build.
+# every kernel, printed once per target arch, with the shipped flags so the numbers match
+# the release build.
 ptxinfo: $(GPU_SRC) $(HDRS)
-	$(NVCC) $(NVCCFLAGS) -Xptxas -v -c $(GPU_SRC) -o RCGpuCore-ptxinfo.o
-	@rm -f RCGpuCore-ptxinfo.o
+	@for src in $(GPU_SRC); do \
+		obj=`echo $$src | sed 's/\.cu$$/-ptxinfo.o/'`; \
+		echo "==== $$src ===="; \
+		$(NVCC) $(NVCCFLAGS) -Xptxas -v -c $$src -o $$obj; st=$$?; \
+		rm -f $$obj; \
+		[ $$st -eq 0 ] || exit $$st; \
+	done
 
 # Full SASS (device disassembly) of every kernel, freshly compiled for the selected compute
-# mode(s) so `make sass SM=89` shows exactly that arch. All kernels live in RCGpuCore.cu.
+# mode(s) so `make sass SM=89` shows exactly that arch.
 sass: $(GPU_SRC) $(HDRS)
-	$(NVCC) $(NVCCFLAGS) -c $(GPU_SRC) -o RCGpuCore-sass.o
-	cuobjdump -sass RCGpuCore-sass.o
-	@rm -f RCGpuCore-sass.o
+	@for src in $(GPU_SRC); do \
+		obj=`echo $$src | sed 's/\.cu$$/-sass.o/'`; \
+		echo "==== $$src ===="; \
+		$(NVCC) $(NVCCFLAGS) -c $$src -o $$obj; st=$$?; \
+		[ $$st -eq 0 ] && { $(CUOBJDUMP) -sass $$obj; st=$$?; }; \
+		rm -f $$obj; \
+		[ $$st -eq 0 ] || exit $$st; \
+	done
 
 clean:
-	rm -f $(CPP_OBJECTS) $(CU_OBJECTS) $(TARGET) RCGpuCore-ptxinfo.o RCGpuCore-sass.o
+	rm -f $(CPP_OBJECTS) $(CU_OBJECTS) $(TARGET) $(PTXINFO_OBJS) $(SASS_OBJS)

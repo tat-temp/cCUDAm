@@ -410,9 +410,12 @@ bool find_key(TOutParams& pParams) {
 			pParams.slices_per_launch))
 		{
 			g_GpuPuzzles[i]->Failed = true;
-			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << ": Prepare failed\r\n";
+			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << " FAILED" << "\r\n";
 		} else {
-			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << ": Prepared. start: " << formatHex256(current) << " length: " << formatHex256(chunk_effective) << "\r\n";
+			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << " PREPARED" << "\r\n";
+			std::cout << "RangeStart:  " << formatHex256(current) << "\r\n";
+			std::cout << "RangeLength: " << formatHex256(chunk_effective) << "\r\n";
+			
 			g_threadcnt++;
 		}
 		

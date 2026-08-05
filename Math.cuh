@@ -317,7 +317,9 @@ __device__ __forceinline__ void add_320_to_256s(uint32_t* res, uint64_t _v1, uin
 // r = a ^ 2 (mod P)
 __device__ __forceinline__ void sqr_mod(uint64_t* r, uint64_t* aTmp)
 {
-	uint64_t buff[8], tmp[5], tmp2[2], tmp3, mm;
+	//buff needs 17 words, not 16: the last add_320_to_256s starts at b32+7 and writes 10 words
+	//(res[0..9], the 10th being the carry-out), so it reaches b32[16]. The 9th limb is write-only.
+	uint64_t buff[9], tmp[5], tmp2[2], tmp3, mm;
 	uint32_t* a = (uint32_t*)aTmp;
 	uint64_t mar[28];
 	uint32_t* b32 = (uint32_t*)buff;
