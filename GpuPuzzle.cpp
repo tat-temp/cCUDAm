@@ -12,18 +12,25 @@
 #define BYTES_PER_THREAD (2ull*4ull*sizeof(uint64_t))
 
 void CallGpuKernel(TKparams& Kparams);
+void CallGpuMulKernel(
+	uint64_t blocks,
+	uint64_t blockSize,
+	const uint64_t* scalars,
+	uint64_t* x,
+	uint64_t* y,
+	uint32_t count);
+	
 cudaError_t CudaCopyTargetWords(const void* value);
 cudaError_t CudaCopyGx(const void* value, size_t size);
 cudaError_t CudaCopyGy(const void* value, size_t size);
 cudaError_t CudaCopyJx(const void* value);
 cudaError_t CudaCopyJy(const void* value);
 
-struct THparams
-{
+struct THparams {
 	uint64_t* counts;
 	uint64_t* scalars;
-	uint64_t* px;
-	uint64_t* py;
+	//uint64_t* px;
+	//uint64_t* py;
 	const uint64_t* gx;
 	const uint64_t* gy;
 	uint64_t bx[4];
@@ -39,7 +46,7 @@ bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_
 void ClearHParams(THparams* hParams);
 void ClearKParams(TKparams* kParams);
 bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize);
-bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTotal, uint64_t batchSize);
+bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTotal, uint64_t threadsPerBlock, uint64_t batchSize);
 
 bool GpuPuzzle::Start() {
 	
@@ -108,7 +115,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	hParams.gy = gy;
 
 #ifndef NO_GPU_MODE
-	if (!PrepareCuda(&this->Kparams, (const THparams*)&hParams, threadsTotal, batchSize)) {
+	if (!PrepareCuda(&this->Kparams, (const THparams*)&hParams, threadsTotal, threadsPerBlock, batchSize)) {
 		goto LExit;
 	}
 #endif
@@ -120,17 +127,15 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	Kparams.batches_per_launch = dwSlices;
 	Kparams.threads_total = threadsTotal;
 
-	std::cout << "******************************" << "\r\n" <<
-		         "*        GPU" << std::setw(2) << CudaIndex << "               *" << "\r\n" <<
-			     "******************************" << "\r\n" <<
-     	" Blocks: " << Kparams.BlockCnt << "\r\n" <<
-		" Threads: " << Kparams.threads_total << "\r\n" <<
-		" Threads/Block: " << Kparams.BlockSize << "\r\n" <<
-		" Batch size: " << Kparams.batch_size << "\r\n" <<
-		" Batches/thread: " << Kparams.batches_per_launch << "\r\n" <<
-		" Points/run: " << Kparams.points_per_run <<  "\r\n" <<
-		"\r\n";
-
+	std::cout << "**************************************\r\n";
+	std::cout << std::left << std::setw(20) << "Device (GPU)        " << " : " << CudaIndex << "\r\n";
+	std::cout << std::left << std::setw(20) << "Blocks              " << " : " << Kparams.BlockCnt << "\r\n";
+	std::cout << std::left << std::setw(20) << "Threads             " << " : " << Kparams.threads_total << "\r\n";
+	std::cout << std::left << std::setw(20) << "Threads/Block       " << " : " << Kparams.BlockSize << "\r\n";
+	std::cout << std::left << std::setw(20) << "Batch size          " << " : " << Kparams.batch_size << "\r\n";
+	std::cout << std::left << std::setw(20) << "Batches/thread      " << " : " << Kparams.batches_per_launch << "\r\n";
+	std::cout << std::left << std::setw(20) << "Points/run          " << " : " << Kparams.points_per_run <<  "\r\n";
+	
 	result = true;
 	
 LExit:
@@ -285,13 +290,13 @@ void ClearHParams(THparams* hParams) {
 #ifndef NO_GPU_MODE
 	if (hParams->counts) cudaFreeHost(hParams->counts);
 	if (hParams->scalars) cudaFreeHost(hParams->scalars);
-	if (hParams->px) cudaFreeHost(hParams->px);
-	if (hParams->py) cudaFreeHost(hParams->py);
+	//if (hParams->px) cudaFreeHost(hParams->px);
+	//if (hParams->py) cudaFreeHost(hParams->py);
 #else
 	if (hParams->counts) free(hParams->counts);
 	if (hParams->scalars) free(hParams->scalars);
-	if (hParams->px) free(hParams->px);
-	if (hParams->py) free(hParams->py);
+	//if (hParams->px) free(hParams->px);
+	//if (hParams->py) free(hParams->py);
 #endif
 }
 
@@ -311,8 +316,8 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	uint64_t r1 = 0ull;
 	uint64_t* h_counts256     = nullptr;
     uint64_t* h_start_scalars = nullptr;
-    uint64_t* h_px = nullptr;
-    uint64_t* h_py = nullptr;
+    //uint64_t* h_px = nullptr;
+    //uint64_t* h_py = nullptr;
 	uint32_t half;
 	bool result = false;
 
@@ -321,13 +326,13 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 #ifndef NO_GPU_MODE
     cudaHostAlloc(&h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
     cudaHostAlloc(&h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
-    cudaHostAlloc(&h_px,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
-    cudaHostAlloc(&h_py,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
+    //cudaHostAlloc(&h_px,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
+    //cudaHostAlloc(&h_py,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
 #else
     h_counts256 = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
     h_start_scalars = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
-    h_px = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
-    h_py = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
+    //h_px = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
+    //h_py = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
 #endif
 
 	// h_counts256
@@ -379,7 +384,8 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
             cur[0]=next[0]; cur[1]=next[1]; cur[2]=next[2]; cur[3]=next[3];
         }
     }
-	
+
+/*	
 	// p(x,y)
 	{
 #if DEBUG_MODE > 0
@@ -409,6 +415,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 #endif
 		}
 	}
+*/
 	
 	// B pointer
 	{
@@ -443,8 +450,8 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	
 	hParams->counts = h_counts256;
 	hParams->scalars = h_start_scalars;
-	hParams->px = h_px;
-	hParams->py = h_py;
+	//hParams->px = h_px;
+	//hParams->py = h_py;
 	hParams->hash160 = hash160;
 	
 	result = true;
@@ -455,20 +462,20 @@ LExit:
 #ifndef NO_GPU_MODE		
 		if (h_counts256) cudaFreeHost(h_counts256);
 		if (h_start_scalars) cudaFreeHost(h_start_scalars);
-		if (h_px) cudaFreeHost(h_px);
-		if (h_py) cudaFreeHost(h_py);
+		//if (h_px) cudaFreeHost(h_px);
+		//if (h_py) cudaFreeHost(h_py);
 #else
 		if (h_counts256) free(h_counts256);
 		if (h_start_scalars) free(h_start_scalars);
-		if (h_px) free(h_px);
-		if (h_py) free(h_py);
+		//if (h_px) free(h_px);
+		//if (h_py) free(h_py);
 #endif
 	}
 
 	return result;
 }
 
-bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTotal, uint64_t batchSize) {
+bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTotal, uint64_t threadsPerBlock, uint64_t batchSize) {
 	bool result = false;
 	uint64_t* d_start_scalars = nullptr;
 	uint64_t* d_Px = nullptr;
@@ -497,8 +504,28 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 
     ck(cudaMemcpy(d_start_scalars, 	hParams->scalars, 	threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy scalars");
     ck(cudaMemcpy(d_counts,        	hParams->counts,  	threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy counts");
-    ck(cudaMemcpy(d_Px,        		hParams->px,  		threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy px");
-    ck(cudaMemcpy(d_Py,        		hParams->py,  		threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy py");
+    //ck(cudaMemcpy(d_Px,        		hParams->px,  		threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy px");
+    //ck(cudaMemcpy(d_Py,        		hParams->py,  		threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy py");
+
+	// Start points P(x1, y1)
+	{
+#if DEBUG_MODE > 0
+		std::cout << "\r\n---Start points---\r\n";
+#endif
+		uint64_t mulBlocks = (uint64_t)((threadsTotal + threadsPerBlock - 1) / threadsPerBlock);;
+		
+		CallGpuMulKernel(mulBlocks, threadsPerBlock, d_start_scalars, d_Px, d_Py, (uint32_t)threadsTotal);
+
+		ck(cudaDeviceSynchronize(), "gpuMulKernel sync");
+        ck(cudaGetLastError(), "gpuMulKernel launch");
+		
+		for (uint64_t i = 0; i < threadsTotal; ++i) {
+#if DEBUG_MODE > 0
+			std::cout << "[%6" << i << "]: x:" << formatHex256(&d_Px[i*4]) << "\r\n";
+			std::cout << "[%6" << i << "]: y:" << formatHex256(&d_Py[i*4]) << "\r\n";
+#endif
+		}
+	}
 
 	// c_target_words
 	{

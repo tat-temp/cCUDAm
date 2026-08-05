@@ -243,16 +243,16 @@ __device__ __forceinline__ void mul_mod(uint64_t *r, uint64_t *a, uint64_t *b)
 	mul_256_by_64(tmp, a, b[3]);
 	add_320_to_256(buff + 3, tmp);
 //fast mod P
-	mul_256_by_P0inv((u32*)tmp, (u32*)(buff + 4));
+	mul_256_by_P0inv((uint32_t*)tmp, (uint32_t*)(buff + 4));
 	add_cc_64(buff[0], buff[0], tmp[0]);
 	addc_cc_64(buff[1], buff[1], tmp[1]);
 	addc_cc_64(buff[2], buff[2], tmp[2]);
 	addc_cc_64(buff[3], buff[3], tmp[3]);
 	addc_64(tmp[4], tmp[4], 0ull);
 //see mul_256_by_P0inv for details
-	u32* t32 = (u32*)tmp;
-	u32* a32 = (u32*)tmp2;
-	u32* k = (u32*)&tmp3;
+	uint32_t* t32 = (uint32_t*)tmp;
+	uint32_t* a32 = (uint32_t*)tmp2;
+	uint32_t* k = (uint32_t*)&tmp3;
 	mul_wide_32(tmp2[0], t32[8], P_INV32);
 	mul_wide_32(tmp3, t32[9], P_INV32);
 	add_cc_32(a32[1], a32[1], k[0]);
@@ -462,7 +462,7 @@ __device__ __forceinline__ void set_288_i32(uint32_t* res, int val)
 __device__ __forceinline__ void mul_P_by_32(uint32_t* res, uint32_t val)
 {
 	__align__(8) uint32_t tmp[3];
-	mul_wide_32(*(u64*)tmp, val, P_INV32);
+	mul_wide_32(*(uint64_t*)tmp, val, P_INV32);
 	add_cc_32(tmp[1], tmp[1], val);
 	addc_32(tmp[2], 0, 0);
 
@@ -548,7 +548,7 @@ __device__ __forceinline__ void inv_mod(uint32_t* r)
 		if (kbnt < 0)
 			DO_INV_STEP();
 		mx = (kbnt + 1 < cnt) ? 31 - kbnt : 32 - cnt;
-		i32 mul = (-_modp * _val) & 7;
+		int mul = (-_modp * _val) & 7;
 		mul &= 0xFFFFFFFF >> mx;
 		_val += _modp * mul;
 		matrix[2] += matrix[0] * mul;
@@ -587,7 +587,7 @@ __device__ __forceinline__ void inv_mod(uint32_t* r)
 			if (kbnt < 0)
 				DO_INV_STEP();
 			mx = (kbnt + 1 < cnt) ? 31 - kbnt : 32 - cnt;
-			i32 mul = (-_modp * _val) & 7;
+			int mul = (-_modp * _val) & 7;
 			mul &= 0xFFFFFFFF >> mx;
 			_val += _modp * mul;
 			matrix[2] += matrix[0] * mul;

@@ -29,7 +29,7 @@ NVCCFLAGS += -DKERNEL_TIMING=$(TIMING)
 endif
 
 CPU_SRC := cCUDAHurricane.cpp EcInt.cpp GpuPuzzle.cpp EcPoint.cpp Ec.cpp
-GPU_SRC := GpuCore.cu
+GPU_SRC := GpuCore.cu GpuEc.cu
 HDRS    := $(wildcard *.h *.cuh)
 
 CPP_OBJECTS := $(CPU_SRC:.cpp=.o)
