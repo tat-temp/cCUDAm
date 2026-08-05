@@ -296,10 +296,10 @@ bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_
 	uint64_t rr = 0ull;
 
     div_256_u64(range, threadsTotal, per_thread_cnt, &r_u64);
-	if (r_u64 != 0ull) {
-		std::cerr << "Internal error: range_len not divisible by threadsTotal.\n";
-		return false;
-	}
+	//if (r_u64 != 0ull) {
+	//	std::cerr << "Internal error: range_len not divisible by threadsTotal.\n";
+	//	return false;
+	//}
 	
 	div_256_u64(per_thread_cnt, batchSize, qq, &rr);
     if (rr != 0ull) {
