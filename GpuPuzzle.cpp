@@ -11,6 +11,13 @@
 
 #define BYTES_PER_THREAD (2ull*4ull*sizeof(uint64_t))
 
+#define ck(e, msg) { \
+    if (e != cudaSuccess) { \
+        std::cerr << msg << ": " << cudaGetErrorString(e) << "\n"; \
+        goto LExit; \
+    } \
+}; \
+
 cudaError_t CallGpuKernel(TKparams& Kparams);
 cudaError_t CudaSetupKernel();
 
@@ -80,7 +87,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 		return result;
 	}
 	
-	cudaSetDeviceFlags(cudaDeviceMapHost);
+	cudaSetDeviceFlags(cudaDeviceMapHost | cudaDeviceScheduleBlockingSync);
 	cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
 	
 #else
@@ -180,14 +187,7 @@ void GpuPuzzle::Execute() {
 	while (!m_stopFlag) {
 		u64 t1 = GetTickCount64();
 
-#ifndef NO_GPU_MODE
-		#define ck(e, msg) { \
-			if (e != cudaSuccess) { \
-				std::cerr << msg << ": " << cudaGetErrorString(e) << "\n"; \
-				goto LExit; \
-			} \
-		}; 
-	
+#ifndef NO_GPU_MODE	
 		ck(CallGpuKernel(Kparams), "gpuMainKernel call");
 		
 		ck(cudaDeviceSynchronize(), "gpuMainKernel sync");
@@ -353,8 +353,8 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	div_256_u64(range, threadsTotal, per_thread_cnt, &r1);
 
 #ifndef NO_GPU_MODE
-    cudaHostAlloc(&h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
-    cudaHostAlloc(&h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
+    ck(cudaHostAlloc(&h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_counts256 alloc");
+    ck(cudaHostAlloc(&h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_start_scalars alloc");
     //cudaHostAlloc(&h_px,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
     //cudaHostAlloc(&h_py,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
 #else
@@ -515,13 +515,6 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
     int *d_found_flag=nullptr;
 	//FoundResult *d_found_result=nullptr;
     unsigned long long *d_hashes_accum=nullptr; unsigned int *d_any_left=nullptr;
-	
-	#define ck(e, msg) { \
-        if (e != cudaSuccess) { \
-            std::cerr << msg << ": " << cudaGetErrorString(e) << "\n"; \
-            goto LExit; \
-        } \
-    }; \
 	
 	ck(cudaMalloc(&d_start_scalars, threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_start_scalars)");
 	ck(cudaMalloc(&d_counts,        threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_counts)");

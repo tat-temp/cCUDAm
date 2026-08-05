@@ -311,8 +311,6 @@ void init_gpus() {
 			continue;
 		}
 
-		cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
-
 		g_GpuPuzzles[g_gpucnt] = new GpuPuzzle();
 		g_GpuPuzzles[g_gpucnt]->CudaIndex = i;
 		g_GpuPuzzles[g_gpucnt]->SMCnt = deviceProp.multiProcessorCount;
@@ -350,7 +348,7 @@ int init_g_points(TOutParams& pOutParams) {
 		}
 	}
 	
-	return (pOutParams.Gx == nullptr && pOutParams.Gy == nullptr) ? 1 : 0;
+	return (pOutParams.Gx == nullptr || pOutParams.Gy == nullptr) ? 0 : 1;
 }
 
 #ifdef _WIN32
