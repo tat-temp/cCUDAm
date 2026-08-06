@@ -328,14 +328,11 @@ void ClearHParams(THparams* hParams) {
 #ifndef NO_GPU_MODE
 	if (hParams->counts) cudaFreeHost(hParams->counts);
 	if (hParams->scalars) cudaFreeHost(hParams->scalars);
-std::cout << "XXXn: " << "\r\n";
-	if (hParams->find_result) cudaFreeHost(hParams->find_result);
 	//if (hParams->px) cudaFreeHost(hParams->px);
 	//if (hParams->py) cudaFreeHost(hParams->py);
 #else
 	if (hParams->counts) free(hParams->counts);
 	if (hParams->scalars) free(hParams->scalars);
-	if (hParams->find_result) free(hParams->find_result);
 	//if (hParams->px) free(hParams->px);
 	//if (hParams->py) free(hParams->py);
 #endif
@@ -345,10 +342,13 @@ void ClearKParams(TKparams* kParams) {
 #ifndef NO_GPU_MODE
 	if (kParams->counts) cudaFree(kParams->counts);
 	if (kParams->scalars) cudaFree(kParams->scalars);
+	if (kParams->h_find_result) cudaFree(kParams->h_find_result);
 	if (kParams->px) cudaFree(kParams->px);
 	if (kParams->py) cudaFree(kParams->py);
 	if (kParams->rx) cudaFree(kParams->rx);
 	if (kParams->ry) cudaFree(kParams->ry);
+#else
+	if (hParams->h_find_result) free(kParams->h_find_result);
 #endif
 }
 
