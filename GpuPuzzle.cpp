@@ -367,7 +367,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 #ifndef NO_GPU_MODE
     ck(cudaHostAlloc(&h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_counts256 alloc");
     ck(cudaHostAlloc(&h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_start_scalars alloc");
-    ck(cudaHostAlloc(&h_find_result,   sizeof(TFindResult), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_found_scalar alloc");
+    ck(cudaHostAlloc(&h_find_result,   sizeof(TFindResult), cudaHostAllocMapped), "h_found_scalar alloc");
     //cudaHostAlloc(&h_px,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
     //cudaHostAlloc(&h_py,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
 #else
