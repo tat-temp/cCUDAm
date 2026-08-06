@@ -27,9 +27,14 @@ typedef unsigned char u8;
 typedef char i8;
 typedef __uint128_t uint128_t;
 
+struct FoundResult {
+    uint64_t scalar[4];
+    uint64_t rx[4];
+    uint64_t ry[4];
+};
+
 //gpu kernel parameters
-struct TKparams
-{
+struct TKparams {
 	uint64_t* scalars;
 	uint64_t* counts;
 	uint64_t* px;
@@ -41,13 +46,8 @@ struct TKparams
 	uint64_t batches_per_launch;
 	uint64_t threads_total;
 	
-	u32 BlockCnt;
-	u32 BlockSize;
-	
-	//u64* Kangs;
-	//u32 KangCnt;
-	//u32 GroupCnt;
-	//u64* PntX;
+	uint32_t block_count;
+	uint32_t block_size;
 };
 
 #ifdef _WIN32

@@ -129,9 +129,9 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	}
 #endif
 
-	Kparams.BlockCnt = threadsTotal / threadsPerBlock; //SMCnt * blockPerSm;
-	if (threadsTotal % threadsPerBlock) Kparams.BlockCnt++;
-	Kparams.BlockSize = threadsPerBlock;
+	Kparams.block_count = threadsTotal / threadsPerBlock; //SMCnt * blockPerSm;
+	if (threadsTotal % threadsPerBlock) Kparams.block_count++;
+	Kparams.block_size = threadsPerBlock;
 	Kparams.points_per_run = batchSize * threadsTotal * dwSlices;
 	Kparams.batch_size = batchSize;
 	Kparams.batches_per_launch = dwSlices;
@@ -139,9 +139,9 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 
 	std::cout << "**************************************\r\n";
 	std::cout << std::left << std::setw(20) << " Device (GPU)       " << " : " << CudaIndex << "\r\n";
-	std::cout << std::left << std::setw(20) << " Blocks             " << " : " << Kparams.BlockCnt << "\r\n";
+	std::cout << std::left << std::setw(20) << " Blocks             " << " : " << Kparams.block_count << "\r\n";
 	std::cout << std::left << std::setw(20) << " Threads            " << " : " << Kparams.threads_total << "\r\n";
-	std::cout << std::left << std::setw(20) << " Threads/Block      " << " : " << Kparams.BlockSize << "\r\n";
+	std::cout << std::left << std::setw(20) << " Threads/Block      " << " : " << Kparams.block_size << "\r\n";
 	std::cout << std::left << std::setw(20) << " Batch size         " << " : " << Kparams.batch_size << "\r\n";
 	std::cout << std::left << std::setw(20) << " Batches/thread     " << " : " << Kparams.batches_per_launch << "\r\n";
 	std::cout << std::left << std::setw(20) << " Points/run         " << " : " << Kparams.points_per_run <<  "\r\n";

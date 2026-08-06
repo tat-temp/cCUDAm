@@ -248,7 +248,7 @@ __global__ void TestKernel(
 cudaError_t CallGpuKernel(TKparams& Kparams) {
 	cudaError_t err;
 	
-	TestKernel <<< Kparams.BlockCnt, Kparams.BlockSize, 0 >>> (
+	TestKernel <<< Kparams.block_count, Kparams.block_size, 0 >>> (
 		Kparams.px,
 		Kparams.py,
 		Kparams.scalars,
