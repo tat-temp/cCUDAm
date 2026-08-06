@@ -369,7 +369,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
     ck(cudaHostAlloc(&h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_start_scalars alloc");
     ck(cudaHostAlloc(&h_find_result,   sizeof(TFindResult), cudaHostAllocMapped), "h_found_scalar alloc");
 std::cout << "XXX2: " << " addr: " << h_find_result << " .\r\n";			
-std::cout << "XXX3: " << h_find_result->found == true << " .\r\n";			
+std::cout << "XXX3: " << (h_find_result->found == true) << " .\r\n";			
     //cudaHostAlloc(&h_px,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
     //cudaHostAlloc(&h_py,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
 #else
