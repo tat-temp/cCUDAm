@@ -195,8 +195,8 @@ void GpuPuzzle::Execute() {
 		std::this_thread::sleep_for(std::chrono::milliseconds(11));
 #endif
 std::cout << "XXX0: " << (Kparams.h_find_result == nullptr) << " add: " << Kparams.h_find_result << " .\r\n";		
-std::cout << "XXX1: " << &Kparams.h_find_result.found << " .\r\n";
-std::cout << "yyy: " << fr.found == true) << " .\r\n";		
+std::cout << "XXX1: " << &Kparams.h_find_result->found << " .\r\n";
+	
 		if (Kparams.h_find_result->found == true) {
 			Found = true;
 			
