@@ -45,6 +45,11 @@ void EcInt::LoadFromBuffer32(u8* buffer)
 	std::memcpy(data, buffer, 32);
 }
 
+void EcInt::LoadFromBuffer64(u64* buffer)
+{
+	std::memcpy(data, buffer, 32);
+}
+
 EcInt::EcInt()
 {
 	SetZero();

@@ -10,6 +10,7 @@ public:
 
 	void Assign(EcInt& val);
 	void LoadFromBuffer32(u8* buffer);
+	void LoadFromBuffer64(u64* buffer);
 	void Set(u64 val);
 	void SetZero();
 	bool SetHexStr(const char* str);

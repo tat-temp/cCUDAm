@@ -9,7 +9,7 @@
 #include "Utils.h"
 #include "Ec.h"
 
-#define BYTES_PER_THREAD (2ull*4ull*sizeof(uint64_t))
+#define BYTES_PER_THREAD (2ull * 4ull * sizeof(uint64_t) + (MAX_BATCH_SIZE / 2) * 4ull * sizeof(uint64_t))
 
 #define ck(e, msg) { \
 	cudaError_t _ck_e = (e); \
@@ -37,15 +37,16 @@ cudaError_t CudaCopyJx(const void* value);
 cudaError_t CudaCopyJy(const void* value);
 
 struct THparams {
-	uint64_t* counts;
-	uint64_t* scalars;
+	uint64_t*		counts;
+	uint64_t*		scalars;
+	TFindResult*	find_result;
 	//uint64_t* px;
 	//uint64_t* py;
 	const uint64_t* gx;
 	const uint64_t* gy;
-	uint64_t bx[4];
-	uint64_t by[4];
-	const uint8_t* hash160;
+	uint64_t		bx[4];
+	uint64_t		by[4];
+	const uint8_t* 	hash160;
 };
 
 uint64_t PickThreadsPerBlock(cudaDeviceProp* prop);
@@ -57,6 +58,7 @@ void ClearHParams(THparams* hParams);
 void ClearKParams(TKparams* kParams);
 bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize);
 bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTotal, uint64_t threadsPerBlock, uint64_t batchSize);
+void DumpFound(int gpuIndex, TKparams* kParams);
 
 bool GpuPuzzle::Start() {
 	
@@ -78,6 +80,12 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
     std::memset(&hParams, 0, sizeof(THparams));
     std::memset(&this->Kparams, 0, sizeof(TKparams));
 
+	std::cout << "======================================\r\n";
+	std::cout << std::left << std::setw(20) << " Device (GPU)       " << " : " << CudaIndex << "\r\n";
+	std::cout << std::left << std::setw(20) << " Points/Batch       " << " : " << batchSize << "\r\n";
+	std::cout << std::left << std::setw(20) << " Blocks/SM          " << " : " << blockPerSm << "\r\n";
+	std::cout << std::left << std::setw(20) << " Slices             " << " : " << dwSlices << "\r\n";
+
 #ifndef NO_GPU_MODE	
 	ck(cudaGetDeviceProperties(&prop, CudaIndex), "CUDA init error");
 	
@@ -87,11 +95,6 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	ck(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1), "set cache config");
 	
 #else
-	std::cout << "======================================\r\n";
-	std::cout << std::left << std::setw(20) << " Device (GPU)       " << " : " << CudaIndex << "\r\n";
-	std::cout << std::left << std::setw(20) << " Points/Batch       " << " : " << batchSize << "\r\n";
-	std::cout << std::left << std::setw(20) << " Blocks/SM          " << " : " << blockPerSm << "\r\n";
-	std::cout << std::left << std::setw(20) << " Slices             " << " : " << dwSlices << "\r\n";
 
 	prop.maxThreadsPerBlock = 1024;
 	prop.totalGlobalMem = (uint64_t)32 * 1024 * 1024 * 1024;
@@ -191,6 +194,14 @@ void GpuPuzzle::Execute() {
 #else
 		std::this_thread::sleep_for(std::chrono::milliseconds(11));
 #endif
+		
+		if (Kparams.find_result->found == true) {
+			Found = true;
+			
+			DumpFound(CudaIndex, &Kparams);
+			
+			break;
+		}
 		
 		{
 			u64 t2 = GetTickCount64();
@@ -315,11 +326,13 @@ void ClearHParams(THparams* hParams) {
 #ifndef NO_GPU_MODE
 	if (hParams->counts) cudaFreeHost(hParams->counts);
 	if (hParams->scalars) cudaFreeHost(hParams->scalars);
+	if (hParams->find_result) cudaFreeHost(hParams->find_result);
 	//if (hParams->px) cudaFreeHost(hParams->px);
 	//if (hParams->py) cudaFreeHost(hParams->py);
 #else
 	if (hParams->counts) free(hParams->counts);
 	if (hParams->scalars) free(hParams->scalars);
+	if (hParams->find_result) free(hParams->find_result);
 	//if (hParams->px) free(hParams->px);
 	//if (hParams->py) free(hParams->py);
 #endif
@@ -339,8 +352,9 @@ void ClearKParams(TKparams* kParams) {
 bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize) {
 	uint64_t per_thread_cnt[4];
 	uint64_t r1 = 0ull;
-	uint64_t* h_counts256     = nullptr;
-    uint64_t* h_start_scalars = nullptr;
+	uint64_t* h_counts256     	= nullptr;
+    uint64_t* h_start_scalars 	= nullptr;
+	TFindResult* h_find_result	= nullptr;
     //uint64_t* h_px = nullptr;
     //uint64_t* h_py = nullptr;
 	uint32_t half;
@@ -351,11 +365,13 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 #ifndef NO_GPU_MODE
     ck(cudaHostAlloc(&h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_counts256 alloc");
     ck(cudaHostAlloc(&h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_start_scalars alloc");
+    ck(cudaHostAlloc(&h_find_result,   sizeof(TFindResult), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_found_scalar alloc");
     //cudaHostAlloc(&h_px,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
     //cudaHostAlloc(&h_py,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
 #else
     h_counts256 = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
     h_start_scalars = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
+    h_find_result = (TFindResult*)malloc(sizeof(TFindResult));
     //h_px = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
     //h_py = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
 #endif
@@ -464,6 +480,11 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 
 	}
 
+	// find_result
+    {
+		std::memset(h_find_result, 0, sizeof(TFindResult));
+	}
+
 //#if DEBUG_MODE > 0
 //	for (uint64_t i = 0; i < threadsTotal; ++i) {
 //		printf("[%6" PRIu64 "]: threads: %s\r\n", i, formatHex256(&h_counts256[i*4]).c_str());
@@ -475,6 +496,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	
 	hParams->counts = h_counts256;
 	hParams->scalars = h_start_scalars;
+	hParams->find_result = h_find_result;
 	//hParams->px = h_px;
 	//hParams->py = h_py;
 	hParams->hash160 = hash160;
@@ -487,11 +509,13 @@ LExit:
 #ifndef NO_GPU_MODE		
 		if (h_counts256) cudaFreeHost(h_counts256);
 		if (h_start_scalars) cudaFreeHost(h_start_scalars);
+		if (h_find_result) cudaFreeHost(h_find_result);
 		//if (h_px) cudaFreeHost(h_px);
 		//if (h_py) cudaFreeHost(h_py);
 #else
 		if (h_counts256) free(h_counts256);
 		if (h_start_scalars) free(h_start_scalars);
+		if (h_find_result) free(h_find_result);
 		//if (h_px) free(h_px);
 		//if (h_py) free(h_py);
 #endif
@@ -509,8 +533,7 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 	uint64_t* d_Ry = nullptr;
 	uint64_t* d_counts = nullptr;
     int *d_found_flag=nullptr;
-	//FoundResult *d_found_result=nullptr;
-    unsigned long long *d_hashes_accum=nullptr; unsigned int *d_any_left=nullptr;
+	TFindResult *d_find_result=nullptr;
 	
 	ck(cudaMalloc(&d_start_scalars, threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_start_scalars)");
 	ck(cudaMalloc(&d_counts,        threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_counts)");
@@ -518,7 +541,8 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
     ck(cudaMalloc(&d_Py,            threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Py)");
     ck(cudaMalloc(&d_Rx,            threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Rx)");
     ck(cudaMalloc(&d_Ry,            threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Ry)");
-    
+
+	ck(cudaHostGetDevicePointer((void**)&d_find_result, hParams->find_result, 0), "cudaHostGetDevicePointer(find_result)");
 
     ck(cudaMemcpy(d_start_scalars, 	hParams->scalars, 	threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy scalars");
     ck(cudaMemcpy(d_counts,        	hParams->counts,  	threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy counts");
@@ -572,6 +596,7 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 
 	kParams->scalars = d_start_scalars;
 	kParams->counts = d_counts;
+	kParams->find_result = d_find_result;
 	kParams->px = d_Px;
 	kParams->py = d_Py;
 	kParams->rx = d_Rx;
@@ -593,4 +618,18 @@ LExit:
 	return result;
 }
 
-
+void DumpFound(int gpuIndex, TKparams* kParams) {
+	if (!kParams || !kParams->find_result || !kParams->find_result->found) return;
+	
+	EcPoint p;
+	EcInt k;
+		
+	k.LoadFromBuffer64((u64*)&kParams->find_result->scalar);
+	p = Ec::MultiplyG(k);
+	
+	std::cout << "\r\n======== FOUND MATCH! =================================\r\n";
+	std::cout << std::left << std::setw(20) << " Device (GPU)       " << " : " << gpuIndex << "\r\n";
+	std::cout << std::left << std::setw(20) << " Private Key        " << " : " << formatHex256((const uint64_t*)&kParams->find_result->scalar) << "\r\n";
+	std::cout << std::left << std::setw(20) << " Public Key         " << " : " << formatCompressedPubHex((const uint64_t*)&p.x.data, (const uint64_t*)&p.y.data) << "\r\n";
+	
+}

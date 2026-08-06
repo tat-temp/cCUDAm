@@ -51,6 +51,7 @@ static volatile sig_atomic_t g_sigint = 0;
 static int g_gpucnt = 0;
 static bool g_inited = false;
 static std::atomic<int> g_threadcnt{0};
+static std::atomic<bool> g_found{false};
 static GpuPuzzle* g_GpuPuzzles[MAX_GPU_CNT];
 
 static void handle_sigint(int) {
@@ -358,6 +359,7 @@ uint32_t __stdcall puzzle_thr_proc(void* data)
 	GpuPuzzle* puzzle = (GpuPuzzle*)data;
 	puzzle->Execute();
 	//InterlockedDecrement(&g_threadcnt);
+	if (puzzle->Found) g_found.store(true);
 	g_threadcnt.fetch_sub(1, std::memory_order_acq_rel);
 	return 0;
 }
@@ -367,6 +369,7 @@ void* puzzle_thr_proc(void* data)
 	GpuPuzzle* puzzle = (GpuPuzzle*)data;
 	puzzle->Execute();
 	//__sync_fetch_and_sub(&g_threadcnt, 1);
+	if (puzzle->Found) g_found.store(true);
 	g_threadcnt.fetch_sub(1, std::memory_order_acq_rel);
 	return 0;
 }
@@ -470,6 +473,10 @@ bool find_key(TOutParams& pParams) {
 	while (g_threadcnt.load(std::memory_order_acquire) && !g_sigint) {
 		sleep(1);
 		
+		if (g_found.load(std::memory_order_relaxed)) {
+			break;
+		}
+		
 		if (GetTickCount64() - tm_stats > SHOW_STAT_INTERVAL_SECS * 1000)
 		{
 			show_stat(tm0, pParams.range[0]);
@@ -486,7 +493,7 @@ bool find_key(TOutParams& pParams) {
 	}
 
 	while (g_threadcnt) {
-		sleep(10);
+		sleep(1);
 	}
 	
 	for (int i = 0; i < g_gpucnt; i++) {

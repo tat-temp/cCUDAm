@@ -16,7 +16,7 @@ __device__ H160 getHash160_33_from_limbs(uint8_t prefix02_03, U256 x);
 
 // h5/target_w hold a hash160 as 5 little-endian 32-bit words (word i = bytes [4i..4i+3]).
 // NOTE: there is deliberately no `prefix_equals(h5, w0)` helper any more. The 32-bit filter
-// runs on WORD 2 (see CUDACyclone.cu / the RIPEMD-160 trim in CUDAHash.cu) and never
+// runs on WORD 2 and never
 // materializes an H160 at all -- it compares getHash160_w2_from_limbs()'s return directly.
 static __device__ __forceinline__ bool hash160_matches_full(
     const uint32_t h5[5], const uint32_t target_w[5])

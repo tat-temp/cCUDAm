@@ -23,10 +23,11 @@ private:
 	void Release();
 public:
 	GpuPuzzle() : m_stopFlag(false), m_stat_idx(0), m_speed_stat{},
-              CudaIndex(0), SMCnt(0), Failed(false) { Kparams = {}; }
+              CudaIndex(0), SMCnt(0), Failed(false), Found(false) { Kparams = {}; }
 	int CudaIndex; //gpu index in cuda
 	int SMCnt;
 	bool Failed;
+	bool Found;
 
 	
 	bool Prepare(const uint64_t* pStart, const uint64_t* pRange, const uint8_t* pHash, const uint64_t* gx, const uint64_t* gy, uint64_t batchSize, uint64_t blockPerSm, uint32_t dwSlices);

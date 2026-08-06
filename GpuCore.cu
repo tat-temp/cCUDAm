@@ -31,6 +31,7 @@ __global__ void TestKernel(
     uint64_t* __restrict__ Py,
 	uint64_t* __restrict__ start_scalars,
     uint64_t* __restrict__ counts256,
+	TFindResult* __restrict__ find_result, //found_scalar,
 	uint64_t threadsTotal,
     uint32_t batch_size,
     uint32_t batches_per_launch)
@@ -43,7 +44,7 @@ __global__ void TestKernel(
     if (gid >= threadsTotal) return;
 	
 	//const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));
-    const unsigned full_mask = 0xFFFFFFFFu;
+    const unsigned full_mask = __activemask(); //0xFFFFFFFFu;
 	
 	// Filter on hash160 WORD 2, not word 0: word 2 is the cheapest of the five to produce
     // (its RIPEMD-160 inputs are final 7 rounds earlier -- see CUDAHash.cu). Any single word
@@ -63,10 +64,15 @@ __global__ void TestKernel(
 	while (batches_done < batches_per_launch && ge256_u64(rem, (uint64_t)B)) {
 		uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
 		uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(x1));   // by-value ABI: 1 reg out
+		
         bool pref = (hw2 == target_prefix);
 		if (__any_sync(full_mask, pref)) {
 			bool full = pref && hash160_full_match(prefix, u256_of(x1), c_target_words);
 			if (full) {
+				Copy_u64_x4(find_result->scalar, s1);
+				find_result->found = true;
+
+				__threadfence_system();
 			}
 			
 			if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
@@ -122,6 +128,11 @@ __global__ void TestKernel(
 				if (__any_sync(full_mask, pref)) {
 					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 					if (full) {
+						Copy_u64_x4(find_result->scalar, s1);
+						add256_u64(find_result->scalar, (uint64_t)i + 1ull);
+						find_result->found = true;
+
+						__threadfence_system();
 					}
 					
 					if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
@@ -157,6 +168,11 @@ __global__ void TestKernel(
 				if (__any_sync(full_mask, pref)) {
 					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 					if (full) {
+						Copy_u64_x4(find_result->scalar, s1);
+						sub256_u64(find_result->scalar, (uint64_t)i + 1ull);
+						find_result->found = true;
+
+						__threadfence_system();
 					}
 					
 					if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
@@ -199,6 +215,11 @@ __global__ void TestKernel(
 			if (__any_sync(full_mask, pref)) {
 				bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 				if (full) {
+					Copy_u64_x4(find_result->scalar, s1);
+					add256_u64(find_result->scalar, (uint64_t)half);
+					find_result->found = true;
+
+					__threadfence_system();
 				}
 				
 				if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
@@ -253,6 +274,7 @@ cudaError_t CallGpuKernel(TKparams& Kparams) {
 		Kparams.py,
 		Kparams.scalars,
 		Kparams.counts,
+		Kparams.find_result,
 		Kparams.threads_total,
 		Kparams.batch_size,
 		Kparams.batches_per_launch

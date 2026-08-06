@@ -27,10 +27,11 @@ typedef unsigned char u8;
 typedef char i8;
 typedef __uint128_t uint128_t;
 
-struct FoundResult {
+struct TFindResult {
     uint64_t scalar[4];
     uint64_t rx[4];
     uint64_t ry[4];
+	bool     found;
 };
 
 //gpu kernel parameters
@@ -41,6 +42,7 @@ struct TKparams {
 	uint64_t* py;
 	uint64_t* rx;
 	uint64_t* ry;
+	TFindResult* find_result;
 	uint64_t points_per_run;
 	uint64_t batch_size;
 	uint64_t batches_per_launch;

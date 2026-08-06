@@ -210,4 +210,48 @@ static bool parse_u8(const char* s, u8* res) {
 	return true;
 }
 
+static std::string formatCompressedPubHex(const uint64_t Rx[4], const uint64_t Ry[4]) {
+    uint8_t out[33];
+    out[0] = (Ry[0] & 1ULL) ? 0x03 : 0x02;
+    { uint64_t v = Rx[3]; out[ 1]=(uint8_t)(v>>56); out[ 2]=(uint8_t)(v>>48); out[ 3]=(uint8_t)(v>>40); out[ 4]=(uint8_t)(v>>32); out[ 5]=(uint8_t)(v>>24); out[ 6]=(uint8_t)(v>>16); out[ 7]=(uint8_t)(v>>8); out[ 8]=(uint8_t)(v>>0); }
+    { uint64_t v = Rx[2]; out[ 9]=(uint8_t)(v>>56); out[10]=(uint8_t)(v>>48); out[11]=(uint8_t)(v>>40); out[12]=(uint8_t)(v>>32); out[13]=(uint8_t)(v>>24); out[14]=(uint8_t)(v>>16); out[15]=(uint8_t)(v>>8); out[16]=(uint8_t)(v>>0); }
+    { uint64_t v = Rx[1]; out[17]=(uint8_t)(v>>56); out[18]=(uint8_t)(v>>48); out[19]=(uint8_t)(v>>40); out[20]=(uint8_t)(v>>32); out[21]=(uint8_t)(v>>24); out[22]=(uint8_t)(v>>16); out[23]=(uint8_t)(v>>8); out[24]=(uint8_t)(v>>0); }
+    { uint64_t v = Rx[0]; out[25]=(uint8_t)(v>>56); out[26]=(uint8_t)(v>>48); out[27]=(uint8_t)(v>>40); out[28]=(uint8_t)(v>>32); out[29]=(uint8_t)(v>>24); out[30]=(uint8_t)(v>>16); out[31]=(uint8_t)(v>>8); out[32]=(uint8_t)(v>>0); }
+    static const char* hexd="0123456789ABCDEF";
+    std::string s; s.resize(66);
+    s[ 0]=hexd[(out[ 0]>>4)&0xF]; s[ 1]=hexd[out[ 0]&0xF];
+    s[ 2]=hexd[(out[ 1]>>4)&0xF]; s[ 3]=hexd[out[ 1]&0xF];
+    s[ 4]=hexd[(out[ 2]>>4)&0xF]; s[ 5]=hexd[out[ 2]&0xF];
+    s[ 6]=hexd[(out[ 3]>>4)&0xF]; s[ 7]=hexd[out[ 3]&0xF];
+    s[ 8]=hexd[(out[ 4]>>4)&0xF]; s[ 9]=hexd[out[ 4]&0xF];
+    s[10]=hexd[(out[ 5]>>4)&0xF]; s[11]=hexd[out[ 5]&0xF];
+    s[12]=hexd[(out[ 6]>>4)&0xF]; s[13]=hexd[out[ 6]&0xF];
+    s[14]=hexd[(out[ 7]>>4)&0xF]; s[15]=hexd[out[ 7]&0xF];
+    s[16]=hexd[(out[ 8]>>4)&0xF]; s[17]=hexd[out[ 8]&0xF];
+    s[18]=hexd[(out[ 9]>>4)&0xF]; s[19]=hexd[out[ 9]&0xF];
+    s[20]=hexd[(out[10]>>4)&0xF]; s[21]=hexd[out[10]&0xF];
+    s[22]=hexd[(out[11]>>4)&0xF]; s[23]=hexd[out[11]&0xF];
+    s[24]=hexd[(out[12]>>4)&0xF]; s[25]=hexd[out[12]&0xF];
+    s[26]=hexd[(out[13]>>4)&0xF]; s[27]=hexd[out[13]&0xF];
+    s[28]=hexd[(out[14]>>4)&0xF]; s[29]=hexd[out[14]&0xF];
+    s[30]=hexd[(out[15]>>4)&0xF]; s[31]=hexd[out[15]&0xF];
+    s[32]=hexd[(out[16]>>4)&0xF]; s[33]=hexd[out[16]&0xF];
+    s[34]=hexd[(out[17]>>4)&0xF]; s[35]=hexd[out[17]&0xF];
+    s[36]=hexd[(out[18]>>4)&0xF]; s[37]=hexd[out[18]&0xF];
+    s[38]=hexd[(out[19]>>4)&0xF]; s[39]=hexd[out[19]&0xF];
+    s[40]=hexd[(out[20]>>4)&0xF]; s[41]=hexd[out[20]&0xF];
+    s[42]=hexd[(out[21]>>4)&0xF]; s[43]=hexd[out[21]&0xF];
+    s[44]=hexd[(out[22]>>4)&0xF]; s[45]=hexd[out[22]&0xF];
+    s[46]=hexd[(out[23]>>4)&0xF]; s[47]=hexd[out[23]&0xF];
+    s[48]=hexd[(out[24]>>4)&0xF]; s[49]=hexd[out[24]&0xF];
+    s[50]=hexd[(out[25]>>4)&0xF]; s[51]=hexd[out[25]&0xF];
+    s[52]=hexd[(out[26]>>4)&0xF]; s[53]=hexd[out[26]&0xF];
+    s[54]=hexd[(out[27]>>4)&0xF]; s[55]=hexd[out[27]&0xF];
+    s[56]=hexd[(out[28]>>4)&0xF]; s[57]=hexd[out[28]&0xF];
+    s[58]=hexd[(out[29]>>4)&0xF]; s[59]=hexd[out[29]&0xF];
+    s[60]=hexd[(out[30]>>4)&0xF]; s[61]=hexd[out[30]&0xF];
+    s[62]=hexd[(out[31]>>4)&0xF]; s[63]=hexd[out[31]&0xF];
+    s[64]=hexd[(out[32]>>4)&0xF]; s[65]=hexd[out[32]&0xF];
+    return s;
+}
 
