@@ -195,7 +195,7 @@ void GpuPuzzle::Execute() {
 		std::this_thread::sleep_for(std::chrono::milliseconds(11));
 #endif
 		
-		if (Kparams.find_result->found == true) {
+		if (Kparams.h_find_result->found == true) {
 			Found = true;
 			
 			DumpFound(CudaIndex, &Kparams);
@@ -596,7 +596,8 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 
 	kParams->scalars = d_start_scalars;
 	kParams->counts = d_counts;
-	kParams->find_result = d_find_result;
+	kParams->d_find_result = d_find_result;
+	kParams->h_find_result = hParams->find_result;
 	kParams->px = d_Px;
 	kParams->py = d_Py;
 	kParams->rx = d_Rx;
@@ -619,17 +620,17 @@ LExit:
 }
 
 void DumpFound(int gpuIndex, TKparams* kParams) {
-	if (!kParams || !kParams->find_result || !kParams->find_result->found) return;
+	if (!kParams || !kParams->h_find_result || !kParams->h_find_result->found) return;
 	
 	EcPoint p;
 	EcInt k;
 		
-	k.LoadFromBuffer64((u64*)&kParams->find_result->scalar);
+	k.LoadFromBuffer64((u64*)&kParams->h_find_result->scalar);
 	p = Ec::MultiplyG(k);
 	
 	std::cout << "\r\n======== FOUND MATCH! =================================\r\n";
 	std::cout << std::left << std::setw(20) << " Device (GPU)       " << " : " << gpuIndex << "\r\n";
-	std::cout << std::left << std::setw(20) << " Private Key        " << " : " << formatHex256((const uint64_t*)&kParams->find_result->scalar) << "\r\n";
+	std::cout << std::left << std::setw(20) << " Private Key        " << " : " << formatHex256((const uint64_t*)&kParams->h_find_result->scalar) << "\r\n";
 	std::cout << std::left << std::setw(20) << " Public Key         " << " : " << formatCompressedPubHex((const uint64_t*)&p.x.data, (const uint64_t*)&p.y.data) << "\r\n";
 	
 }

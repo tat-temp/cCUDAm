@@ -274,7 +274,7 @@ cudaError_t CallGpuKernel(TKparams& Kparams) {
 		Kparams.py,
 		Kparams.scalars,
 		Kparams.counts,
-		Kparams.find_result,
+		Kparams.d_find_result,
 		Kparams.threads_total,
 		Kparams.batch_size,
 		Kparams.batches_per_launch

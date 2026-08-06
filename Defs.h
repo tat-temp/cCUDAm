@@ -42,7 +42,8 @@ struct TKparams {
 	uint64_t* py;
 	uint64_t* rx;
 	uint64_t* ry;
-	TFindResult* find_result;
+	TFindResult* d_find_result;
+	TFindResult* h_find_result;
 	uint64_t points_per_run;
 	uint64_t batch_size;
 	uint64_t batches_per_launch;
