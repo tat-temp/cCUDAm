@@ -328,6 +328,7 @@ void ClearHParams(THparams* hParams) {
 #ifndef NO_GPU_MODE
 	if (hParams->counts) cudaFreeHost(hParams->counts);
 	if (hParams->scalars) cudaFreeHost(hParams->scalars);
+std::cout << "XXXn: " << "\r\n";
 	if (hParams->find_result) cudaFreeHost(hParams->find_result);
 	//if (hParams->px) cudaFreeHost(hParams->px);
 	//if (hParams->py) cudaFreeHost(hParams->py);
@@ -513,6 +514,7 @@ LExit:
 #ifndef NO_GPU_MODE		
 		if (h_counts256) cudaFreeHost(h_counts256);
 		if (h_start_scalars) cudaFreeHost(h_start_scalars);
+std::cout << "XXXn: " << "\r\n";
 		if (h_find_result) cudaFreeHost(h_find_result);
 		//if (h_px) cudaFreeHost(h_px);
 		//if (h_py) cudaFreeHost(h_py);
