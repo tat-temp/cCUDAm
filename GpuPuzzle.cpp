@@ -194,8 +194,6 @@ void GpuPuzzle::Execute() {
 #else
 		std::this_thread::sleep_for(std::chrono::milliseconds(11));
 #endif
-std::cout << "XXX0: " << (Kparams.h_find_result == nullptr) << " add: " << Kparams.h_find_result << " .\r\n";		
-std::cout << "XXX1: " << &Kparams.h_find_result->found << " .\r\n";
 	
 		if (Kparams.h_find_result->found == true) {
 			Found = true;
@@ -369,8 +367,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
     ck(cudaHostAlloc(&h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_counts256 alloc");
     ck(cudaHostAlloc(&h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_start_scalars alloc");
     ck(cudaHostAlloc(&h_find_result,   sizeof(TFindResult), cudaHostAllocMapped), "h_found_scalar alloc");
-std::cout << "XXX2: " << " addr: " << h_find_result << " .\r\n";			
-std::cout << "XXX3: " << (h_find_result->found == true) << " .\r\n";			
     //cudaHostAlloc(&h_px,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
     //cudaHostAlloc(&h_py,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
 #else
@@ -514,7 +510,6 @@ LExit:
 #ifndef NO_GPU_MODE		
 		if (h_counts256) cudaFreeHost(h_counts256);
 		if (h_start_scalars) cudaFreeHost(h_start_scalars);
-std::cout << "XXXn: " << "\r\n";
 		if (h_find_result) cudaFreeHost(h_find_result);
 		//if (h_px) cudaFreeHost(h_px);
 		//if (h_py) cudaFreeHost(h_py);
