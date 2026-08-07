@@ -267,10 +267,9 @@ __global__ void TestKernel(
     
 }
 
-cudaError_t CallGpuKernel(TKparams& Kparams) {
-	cudaError_t err;
+void CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 	
-	TestKernel <<< Kparams.block_count, Kparams.block_size, 0 >>> (
+	TestKernel <<< Kparams.block_count, Kparams.block_size, 0, cudaStream >>> (
 		Kparams.px,
 		Kparams.py,
 		Kparams.scalars,
@@ -280,14 +279,6 @@ cudaError_t CallGpuKernel(TKparams& Kparams) {
 		Kparams.batch_size,
 		Kparams.batches_per_launch
 	);
-	
-	err = cudaGetLastError();
-	
-	if (err != cudaSuccess) return err;
-	
-	
-	
-	return cudaSuccess;
 }
 
 cudaError_t CudaCopyTargetWords(const void* value) {

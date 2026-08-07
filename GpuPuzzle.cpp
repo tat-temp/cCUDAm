@@ -20,7 +20,7 @@
     } \
 }; \
 
-cudaError_t CallGpuKernel(TKparams& Kparams);
+void CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream);
 cudaError_t CudaSetupKernel();
 
 cudaError_t CallGpuMulKernel(
@@ -67,10 +67,15 @@ bool GpuPuzzle::Start() {
 
 void GpuPuzzle::Release() {
 	ClearKParams(&Kparams);
+
+#ifndef NO_GPU_MODE	
+	if (m_cudaStream) cudaStreamDestroy(m_cudaStream);
+	m_cudaStream = nullptr;
+#endif
 }
 
 bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const uint8_t* pHash, const uint64_t* gx, const uint64_t* gy, uint64_t batchSize, uint64_t maxUserBlockPerSm, uint32_t dwSlices) {
-	THparams hParams;
+	THparams hParams = {0};
 	bool result = false;
 	cudaDeviceProp prop{};
 	uint64_t threadsPerBlock;
@@ -81,7 +86,6 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	uint64_t remRunsTotal;
 
     std::memset(m_speed_stat, 0, sizeof(m_speed_stat));
-    std::memset(&hParams, 0, sizeof(THparams));
     std::memset(&this->Kparams, 0, sizeof(TKparams));
 
 	std::cout << "=======================================\r\n";
@@ -121,12 +125,12 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 
 	if (threadsTotal == 0llu) {
 		std::cerr << "Search interval is too small for the specified parameters.\r\n";
-		return result;
+		goto LExit;
 	}
 
 	if (!PrepareHost(&hParams, pStart, pHash, pRange, threadsTotal, effectiveBatchSize)) {
 		std::cerr << "Prepare Host data failed.\r\n";
-		return result;
+		goto LExit;
 	}
 
 	hParams.gx = gx;
@@ -134,6 +138,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 
 #ifndef NO_GPU_MODE
 	if (!PrepareCuda(&this->Kparams, (const THparams*)&hParams, threadsTotal, threadsPerBlock, effectiveBatchSize)) {
+		std::cerr << "Prepare CUDA data failed.\r\n";
 		goto LExit;
 	}
 #else
@@ -153,7 +158,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	}
 	if (runsTotal[1] | runsTotal[2] | runsTotal[3]) {
 		std::cerr << "Runs total exceeds u64 value.\r\n";
-		return result;
+		goto LExit;
 	}
 	Kparams.runs_total = runsTotal[0];
 
@@ -166,6 +171,8 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	std::cout << std::left << std::setw(20) << " Threads            " << " : " << Kparams.threads_total << "\r\n";	
 	std::cout << std::left << std::setw(20) << " Points/run         " << " : " << Kparams.points_per_run <<  "\r\n";
 	std::cout << std::left << std::setw(20) << " Runs               " << " : " << Kparams.runs_total <<  "\r\n";
+
+	ck(cudaStreamCreateWithFlags(&m_cudaStream, cudaStreamNonBlocking), "create stream");
 	
 	result = true;
 	
@@ -204,10 +211,11 @@ void GpuPuzzle::Execute() {
 		u64 t1 = GetTickCount64();
 
 #ifndef NO_GPU_MODE	
-		ck(CallGpuKernel(Kparams), "gpuMainKernel call");
+		CallGpuKernel(Kparams, m_cudaStream);//ck(, "gpuMainKernel call");
+		ck(cudaStreamSynchronize(m_cudaStream), "gpuMainKernel call");
 		
-		ck(cudaDeviceSynchronize(), "gpuMainKernel sync");
-        ck(cudaGetLastError(), "gpuMainKernel launch");
+		//ck(cudaDeviceSynchronize(), "gpuMainKernel sync");
+        //ck(cudaGetLastError(), "gpuMainKernel launch");
 #else
 		std::this_thread::sleep_for(std::chrono::milliseconds(11));
 #endif
