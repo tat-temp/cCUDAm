@@ -8,7 +8,7 @@ import sys
 import math
 import random
 import re
-import select
+
 import struct
 import threading
 from typing import List, Tuple, Optional, Set, Dict
@@ -152,6 +152,16 @@ def parse_batch_from_grid(grid_arg: Optional[str]) -> Optional[int]:
 # banner probe below could not run; the kernel itself is the real enforcer.
 KERNEL_MAX_BATCH = 1024
 
+# The binary prints "Points/Batch" TWICE: once under "===== Input =====" (what the user asked
+# for) and once under "===== Calculated =====" (what the kernel will actually run, after
+# CalcEffectiveBatchSize has possibly shrunk it -- GpuPuzzle.cpp:94 vs :166). Only the second is
+# a claim about the kernel. Matching the first would overstate B whenever the batch was shrunk,
+# leaving whole residue classes ungenerated and therefore untested, while every test still
+# reported PASS -- the exact hole this probe exists to close.
+CALC_HDR_RE = re.compile(r"=+\s*Calculated\s*=+")
+BATCH_RE    = re.compile(r"\s*Points/Batch\s*:\s*(\d+)")
+RUNS_RE     = re.compile(r"\s*Runs\s*:\s*(\d+)")   # last line of the Calculated block
+
 def probe_batch_size(path: str, range_arg: str, grid_arg: Optional[str],
                      timeout_s: float = 90.0) -> Tuple[Optional[int], str, List[str]]:
     """Ask the binary which batch size it will ACTUALLY use, by reading its own banner.
@@ -188,6 +198,7 @@ def probe_batch_size(path: str, range_arg: str, grid_arg: Optional[str],
     # lines sit unread until the child's next flush -- one line per 1 s progress print.
     batch: List[Optional[int]] = [None]
     stopped_early = [False]   # reader returned on purpose (child still running), vs. hit EOF
+    seen_calculated = [False]
     tail: List[str] = []
 
     def reader() -> None:
@@ -196,12 +207,17 @@ def probe_batch_size(path: str, range_arg: str, grid_arg: Optional[str],
             for line in p.stdout:
                 tail.append(line.rstrip())
                 del tail[:-14]
-                m = re.match(r"\s*Points batch size\s*:\s*(\d+)", line)
+                if CALC_HDR_RE.match(line):
+                    seen_calculated[0] = True
+                    continue
+                if not seen_calculated[0]:
+                    continue              # still in the Input block; that B is not the kernel's
+                m = BATCH_RE.match(line)
                 if m:
                     batch[0] = int(m.group(1))
                     stopped_early[0] = True
                     return
-                if "Phase-1" in line:     # banner is over and the line never came
+                if RUNS_RE.match(line):   # end of the Calculated block, the line never came
                     stopped_early[0] = True
                     return
         except Exception:
@@ -256,7 +272,7 @@ def run_and_watch(
     address: str,
     grid_arg: Optional[str],
     match_marker: str = "======== FOUND MATCH! =================================",
-    timeout: Optional[int] = None,
+    timeout: Optional[int] = 1800,
 ) -> Tuple[bool, Optional[str]]:
     args = [path, "--range", range_arg, "--address", address]
     if grid_arg:
@@ -269,16 +285,35 @@ def run_and_watch(
         universal_newlines=True,
     )
     found_priv: Optional[str] = None
-    start_time = time.time()
+
+    # The deadline has to be enforced by a watchdog, not by a check inside the read loop:
+    # `for line in p.stdout` blocks until a line arrives, so a child that hangs before printing
+    # anything (stuck in Prepare, a wedged GPU, a driver reset) would never reach the check and
+    # proof.py would wait forever. Terminating the child instead makes stdout hit EOF, which
+    # ends the loop by itself.
+    timed_out = [False]
+    watchdog: Optional[threading.Timer] = None
+    if timeout is not None:
+        def _on_deadline() -> None:
+            timed_out[0] = True
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        watchdog = threading.Timer(timeout, _on_deadline)
+        watchdog.daemon = True
+        watchdog.start()
+
     try:
         assert p.stdout is not None
         for line in p.stdout:
             if match_marker in line:
+                # DumpFound prints Device / Private Key / Public Key immediately after the
+                # marker and the process then exits, so a bounded readline loop always
+                # terminates: either the key arrives or the stream hits EOF. select() was not
+                # portable here -- on Windows it accepts only sockets, not pipe descriptors,
+                # so it raised OSError on the one path that matters, the successful one.
                 for _ in range(20):
-                    fd = p.stdout.fileno()
-                    rlist, _, _ = select.select([fd], [], [], 0.2)
-                    if not rlist:
-                        break
                     nxt = p.stdout.readline()
                     if not nxt:
                         break
@@ -286,7 +321,7 @@ def run_and_watch(
                         parts = nxt.split(":", 1)
                         if len(parts) > 1:
                             found_priv = parts[1].strip()
-                            break
+                        break
                 p.terminate()
                 try:
                     p.wait(timeout=5)
@@ -297,18 +332,17 @@ def run_and_watch(
                 parts = line.split(":", 1)
                 if len(parts) > 1 and parts[1].strip():
                     found_priv = parts[1].strip()
-            if timeout is not None and (time.time() - start_time) > timeout:
-                p.terminate()
-                try:
-                    p.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-                return False, None
+            if timed_out[0]:
+                break
         p.wait()
+        if timed_out[0]:
+            return False, None
         if found_priv is not None:
             return True, found_priv
         return False, None
     finally:
+        if watchdog is not None:
+            watchdog.cancel()
         if p.poll() is None:
             try:
                 p.terminate()
@@ -411,8 +445,11 @@ def main() -> None:
                         help="ASSERT the kernel's batch size equals this. Not an override: a "
                              "proof-side batch that disagrees with the kernel voids the mod-B "
                              "coverage claim, so a mismatch is a hard error.")
-    parser.add_argument("--timeout", dest="timeout", type=int, default=None,
-                        help="Optional timeout in seconds for each run")
+    parser.add_argument("--timeout", dest="timeout", type=int, default=1800,
+                        help="Per-run timeout in seconds (default: 1800). 0 disables the cap. "
+                             "A run that does not find its key scans the whole range before "
+                             "exiting, so this must exceed a full-range scan or passing tests "
+                             "will be reported as failures.")
     parser.add_argument("--start-count", type=int, default=128,
                         help="Count per parity at range start (default: 128)")
     parser.add_argument("--end-count", type=int, default=128,
@@ -459,9 +496,13 @@ def main() -> None:
     if probed is not None:
         B, b_source, b_verified = probed, "probed from the binary's banner", True
         if declared is not None and declared != probed:
-            print(f"MISMATCH: --grid says batch={declared} but the kernel reports {probed}.",
-                  file=sys.stderr)
-            sys.exit(1)
+            # Not an error. CalcEffectiveBatchSize (GpuPuzzle.cpp) legitimately shrinks the batch
+            # when the range is small relative to the thread count, so --grid is a request and
+            # the Calculated banner line is the answer. B is already the probed value, so every
+            # coverage claim below is still computed against what the kernel really ran.
+            # (--batch, checked next, stays a hard assertion: that one is a deliberate claim.)
+            print(f"NOTE: --grid asked for batch={declared}, the kernel shrank it to {probed}. "
+                  f"Coverage is computed mod {probed}.", file=sys.stderr)
     else:
         # A binary that cannot be launched, or that REFUSED this configuration, is fatal: it
         # will refuse all N test runs the same way, and the probe is already holding its own
@@ -486,7 +527,7 @@ def main() -> None:
                 print(f"    | {ln}", file=sys.stderr)
             sys.exit(1)
         B, b_source, b_verified = declared, f"UNVERIFIED -- probe {probe_status}; assumed from --grid", False
-        print(f"WARNING: could not read 'Points batch size' from the binary (probe: {probe_status});",
+        print(f"WARNING: could not read the Calculated 'Points/Batch' line from the binary (probe: {probe_status});",
               file=sys.stderr)
         print(f"         assuming B={B} from --grid. Every coverage claim below is only mod-B",
               file=sys.stderr)
@@ -500,7 +541,7 @@ def main() -> None:
               f"leaves whole residue classes untested while still reporting PASS.", file=sys.stderr)
         sys.exit(1)
 
-    # Mirror the kernel's own batch checks (CUDACyclone.cu:465 and :469).
+    # Mirror the kernel's own batch checks (GpuCore.cu:40).
     if B <= 0 or (B & 1) != 0 or (B & (B - 1)) != 0:
         print(f"Batch size must be even and a power of two; got {B}.", file=sys.stderr)
         sys.exit(1)
@@ -610,7 +651,8 @@ def main() -> None:
             ofs.flush()
 
             found, found_priv = run_and_watch(
-                args.path, args.range_arg, addr, args.grid_arg, timeout=args.timeout
+                args.path, args.range_arg, addr, args.grid_arg,
+                timeout=(args.timeout if args.timeout and args.timeout > 0 else None)
             )
 
             if found:
