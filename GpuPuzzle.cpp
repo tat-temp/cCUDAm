@@ -211,7 +211,7 @@ void GpuPuzzle::Execute() {
 		u64 t1 = GetTickCount64();
 
 #ifndef NO_GPU_MODE	
-		CallGpuKernel(Kparams, m_cudaStream);//ck(, "gpuMainKernel call");
+		CallGpuKernel(Kparams, m_cudaStream);
 		ck(cudaStreamSynchronize(m_cudaStream), "gpuMainKernel call");
 		
 		//ck(cudaDeviceSynchronize(), "gpuMainKernel sync");
