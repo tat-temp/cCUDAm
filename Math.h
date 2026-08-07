@@ -33,13 +33,29 @@ static bool add_256_u64(const uint64_t* a, uint64_t b, uint64_t* r) {
 	return carry != 0;
 }
 
+// r = a * b (mod 2^256). Returns true if the product did not fit in 256 bits.
+static bool mul_256_u64(const uint64_t* a, uint64_t b, uint64_t* r) {
+	__uint128_t t;
+
+	{ t = (__uint128_t)a[0] * b;                            r[0] = (uint64_t)t; }
+	{ t = (__uint128_t)a[1] * b + (uint64_t)(t >> 64);      r[1] = (uint64_t)t; }
+	{ t = (__uint128_t)a[2] * b + (uint64_t)(t >> 64);      r[2] = (uint64_t)t; }
+	{ t = (__uint128_t)a[3] * b + (uint64_t)(t >> 64);      r[3] = (uint64_t)t; }
+
+	return (uint64_t)(t >> 64) != 0;
+}
+
+// The borrow must come from comparing a[i] against b[i] directly. Folding it in first
+// (bi = b[i] + borrow) wraps to 0 when b[i] is 0xFFFFFFFFFFFFFFFF, which makes a[i] < bi
+// false and drops the outgoing borrow: the limb value stays right but the difference is
+// reported 2^(64*(i+1)) too large, with a bogus "no borrow" return.
 static bool sub_256(const uint64_t* a, const uint64_t* b, uint64_t* r) {
 	uint64_t borrow = 0ULL;
-	
-    { uint64_t bi = b[0] + borrow; if (a[0] < bi) { r[0] = (uint64_t)(((__uint128_t(1) << 64) + a[0]) - bi); borrow = 1; } else { r[0] = a[0] - bi; borrow = 0; } }
-    { uint64_t bi = b[1] + borrow; if (a[1] < bi) { r[1] = (uint64_t)(((__uint128_t(1) << 64) + a[1]) - bi); borrow = 1; } else { r[1] = a[1] - bi; borrow = 0; } }
-    { uint64_t bi = b[2] + borrow; if (a[2] < bi) { r[2] = (uint64_t)(((__uint128_t(1) << 64) + a[2]) - bi); borrow = 1; } else { r[2] = a[2] - bi; borrow = 0; } }
-    { uint64_t bi = b[3] + borrow; if (a[3] < bi) { r[3] = (uint64_t)(((__uint128_t(1) << 64) + a[3]) - bi); borrow = 1; } else { r[3] = a[3] - bi; borrow = 0; } }
-	
+
+    { __uint128_t t = (__uint128_t)a[0] - b[0] - borrow; r[0] = (uint64_t)t; borrow = (uint64_t)(t >> 64) & 1ULL; }
+    { __uint128_t t = (__uint128_t)a[1] - b[1] - borrow; r[1] = (uint64_t)t; borrow = (uint64_t)(t >> 64) & 1ULL; }
+    { __uint128_t t = (__uint128_t)a[2] - b[2] - borrow; r[2] = (uint64_t)t; borrow = (uint64_t)(t >> 64) & 1ULL; }
+    { __uint128_t t = (__uint128_t)a[3] - b[3] - borrow; r[3] = (uint64_t)t; borrow = (uint64_t)(t >> 64) & 1ULL; }
+
 	return borrow != 0;
 }

@@ -190,6 +190,8 @@ LExit:
 void GpuPuzzle::Execute() {
 	cudaError_t err;
 	uint64_t pnt_cnt;
+	uint64_t runs_done = 0ull;;
+	uint64_t runs_total = 0ull;;
 
 	Failed = false;
 
@@ -206,8 +208,9 @@ void GpuPuzzle::Execute() {
 	}
 
 	pnt_cnt = Kparams.points_per_run;
+	runs_total = Kparams.runs_total;
 
-	while (!m_stopFlag) {
+	while (!m_stopFlag && runs_done < runs_total) {
 		u64 t1 = GetTickCount64();
 
 #ifndef NO_GPU_MODE	
@@ -219,6 +222,8 @@ void GpuPuzzle::Execute() {
 #else
 		std::this_thread::sleep_for(std::chrono::milliseconds(11));
 #endif
+
+		runs_done++;
 
 		{
 			u64 t2 = GetTickCount64();
@@ -317,16 +322,28 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, uint64_t threadsPerBlock, const u
 	//printf("result (0): %llu\r\n", (unsigned long long)result);
 	
 	if (!(maxThreadsByRange[1] | maxThreadsByRange[2] | maxThreadsByRange[3])) {
-		//printf("result (1): %llu\r\n", (unsigned long long)maxThreadsByRange[0]);
-		uint64_t roundedBlock = (maxThreadsByRange[0] + (prop->multiProcessorCount * BLOCKS_PER_SM) - 1) / (prop->multiProcessorCount * BLOCKS_PER_SM);
-		//printf("result (2): %llu\r\n", (unsigned long long)roundedBlock);
-		result = std::min(roundedBlock * (prop->multiProcessorCount * BLOCKS_PER_SM), result);
-		//printf("result (3): %llu\r\n", (unsigned long long)result);
+		////printf("result (1): %llu\r\n", (unsigned long long)maxThreadsByRange[0]);
+		//uint64_t roundedBlock = (maxThreadsByRange[0] + (prop->multiProcessorCount * BLOCKS_PER_SM) - 1) / (prop->multiProcessorCount * BLOCKS_PER_SM);
+		////printf("result (2): %llu\r\n", (unsigned long long)roundedBlock);
+		//result = std::min(roundedBlock * (prop->multiProcessorCount * BLOCKS_PER_SM), result);
+		////printf("result (3): %llu\r\n", (unsigned long long)result);
+		result = std::min(maxThreadsByRange[0], result);
 	}
 	
 	result = std::max(result, minThreads);
 	//printf("result (4): %llu\r\n", (unsigned long long)result);
-	
+
+	// The caller derives block_count = threadsTotal / threadsPerBlock with a truncating divide,
+	// so anything left over here is a set of threads that gets a sub-range and a start point in
+	// PrepareHost and is then never launched -- its keys are silently skipped. maxThreadsByUser
+	// and minThreads are multiples of threadsPerBlock by construction; maxThreadsByMem and
+	// maxThreadsByRange are arbitrary quotients, so the alignment has to happen here, after the
+	// last clamp. Round DOWN: rounding up could exceed the memory budget or the user's
+	// blocks/SM cap. Dropping up to threadsPerBlock-1 threads costs no coverage, because
+	// PrepareHost divides the range by whatever count it is given. minThreads is at least
+	// 2 * threadsPerBlock, so at least one full block always survives.
+	result -= result % threadsPerBlock;
+
 	return result;
 }
 
@@ -383,14 +400,27 @@ void ClearKParams(TKparams* kParams) {
 
 bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize) {
 	uint64_t per_thread_cnt[4];
+	uint64_t batch_cnt[4];
 	uint64_t r1 = 0ull;
+	uint64_t rem_batch = 0ull;
 	uint64_t* h_counts256     	= nullptr;
     uint64_t* h_start_scalars 	= nullptr;
 	TFindResult* h_find_result	= nullptr;
 	uint32_t half;
 	bool result = false;
 
-	div_256_u64(range, threadsTotal, per_thread_cnt, &r1);
+	// Distribute whole BATCHES, not raw keys. The kernel consumes exactly batchSize keys per
+	// iteration and stops as soon as fewer than that remain (GpuCore.cu:65) -- there is no short
+	// final pass -- so a per-thread count that is not a multiple of batchSize leaves its
+	// remainder permanently unscanned. Rounding the batch total up costs at most batchSize-1
+	// keys of over-scan past the end of the range, which is harmless; a short tail is not.
+	// r1 counts the threads that get one EXTRA batch.
+	div_256_u64(range, batchSize, batch_cnt, &rem_batch);
+	if (rem_batch) {
+		add_256_u64((const uint64_t*)&batch_cnt, 1ull, (uint64_t*)&batch_cnt);
+	}
+	div_256_u64((const uint64_t*)&batch_cnt, threadsTotal, per_thread_cnt, &r1);
+	mul_256_u64((const uint64_t*)&per_thread_cnt, batchSize, (uint64_t*)&per_thread_cnt);
 
 #ifndef NO_GPU_MODE
     ck(cudaHostAlloc(&h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_counts256 alloc");
@@ -414,7 +444,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 			h_counts256[i*4+3] = per_thread_cnt[3];
 			
 			if (i < r1) {
-				add_256_u64((const uint64_t*)&h_counts256[i*4], (uint64_t)1, (uint64_t*)&h_counts256[i*4]);
+				add_256_u64((const uint64_t*)&h_counts256[i*4], batchSize, (uint64_t*)&h_counts256[i*4]);
 			}
 #if DEBUG_MODE > 0
 			std::cout << "[%6" << i << "]: " << formatHex256(&h_counts256[i*4]) << "\r\n";
@@ -441,7 +471,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
             uint64_t next[4];
 			add_256((const uint64_t*)&cur, (const uint64_t*)&per_thread_cnt, (uint64_t*)&next);
 			if (i < r1) {
-				add_256_u64((const uint64_t*)&next, (uint64_t)1, (uint64_t*)&next);
+				add_256_u64((const uint64_t*)&next, batchSize, (uint64_t*)&next);
 			}
 			
 #if DEBUG_MODE > 0

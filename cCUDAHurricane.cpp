@@ -216,8 +216,22 @@ int validate_params(TInParams& pInParams, TOutParams& pOutParams, char** argv) {
         std::cerr << "Error: invalid range hex\n"; return EXIT_FAILURE;
     }
 	
-	sub_256(range_end, range_start, pOutParams.range);
-	add_256(pOutParams.range, num_256_1, pOutParams.range);
+	// Both results carry a status the caller must read. A reversed range borrows out of
+	// sub_256 and yields 2^256-1, which the +1 then wraps to a length of 0; a length of 0
+	// survives every downstream size check (max(0, minThreads) lifts threadsTotal past the
+	// threadsTotal == 0 test), so the program would print a healthy configuration and scan
+	// nothing at all.
+	if (sub_256(range_end, range_start, pOutParams.range)) {
+		std::cerr << "Error: range end must be >= range start\n";
+		return EXIT_FAILURE;
+	}
+	if (add_256(pOutParams.range, num_256_1, pOutParams.range)) {
+		// Only reachable for start=0, end=FFFF...FF: the inclusive length is exactly 2^256
+		// and does not fit in 256 bits. secp256k1's order is below 2^256 anyway, so this is
+		// never a range worth scanning.
+		std::cerr << "Error: range covers the entire 2^256 keyspace; its length cannot be represented. Narrow the range.\n";
+		return EXIT_FAILURE;
+	}
 
     if (!pInParams.address_b58.empty()) {
         if (!decode_p2pkh_address(pInParams.address_b58, pOutParams.target_hash160)) {

@@ -99,41 +99,49 @@ namespace host_sha256 {
     }
 }
 
+// -1 for anything that is not a hex digit.
+static int hex_digit_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// Parses exactly len hex digits at s. Rejects any non-hex character rather than stopping at it.
+// std::stoull is deliberately not used here: with pos = nullptr it silently truncates at the
+// first bad character ("1z" -> 1), and it throws std::invalid_argument when a group has no
+// leading digit at all -- and nothing in this program catches that.
+static bool hex_to_u64(const char* s, size_t len, uint64_t* out) {
+    uint64_t v = 0ULL;
+    for (size_t i = 0; i < len; ++i) {
+        int d = hex_digit_val(s[i]);
+        if (d < 0) return false;
+        v = (v << 4) | (uint64_t)d;
+    }
+    *out = v;
+    return true;
+}
+
 static bool hexToLE64(const std::string& h_in, uint64_t w[4]) {
     std::string h = h_in;
     if (h.size() >= 2 && (h[0] == '0') && (h[1] == 'x' || h[1] == 'X')) h = h.substr(2);
-    if (h.size() > 64) return false;
+    if (h.empty() || h.size() > 64) return false;
     if (h.size() < 64) h = std::string(64 - h.size(), '0') + h;
-    if (h.size() != 64) return false;
-    w[3] = std::stoull(h.substr( 0, 16), nullptr, 16);
-    w[2] = std::stoull(h.substr(16, 16), nullptr, 16);
-    w[1] = std::stoull(h.substr(32, 16), nullptr, 16);
-    w[0] = std::stoull(h.substr(48, 16), nullptr, 16);
+    if (!hex_to_u64(h.data() +  0, 16, &w[3])) return false;
+    if (!hex_to_u64(h.data() + 16, 16, &w[2])) return false;
+    if (!hex_to_u64(h.data() + 32, 16, &w[1])) return false;
+    if (!hex_to_u64(h.data() + 48, 16, &w[0])) return false;
     return true;
 }
 
 static bool hexToHash160(const std::string& h, uint8_t hash160[20]) {
     if (h.size() != 40) return false;
-    hash160[ 0] = (uint8_t)std::stoul(h.substr( 0, 2), nullptr, 16);
-    hash160[ 1] = (uint8_t)std::stoul(h.substr( 2, 2), nullptr, 16);
-    hash160[ 2] = (uint8_t)std::stoul(h.substr( 4, 2), nullptr, 16);
-    hash160[ 3] = (uint8_t)std::stoul(h.substr( 6, 2), nullptr, 16);
-    hash160[ 4] = (uint8_t)std::stoul(h.substr( 8, 2), nullptr, 16);
-    hash160[ 5] = (uint8_t)std::stoul(h.substr(10, 2), nullptr, 16);
-    hash160[ 6] = (uint8_t)std::stoul(h.substr(12, 2), nullptr, 16);
-    hash160[ 7] = (uint8_t)std::stoul(h.substr(14, 2), nullptr, 16);
-    hash160[ 8] = (uint8_t)std::stoul(h.substr(16, 2), nullptr, 16);
-    hash160[ 9] = (uint8_t)std::stoul(h.substr(18, 2), nullptr, 16);
-    hash160[10] = (uint8_t)std::stoul(h.substr(20, 2), nullptr, 16);
-    hash160[11] = (uint8_t)std::stoul(h.substr(22, 2), nullptr, 16);
-    hash160[12] = (uint8_t)std::stoul(h.substr(24, 2), nullptr, 16);
-    hash160[13] = (uint8_t)std::stoul(h.substr(26, 2), nullptr, 16);
-    hash160[14] = (uint8_t)std::stoul(h.substr(28, 2), nullptr, 16);
-    hash160[15] = (uint8_t)std::stoul(h.substr(30, 2), nullptr, 16);
-    hash160[16] = (uint8_t)std::stoul(h.substr(32, 2), nullptr, 16);
-    hash160[17] = (uint8_t)std::stoul(h.substr(34, 2), nullptr, 16);
-    hash160[18] = (uint8_t)std::stoul(h.substr(36, 2), nullptr, 16);
-    hash160[19] = (uint8_t)std::stoul(h.substr(38, 2), nullptr, 16);
+    for (int i = 0; i < 20; ++i) {
+        int hi = hex_digit_val(h[2 * i]);
+        int lo = hex_digit_val(h[2 * i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        hash160[i] = (uint8_t)((hi << 4) | lo);
+    }
     return true;
 }
 
