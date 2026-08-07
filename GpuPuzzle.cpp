@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cinttypes> // Required for PRIu64
 #include <thread> // Required for std::this_thread::sleep_for
+#include <algorithm> // Required for std::min
 #include <cuda_runtime.h>
 
 #include "GpuPuzzle.h"
@@ -40,8 +41,6 @@ struct THparams {
 	uint64_t*		counts;
 	uint64_t*		scalars;
 	TFindResult*	find_result;
-	//uint64_t* px;
-	//uint64_t* py;
 	const uint64_t* gx;
 	const uint64_t* gy;
 	uint64_t		bx[4];
@@ -49,11 +48,12 @@ struct THparams {
 	const uint8_t* 	hash160;
 };
 
-uint64_t PickThreadsPerBlock(cudaDeviceProp* prop);
+uint64_t GetThreadsPerBlock(cudaDeviceProp* prop);
 uint64_t GetMaxThreadsByMem(cudaDeviceProp* prop);
-uint64_t PickThreadsTotal(uint64_t upper, uint64_t threadsPerBlock, uint64_t totalBatches);
-uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t blockPerSm, uint64_t threadsPerBlock, uint64_t batchSize, uint64_t slises);
-bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize);
+uint64_t GetUserMaxThreads(cudaDeviceProp* prop, uint64_t threadsPerBlock, uint64_t userBlocksPerSm);
+uint64_t GetMinThreads(cudaDeviceProp* prop, uint64_t threadsPerBlock);
+uint64_t GetThreadsCount(cudaDeviceProp* prop, uint64_t threadsPerBlock, const uint64_t* range, uint64_t userBlocksPerSm, uint64_t batchSize, uint64_t slises);
+void CalcEffectiveBatchSize(uint64_t threadsPerBlock, const uint64_t* range, uint64_t totalThreads, uint64_t* effectiveBatchSize, uint64_t* effectiveSlises);
 void ClearHParams(THparams* hParams);
 void ClearKParams(TKparams* kParams);
 bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize);
@@ -69,22 +69,25 @@ void GpuPuzzle::Release() {
 	ClearKParams(&Kparams);
 }
 
-bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const uint8_t* pHash, const uint64_t* gx, const uint64_t* gy, uint64_t batchSize, uint64_t blockPerSm, uint32_t dwSlices) {
+bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const uint8_t* pHash, const uint64_t* gx, const uint64_t* gy, uint64_t batchSize, uint64_t maxUserBlockPerSm, uint32_t dwSlices) {
 	THparams hParams;
 	bool result = false;
 	cudaDeviceProp prop{};
 	uint64_t threadsPerBlock;
 	uint64_t threadsTotal;
+	uint64_t effectiveBatchSize;
+	uint64_t effectiveSlises;
 
     std::memset(m_speed_stat, 0, sizeof(m_speed_stat));
     std::memset(&hParams, 0, sizeof(THparams));
     std::memset(&this->Kparams, 0, sizeof(TKparams));
 
-	std::cout << "======================================\r\n";
+	std::cout << "=======================================\r\n";
 	std::cout << std::left << std::setw(20) << " Device (GPU)       " << " : " << CudaIndex << "\r\n";
+	std::cout << "============== Input ==================\r\n";
 	std::cout << std::left << std::setw(20) << " Points/Batch       " << " : " << batchSize << "\r\n";
-	std::cout << std::left << std::setw(20) << " Blocks/SM          " << " : " << blockPerSm << "\r\n";
 	std::cout << std::left << std::setw(20) << " Slices             " << " : " << dwSlices << "\r\n";
+	std::cout << std::left << std::setw(20) << " Blocks/SM (max)    " << " : " << maxUserBlockPerSm << "\r\n";	
 
 #ifndef NO_GPU_MODE	
 	ck(cudaGetDeviceProperties(&prop, CudaIndex), "CUDA init error");
@@ -92,18 +95,23 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	ck(cudaSetDevice(CudaIndex), "cudaSetDevice failed");
 	
 	ck(cudaSetDeviceFlags(cudaDeviceMapHost | cudaDeviceScheduleBlockingSync), "set device flags");
-	ck(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1), "set cache config");
-	
+	ck(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1), "set cache config");	
 #else
-
 	prop.maxThreadsPerBlock = 1024;
 	prop.totalGlobalMem = (uint64_t)32 * 1024 * 1024 * 1024;
 	prop.multiProcessorCount = 170;
 #endif
 
+	effectiveBatchSize = batchSize;
+	effectiveSlises = (uint64_t)dwSlices;
+
 	//cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
-	threadsPerBlock = PickThreadsPerBlock(&prop);
-	threadsTotal = GetThreadsCount(&prop, pRange, blockPerSm, threadsPerBlock, batchSize, (uint64_t)dwSlices);
+	threadsPerBlock = GetThreadsPerBlock(&prop);
+	//printf("threadsPerBlock: %llu\r\n", (unsigned long long)threadsPerBlock);
+	
+	threadsTotal = GetThreadsCount(&prop, threadsPerBlock, pRange, maxUserBlockPerSm, effectiveBatchSize, effectiveSlises);
+		
+	CalcEffectiveBatchSize(threadsPerBlock, pRange, threadsTotal, &effectiveBatchSize, &effectiveSlises);
 
 #if DEBUG_MODE > 0
 	std::cout << "GPU " << CudaIndex << ": Threads/Block: " << threadsPerBlock << " Total threads: " << threadsTotal << "\r\n";
@@ -113,13 +121,8 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 		std::cerr << "Search interval is too small for the specified parameters\r\n";
 		return result;
 	}
-	
-	if (!AreRunParametersValid(pRange, threadsTotal, batchSize)) {
-		std::cerr << "Parametera validation failed.\r\n";
-		return result;
-	}
 
-	if (!PrepareHost(&hParams, pStart, pHash, pRange, threadsTotal, batchSize)) {
+	if (!PrepareHost(&hParams, pStart, pHash, pRange, threadsTotal, effectiveBatchSize)) {
 		return result;
 	}
 
@@ -127,26 +130,27 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	hParams.gy = gy;
 
 #ifndef NO_GPU_MODE
-	if (!PrepareCuda(&this->Kparams, (const THparams*)&hParams, threadsTotal, threadsPerBlock, batchSize)) {
+	if (!PrepareCuda(&this->Kparams, (const THparams*)&hParams, threadsTotal, threadsPerBlock, effectiveBatchSize)) {
 		goto LExit;
 	}
+#else
+	Kparams.h_find_result = hParams.find_result;
 #endif
 
-	Kparams.block_count = threadsTotal / threadsPerBlock; //SMCnt * blockPerSm;
-	if (threadsTotal % threadsPerBlock) Kparams.block_count++;
+	Kparams.block_count = threadsTotal / threadsPerBlock;
 	Kparams.block_size = threadsPerBlock;
-	Kparams.points_per_run = batchSize * threadsTotal * dwSlices;
-	Kparams.batch_size = batchSize;
-	Kparams.batches_per_launch = dwSlices;
+	Kparams.points_per_run = effectiveBatchSize * threadsTotal * effectiveSlises;
+	Kparams.batch_size = effectiveBatchSize;
+	Kparams.batches_per_launch = effectiveSlises;
 	Kparams.threads_total = threadsTotal;
 
-	std::cout << "**************************************\r\n";
-	std::cout << std::left << std::setw(20) << " Device (GPU)       " << " : " << CudaIndex << "\r\n";
-	std::cout << std::left << std::setw(20) << " Blocks             " << " : " << Kparams.block_count << "\r\n";
-	std::cout << std::left << std::setw(20) << " Threads            " << " : " << Kparams.threads_total << "\r\n";
+	std::cout << "============ Calculated ===============\r\n";
+	std::cout << std::left << std::setw(20) << " Points/Batch       " << " : " << Kparams.batch_size << "\r\n";
+	std::cout << std::left << std::setw(20) << " Slices             " << " : " << Kparams.batches_per_launch << "\r\n";
+	std::cout << std::left << std::setw(20) << " Blocks/SM          " << " : " << Kparams.block_count / prop.multiProcessorCount << "\r\n";	
 	std::cout << std::left << std::setw(20) << " Threads/Block      " << " : " << Kparams.block_size << "\r\n";
-	std::cout << std::left << std::setw(20) << " Batch size         " << " : " << Kparams.batch_size << "\r\n";
-	std::cout << std::left << std::setw(20) << " Batches/thread     " << " : " << Kparams.batches_per_launch << "\r\n";
+	std::cout << std::left << std::setw(20) << " Blocks             " << " : " << Kparams.block_count << "\r\n";
+	std::cout << std::left << std::setw(20) << " Threads            " << " : " << Kparams.threads_total << "\r\n";	
 	std::cout << std::left << std::setw(20) << " Points/run         " << " : " << Kparams.points_per_run <<  "\r\n";
 	
 	result = true;
@@ -162,7 +166,6 @@ LExit:
 	return result;
 }
 
-//executes in separate thread
 void GpuPuzzle::Execute() {
 	cudaError_t err;
 	uint64_t pnt_cnt;
@@ -239,7 +242,7 @@ uint64_t GpuPuzzle::GetStatsSpeed() {
 	return res / cnt;
 }
 
-uint64_t PickThreadsPerBlock(cudaDeviceProp* prop) {
+uint64_t GetThreadsPerBlock(cudaDeviceProp* prop) {
 	int threadsPerBlock = THREADS_PER_BLOCK;
     if (threadsPerBlock > (int)prop->maxThreadsPerBlock) threadsPerBlock = prop->maxThreadsPerBlock;
     if (threadsPerBlock < 32) threadsPerBlock = MIN_THREADS_PER_BLOCK;
@@ -255,71 +258,74 @@ uint64_t GetMaxThreadsByMem(cudaDeviceProp* prop) {
 	return maxThreadsByMem;
 }
 
-uint64_t PickThreadsTotal(uint64_t upper, uint64_t threadsPerBlock, uint64_t totalBatches) {
-	if (upper < threadsPerBlock) return 0ull;
-	uint64_t t = upper - (upper % threadsPerBlock);
-	uint64_t q = totalBatches;
-	while (t >= threadsPerBlock) {
-		if ((q % t) == 0ull) return t;
-		t -= threadsPerBlock;
-	}
-	return 0ull;
+uint64_t GetUserMaxThreads(cudaDeviceProp* prop, uint64_t threadsPerBlock, uint64_t userBlocksPerSm) {
+	return prop->multiProcessorCount * userBlocksPerSm * threadsPerBlock * BLOCKS_PER_SM;
 }
 
-uint64_t GetThreadsCount(cudaDeviceProp* prop, const uint64_t* range, uint64_t blockPerSm, uint64_t threadsPerBlock, uint64_t batchSize, uint64_t slises) {
-	uint64_t q_div_batch[4];
-	uint64_t r_div_batch = 0ull;
-	uint64_t maxThreadsByRange;
-	uint64_t maxThreadsByUser;
-	uint64_t upper;
+uint64_t GetMinThreads(cudaDeviceProp* prop, uint64_t threadsPerBlock) {
+	return prop->multiProcessorCount * threadsPerBlock * BLOCKS_PER_SM;
+}
+
+uint64_t GetThreadsCount(cudaDeviceProp* prop, uint64_t threadsPerBlock, const uint64_t* range, uint64_t userBlocksPerSm, uint64_t batchSize, uint64_t slises) {
+	uint64_t result = 0ull;
 	uint64_t maxThreadsByMem;
+	uint64_t maxThreadsByUser;
+	uint64_t minThreads;
+	uint64_t maxThreadsByRange[4] = {0};
+	uint64_t remMaxThreadsByRange = 0ull;
 
 	maxThreadsByMem = GetMaxThreadsByMem(prop);
     //printf("maxThreadsByMem: %llu\r\n", (unsigned long long)maxThreadsByMem);
 	
-	// max threads required
-    div_256_u64(range, (uint64_t)batchSize * slises, q_div_batch, &r_div_batch);
-	if (r_div_batch) {
-		add_256_u64(q_div_batch, (uint64_t)1, q_div_batch);
-	}
-	maxThreadsByRange = q_div_batch[0];
-	//printf("maxThreadsByRange: %llu\r\n", (unsigned long long)maxThreadsByRange);
-
-	// user upper
-	maxThreadsByUser = (uint64_t)prop->multiProcessorCount * blockPerSm * threadsPerBlock;
-    if (maxThreadsByUser == 0ull) maxThreadsByUser = UINT64_MAX;
+	maxThreadsByUser = GetUserMaxThreads(prop, threadsPerBlock, userBlocksPerSm);
 	//printf("maxThreadsByUser: %llu\r\n", (unsigned long long)maxThreadsByUser);
 	
-	// effective upper
-	upper = maxThreadsByMem;
-    if (maxThreadsByRange < upper) upper = maxThreadsByRange;
-    if (maxThreadsByUser  < upper) upper = maxThreadsByUser;
-	//printf("upper: %llu\r\n", (unsigned long long)upper);
+	minThreads = GetMinThreads(prop, threadsPerBlock);
+	//printf("minThreads: %llu\r\n", (unsigned long long)minThreads);
 	
-	uint64_t res = PickThreadsTotal(upper, threadsPerBlock, maxThreadsByRange);
-	//printf("res: %llu\r\n", (unsigned long long)res);
-	return res;
+	// max threads required
+    div_256_u64(range, (uint64_t)batchSize * slises, maxThreadsByRange, &remMaxThreadsByRange);
+	if (remMaxThreadsByRange) {
+		add_256_u64(maxThreadsByRange, (uint64_t)1, maxThreadsByRange);
+	}
+	
+	result = std::min(maxThreadsByMem, maxThreadsByUser);
+	//printf("result (0): %llu\r\n", (unsigned long long)result);
+	
+	if (!(maxThreadsByRange[1] | maxThreadsByRange[2] | maxThreadsByRange[3])) {
+		result = std::min(maxThreadsByRange[0], result);
+		//printf("result (1): %llu\r\n", (unsigned long long)result);
+	}
+	
+	result = std::max(result, minThreads);
+	//printf("result (2): %llu\r\n", (unsigned long long)result);
+	
+	return result;
 }
 
-bool AreRunParametersValid(const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize) {
-	uint64_t per_thread_cnt[4];
-	uint64_t r_u64 = 0ull;
-	uint64_t qq[4];
-	uint64_t rr = 0ull;
-
-    div_256_u64(range, threadsTotal, per_thread_cnt, &r_u64);
-	if (r_u64 != 0ull) {
-		std::cerr << "Internal error: range_len not divisible by threadsTotal.\n";
-		return false;
+void CalcEffectiveBatchSize(uint64_t threadsPerBlock, const uint64_t* range, uint64_t totalThreads, uint64_t* effectiveBatchSize, uint64_t* effectiveSlises) {
+	uint64_t threadRangeSize[4] = {0};
+	uint64_t remThreadRangeSize = 0ull;
+	uint64_t userThreadRangeSize[4] = {0};
+	uint64_t tmp[4] = {0};
+	
+	div_256_u64(range, totalThreads, threadRangeSize, &remThreadRangeSize);
+	if (remThreadRangeSize) {
+		add_256_u64(threadRangeSize, (uint64_t)1, threadRangeSize);
 	}
 	
-	div_256_u64(per_thread_cnt, batchSize, qq, &rr);
-    if (rr != 0ull) {
-		std::cerr << "Internal error: per-thread count is not a multiple of batch size.\n";
-		return false;
-	}
+	userThreadRangeSize[0] = (*effectiveBatchSize) * (*effectiveSlises);
 	
-	return true;
+	while (sub_256(threadRangeSize, userThreadRangeSize, tmp)) {
+		if ((*effectiveSlises) > 1) (*effectiveSlises)--;
+		else {
+			if ((*effectiveBatchSize) > 3) *effectiveBatchSize = (*effectiveBatchSize) - 2;
+			else break;
+		}
+		
+		userThreadRangeSize[0] = (*effectiveBatchSize) * (*effectiveSlises);
+	} 
+	
 }
 
 void ClearHParams(THparams* hParams) {
@@ -346,7 +352,7 @@ void ClearKParams(TKparams* kParams) {
 	if (kParams->rx) cudaFree(kParams->rx);
 	if (kParams->ry) cudaFree(kParams->ry);
 #else
-	if (hParams->h_find_result) free(kParams->h_find_result);
+	if (kParams->h_find_result) free(kParams->h_find_result);
 #endif
 }
 
@@ -356,8 +362,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	uint64_t* h_counts256     	= nullptr;
     uint64_t* h_start_scalars 	= nullptr;
 	TFindResult* h_find_result	= nullptr;
-    //uint64_t* h_px = nullptr;
-    //uint64_t* h_py = nullptr;
 	uint32_t half;
 	bool result = false;
 
@@ -367,14 +371,10 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
     ck(cudaHostAlloc(&h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_counts256 alloc");
     ck(cudaHostAlloc(&h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_start_scalars alloc");
     ck(cudaHostAlloc(&h_find_result,   sizeof(TFindResult), cudaHostAllocMapped), "h_found_scalar alloc");
-    //cudaHostAlloc(&h_px,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
-    //cudaHostAlloc(&h_py,			threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
 #else
     h_counts256 = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
     h_start_scalars = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
     h_find_result = (TFindResult*)malloc(sizeof(TFindResult));
-    //h_px = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
-    //h_py = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
 #endif
 
 	// h_counts256
@@ -498,8 +498,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	hParams->counts = h_counts256;
 	hParams->scalars = h_start_scalars;
 	hParams->find_result = h_find_result;
-	//hParams->px = h_px;
-	//hParams->py = h_py;
 	hParams->hash160 = hash160;
 	
 	result = true;
@@ -511,14 +509,10 @@ LExit:
 		if (h_counts256) cudaFreeHost(h_counts256);
 		if (h_start_scalars) cudaFreeHost(h_start_scalars);
 		if (h_find_result) cudaFreeHost(h_find_result);
-		//if (h_px) cudaFreeHost(h_px);
-		//if (h_py) cudaFreeHost(h_py);
 #else
 		if (h_counts256) free(h_counts256);
 		if (h_start_scalars) free(h_start_scalars);
 		if (h_find_result) free(h_find_result);
-		//if (h_px) free(h_px);
-		//if (h_py) free(h_py);
 #endif
 	}
 
@@ -547,8 +541,6 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 
     ck(cudaMemcpy(d_start_scalars, 	hParams->scalars, 	threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy scalars");
     ck(cudaMemcpy(d_counts,        	hParams->counts,  	threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy counts");
-    //ck(cudaMemcpy(d_Px,        		hParams->px,  		threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy px");
-    //ck(cudaMemcpy(d_Py,        		hParams->py,  		threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy py");
 
 	// Start points P(x1, y1)
 	{
@@ -601,8 +593,6 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 	kParams->h_find_result = hParams->find_result;
 	kParams->px = d_Px;
 	kParams->py = d_Py;
-	kParams->rx = d_Rx;
-	kParams->ry = d_Ry;
 
 	result = true;
 	
@@ -613,8 +603,6 @@ LExit:
 		if (d_start_scalars) cudaFree(d_start_scalars);
 		if (d_Px) cudaFree(d_Px);
 		if (d_Py) cudaFree(d_Py);
-		if (d_Rx) cudaFree(d_Rx);
-		if (d_Ry) cudaFree(d_Ry);
 	}
 
 	return result;

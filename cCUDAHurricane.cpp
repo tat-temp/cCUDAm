@@ -261,7 +261,6 @@ void init_gpus() {
 	{
 		g_GpuPuzzles[g_gpucnt] = new GpuPuzzle();
 		g_GpuPuzzles[g_gpucnt]->CudaIndex = 0;
-		g_GpuPuzzles[g_gpucnt]->SMCnt = 170;
 		g_gpucnt++;
 		
 		g_inited = true;
@@ -315,7 +314,6 @@ void init_gpus() {
 
 		g_GpuPuzzles[g_gpucnt] = new GpuPuzzle();
 		g_GpuPuzzles[g_gpucnt]->CudaIndex = i;
-		g_GpuPuzzles[g_gpucnt]->SMCnt = deviceProp.multiProcessorCount;
 		g_gpucnt++;
 	}
 	
@@ -399,8 +397,8 @@ void show_stat(u64 tm_start, u64 range) {
 	int secs = (int)(sec - days * (3600 * 24) - hours * 3600 - mins * 60);
 
 	std::cout << "Speed: " << speed << " MKeys/s, Time: " <<
-		days << "d:" << std::setw(2) << hours << "h:" << std::setw(2) << mins << "m." << secs << "s/"
-		exp_days << "d:" << std::setw(2) << exp_hours << "h:" << std::setw(2) << exp_mins << "m." << exp_secs << "s\r\n";
+		days << "d:" << std::setw(2) << hours << "h:" << std::setw(2) << mins << "m." << std::setw(2) << secs << "s/" <<
+		exp_days << "d:" << std::setw(2) << exp_hours << "h:" << std::setw(2) << exp_mins << "m." << std::setw(2) << exp_secs << "s\r\n";
 	std::cout.flush();
 }
 

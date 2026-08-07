@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-//#define NO_GPU_MODE				1
+#define NO_GPU_MODE				1
 #define DEBUG_MODE				0
 
 #define SHOW_STAT_INTERVAL_SECS	5
@@ -40,8 +40,6 @@ struct TKparams {
 	uint64_t* counts;
 	uint64_t* px;
 	uint64_t* py;
-	uint64_t* rx;
-	uint64_t* ry;
 	TFindResult* d_find_result;
 	TFindResult* h_find_result;
 	uint64_t points_per_run;
