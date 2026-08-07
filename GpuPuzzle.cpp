@@ -195,9 +195,12 @@ void GpuPuzzle::Execute() {
 
 	Failed = false;
 
-#ifndef NO_GPU_MODE	
+#ifndef NO_GPU_MODE
 	err = cudaSetDevice(CudaIndex);
 	if (err != cudaSuccess) {
+		std::cerr << "GPU " << CudaIndex << ": cudaSetDevice failed: "
+		          << cudaGetErrorString(err) << "\r\n";
+		Failed = true;
 		return;
 	}
 #endif
@@ -215,10 +218,16 @@ void GpuPuzzle::Execute() {
 
 #ifndef NO_GPU_MODE	
 		CallGpuKernel(Kparams, m_cudaStream);
-		ck(cudaStreamSynchronize(m_cudaStream), "gpuMainKernel call");
-		
-		//ck(cudaDeviceSynchronize(), "gpuMainKernel sync");
-        //ck(cudaGetLastError(), "gpuMainKernel launch");
+		err = cudaStreamSynchronize(m_cudaStream);
+		if (err != cudaSuccess) {
+			// Not ck(): that macro only prints and jumps, and it cannot set Failed because the
+			// same macro is used by free functions with no such member. A kernel that dies here
+			// (Xid, ECC, illegal address) must not be reported as a completed scan.
+			std::cerr << "GPU " << CudaIndex << ": kernel execution failed: "
+			          << cudaGetErrorString(err) << "\r\n";
+			Failed = true;
+			goto LExit;
+		}
 #else
 		std::this_thread::sleep_for(std::chrono::milliseconds(11));
 #endif

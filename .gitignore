@@ -1,0 +1,9 @@
+# Build output
+*.o
+cCUDAHurricane
+
+# Test output
+tests_results.txt
+
+# Python
+__pycache__/

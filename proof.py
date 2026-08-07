@@ -541,16 +541,29 @@ def main() -> None:
               f"leaves whole residue classes untested while still reporting PASS.", file=sys.stderr)
         sys.exit(1)
 
-    # Mirror the kernel's own batch checks (GpuCore.cu:40).
-    if B <= 0 or (B & 1) != 0 or (B & (B - 1)) != 0:
-        print(f"Batch size must be even and a power of two; got {B}.", file=sys.stderr)
+    # Mirror the kernel's own batch checks (GpuCore.cu:40): even, non-zero, within the limit.
+    # Deliberately NOT power-of-two. Only the value the user passes on the command line has to be
+    # a power of two (cCUDAHurricane.cpp validate_params); the batch the kernel actually runs is
+    # whatever CalcEffectiveBatchSize leaves behind, and that shrinks by 2 at a time, so 1022 or
+    # 1020 are perfectly legal effective batches. Now that the probe reads the real value, an
+    # extra power-of-two requirement here would reject a run the kernel was happy with.
+    if B <= 0 or (B & 1) != 0:
+        print(f"Batch size must be even and non-zero; got {B}.", file=sys.stderr)
         sys.exit(1)
     if B > KERNEL_MAX_BATCH:
         print(f"Batch size {B} exceeds the kernel limit {KERNEL_MAX_BATCH}.", file=sys.stderr)
         sys.exit(1)
     if raw_len % B != 0:
-        print(f"Range length {raw_len} is not divisible by the batch size {B}.", file=sys.stderr)
-        sys.exit(1)
+        # Not fatal, and it must not be: with the power-of-two range length enforced above, an
+        # even non-power-of-two B can never divide it, so a hard exit here would reinstate the
+        # power-of-two batch requirement that was just removed.
+        # Nothing below needs the divisibility either -- full_mod_residue_cover walks
+        # start+0 .. start+B-1 and so covers every residue class regardless, and the quartile
+        # picker solves for a residue inside each interval. The check dates from when a range
+        # that did not tile into whole batches silently lost its remainder in the kernel; that
+        # was C1, and PrepareHost now rounds each thread's count up to a whole number of batches.
+        print(f"NOTE: range length {raw_len} is not a multiple of the batch size {B}; the kernel "
+              f"over-scans the final partial batch. Coverage is unaffected.", file=sys.stderr)
 
     total_size = end_i - start_i + 1
     if total_size <= 0:
@@ -656,10 +669,29 @@ def main() -> None:
             )
 
             if found:
-                total_success += 1
-                bump(label, "success")
-                ofs.write(f"{idx}, {label}, {priv_hex}, {addr}, FOUND, {found_priv}\n")
-                print(f"=== Test {idx}/{len(tests)} === [{label}]\npriv: {priv_hex}\naddress: {addr}\nStatus: PASS")
+                # A FOUND MATCH banner is not the same as a correct answer. Compare the key the
+                # binary reported against the one this test planted, or a solver that reports the
+                # wrong scalar -- an off-by-one in the batch offset arithmetic, a torn write into
+                # the shared find_result -- passes the whole suite. formatHex256 emits 64
+                # uppercase hex digits and int_to_priv32_hex emits lowercase, so fold case.
+                reported = (found_priv or "").strip().lower()
+                expected = priv_hex.lower()
+                if reported == expected:
+                    total_success += 1
+                    bump(label, "success")
+                    ofs.write(f"{idx}, {label}, {priv_hex}, {addr}, FOUND, {found_priv}\n")
+                    status = "PASS"
+                elif not reported:
+                    total_fail += 1
+                    bump(label, "fail")
+                    ofs.write(f"{idx}, {label}, {priv_hex}, {addr}, NO_KEY_REPORTED\n")
+                    status = "FAIL (match announced but no private key line was printed)"
+                else:
+                    total_fail += 1
+                    bump(label, "fail")
+                    ofs.write(f"{idx}, {label}, {priv_hex}, {addr}, WRONG_KEY, {found_priv}\n")
+                    status = f"FAIL (wrong key reported: {reported})"
+                print(f"=== Test {idx}/{len(tests)} === [{label}]\npriv: {priv_hex}\naddress: {addr}\nStatus: {status}")
             else:
                 total_fail += 1
                 bump(label, "fail")

@@ -47,6 +47,14 @@ struct TInParams {
 	std::string address_b58;
 };
 
+// Exit codes. Every outcome used to return 0 -- found, not found, GPU crash and no-GPU alike --
+// so nothing driving this binary could tell success from total failure. EXIT_FAILURE (1) stays
+// reserved for usage and parse errors.
+#define EXIT_FOUND			0	// key found and printed
+#define EXIT_NOT_FOUND		2	// range scanned to the end, no match
+#define EXIT_GPU_ERROR		3	// no usable GPU, or one failed to prepare or died mid-run
+#define EXIT_INTERRUPTED	4	// Ctrl+C before the range was finished
+
 static volatile sig_atomic_t g_sigint = 0;
 static int g_gpucnt = 0;
 static bool g_inited = false;
@@ -68,7 +76,7 @@ static uint32_t __stdcall puzzle_thr_proc(void* data);
 static void* puzzle_thr_proc(void* data);
 #endif
 void show_stat(u64 tm_start, u64 range);
-static bool find_key(TOutParams& pParams);
+static int find_key(TOutParams& pParams);   // returns one of the EXIT_* codes above
 
 int main(int argc, char** argv) {
     std::signal(SIGINT, handle_sigint);
@@ -108,8 +116,10 @@ int main(int argc, char** argv) {
 	init_gpus();
 	
 	if (g_inited) {
-		if (!find_key(outParams)) {
-		}
+		exit_code = find_key(outParams);
+	} else {
+		std::cerr << "No usable CUDA device; nothing was scanned.\r\n";
+		exit_code = EXIT_GPU_ERROR;
 	}
 
 lEnd:
@@ -416,7 +426,9 @@ void show_stat(u64 tm_start, u64 range) {
 	std::cout.flush();
 }
 
-bool find_key(TOutParams& pParams) {
+int find_key(TOutParams& pParams) {
+    int prepared = 0;
+    bool any_failed = false;
     uint64_t current[4];
     uint64_t chunk[4];
     uint64_t chunk_effective[4];
@@ -455,19 +467,26 @@ bool find_key(TOutParams& pParams) {
 			pParams.slices_per_launch))
 		{
 			g_GpuPuzzles[i]->Failed = true;
+			any_failed = true;
 			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << " FAILED" << "\r\n";
 		} else {
 
 			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << " PREPARED" << "\r\n";
 			std::cout << "RangeStart:  " << formatHex256(current) << "\r\n";
 			std::cout << "RangeLength: " << formatHex256(chunk_effective) << "\r\n";
-			
+
+			prepared++;
 			g_threadcnt++;
 		}
-		
+
 		add_256((const uint64_t*)&current, (const uint64_t*)&chunk_effective, (uint64_t*)&current);
 	}
-	
+
+	if (!prepared) {
+		std::cerr << "No GPU could be prepared for this range; nothing was scanned.\r\n";
+		return EXIT_GPU_ERROR;
+	}
+
 	for (int i = 0; i < g_gpucnt; i++)
 	{
 		if (g_GpuPuzzles[i]->Failed) {
@@ -522,7 +541,30 @@ bool find_key(TOutParams& pParams) {
 		pthread_join(thr_handles[i], NULL);
 #endif
 	}
-		
-	return true;
+
+	// Failed is a plain bool written by the workers, so it is only safe to read once this thread
+	// has a happens-before edge to those writes. The drain loop above supplies one: each worker
+	// writes Failed inside Execute() and then does g_threadcnt.fetch_sub(release), which this
+	// thread observes reaching zero.
+	for (int i = 0; i < g_gpucnt; i++) {
+		if (g_GpuPuzzles[i]->Failed) {
+			any_failed = true;
+		}
+	}
+
+	if (g_found.load(std::memory_order_acquire)) {
+		return EXIT_FOUND;
+	}
+	if (g_sigint) {
+		std::cout << "Interrupted before the range was fully scanned.\r\n";
+		return EXIT_INTERRUPTED;
+	}
+	if (any_failed) {
+		std::cerr << "A GPU failed; the range was NOT fully scanned.\r\n";
+		return EXIT_GPU_ERROR;
+	}
+
+	std::cout << "Range exhausted: key not found.\r\n";
+	return EXIT_NOT_FOUND;
 }
 
