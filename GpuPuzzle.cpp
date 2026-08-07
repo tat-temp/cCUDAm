@@ -77,6 +77,8 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	uint64_t threadsTotal;
 	uint64_t effectiveBatchSize;
 	uint64_t effectiveSlises;
+	uint64_t runsTotal[4] = {0};
+	uint64_t remRunsTotal;
 
     std::memset(m_speed_stat, 0, sizeof(m_speed_stat));
     std::memset(&hParams, 0, sizeof(THparams));
@@ -118,11 +120,12 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 #endif
 
 	if (threadsTotal == 0llu) {
-		std::cerr << "Search interval is too small for the specified parameters\r\n";
+		std::cerr << "Search interval is too small for the specified parameters.\r\n";
 		return result;
 	}
 
 	if (!PrepareHost(&hParams, pStart, pHash, pRange, threadsTotal, effectiveBatchSize)) {
+		std::cerr << "Prepare Host data failed.\r\n";
 		return result;
 	}
 
@@ -143,6 +146,16 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	Kparams.batch_size = effectiveBatchSize;
 	Kparams.batches_per_launch = effectiveSlises;
 	Kparams.threads_total = threadsTotal;
+
+	div_256_u64(pRange, Kparams.batches_per_launch, runsTotal, &remRunsTotal);
+	if (remRunsTotal) {
+		add_256_u64(runsTotal, 1ull, runsTotal);
+	}
+	if (runsTotal[1] | runsTotal[2] | runsTotal[3]) {
+		std::cerr << "Runs total exceeds u64 value.\r\n";
+		return result;
+	}
+	Kparams.runs_total = runsTotal[0];
 
 	std::cout << "============ Calculated ===============\r\n";
 	std::cout << std::left << std::setw(20) << " Points/Batch       " << " : " << Kparams.batch_size << "\r\n";
@@ -522,18 +535,13 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 	uint64_t* d_start_scalars = nullptr;
 	uint64_t* d_Px = nullptr;
 	uint64_t* d_Py = nullptr;
-	uint64_t* d_Rx = nullptr;
-	uint64_t* d_Ry = nullptr;
 	uint64_t* d_counts = nullptr;
-    int *d_found_flag=nullptr;
-	TFindResult *d_find_result=nullptr;
+	TFindResult *d_find_result = nullptr;
 	
 	ck(cudaMalloc(&d_start_scalars, threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_start_scalars)");
 	ck(cudaMalloc(&d_counts,        threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_counts)");
 	ck(cudaMalloc(&d_Px,            threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Px)");
     ck(cudaMalloc(&d_Py,            threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Py)");
-    ck(cudaMalloc(&d_Rx,            threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Rx)");
-    ck(cudaMalloc(&d_Ry,            threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Ry)");
 
 	ck(cudaHostGetDevicePointer((void**)&d_find_result, hParams->find_result, 0), "cudaHostGetDevicePointer(find_result)");
 

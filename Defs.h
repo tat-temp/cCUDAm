@@ -46,6 +46,7 @@ struct TKparams {
 	uint64_t batch_size;
 	uint64_t batches_per_launch;
 	uint64_t threads_total;
+	uint64_t runs_total;
 	
 	uint32_t block_count;
 	uint32_t block_size;
