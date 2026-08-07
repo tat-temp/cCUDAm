@@ -259,7 +259,7 @@ uint64_t GetMaxThreadsByMem(cudaDeviceProp* prop) {
 }
 
 uint64_t GetUserMaxThreads(cudaDeviceProp* prop, uint64_t threadsPerBlock, uint64_t userBlocksPerSm) {
-	return prop->multiProcessorCount * userBlocksPerSm * threadsPerBlock * BLOCKS_PER_SM;
+	return prop->multiProcessorCount * userBlocksPerSm * threadsPerBlock;
 }
 
 uint64_t GetMinThreads(cudaDeviceProp* prop, uint64_t threadsPerBlock) {
