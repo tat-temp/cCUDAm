@@ -349,8 +349,6 @@ void ClearKParams(TKparams* kParams) {
 	if (kParams->h_find_result) cudaFree(kParams->h_find_result);
 	if (kParams->px) cudaFree(kParams->px);
 	if (kParams->py) cudaFree(kParams->py);
-	if (kParams->rx) cudaFree(kParams->rx);
-	if (kParams->ry) cudaFree(kParams->ry);
 #else
 	if (kParams->h_find_result) free(kParams->h_find_result);
 #endif
