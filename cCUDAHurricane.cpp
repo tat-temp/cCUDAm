@@ -389,16 +389,18 @@ void show_stat(u64 tm_start, u64 range) {
 
 	u64 exp_days = exp_sec / (3600 * 24);
 	int exp_hours = (int)(exp_sec - exp_days * (3600 * 24)) / 3600;
-	int exp_min = (int)(exp_sec - exp_days * (3600 * 24) - exp_hours * 3600) / 60;
+	int exp_mins = (int)(exp_sec - exp_days * (3600 * 24) - exp_hours * 3600) / 60;
+	int exp_secs = (int)(exp_sec - exp_days * (3600 * 24) - exp_hours * 3600 - exp_mins * 60);
 
 	u64 sec = (GetTickCount64() - tm_start) / 1000;
 	u64 days = sec / (3600 * 24);
 	int hours = (int)(sec - days * (3600 * 24)) / 3600;
-	int min = (int)(sec - days * (3600 * 24) - hours * 3600) / 60;
+	int mins = (int)(sec - days * (3600 * 24) - hours * 3600) / 60;
+	int secs = (int)(sec - days * (3600 * 24) - hours * 3600 - mins * 60);
 
 	std::cout << "Speed: " << speed << " MKeys/s, Time: " <<
-		days << "d:" << std::setw(2) << hours << "h:" << std::setw(2) << min << "m/" <<
-		exp_days << "d:" << std::setw(2) << exp_hours << "h:" << std::setw(2) << exp_min << "m\r\n";
+		days << "d:" << std::setw(2) << hours << "h:" << std::setw(2) << mins << "m." << secs << "s/"
+		exp_days << "d:" << std::setw(2) << exp_hours << "h:" << std::setw(2) << exp_mins << "m." << exp_secs << "s\r\n";
 	std::cout.flush();
 }
 

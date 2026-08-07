@@ -44,8 +44,8 @@ __global__ void TestKernel(
     if (gid >= threadsTotal) return;
 	
 	//const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));
-    //const unsigned full_mask = __activemask(); //0xFFFFFFFFu;
-    const unsigned full_mask = 0xFFFFFFFFu;
+    const unsigned full_mask = __activemask(); //0xFFFFFFFFu;
+    //const unsigned full_mask = 0xFFFFFFFFu;
 	
 	// Filter on hash160 WORD 2, not word 0: word 2 is the cheapest of the five to produce
     // (its RIPEMD-160 inputs are final 7 rounds earlier -- see CUDAHash.cu). Any single word
@@ -217,7 +217,7 @@ __global__ void TestKernel(
 				bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 				if (full) {
 					Copy_u64_x4(find_result->scalar, s1);
-					add256_u64(find_result->scalar, (uint64_t)half);
+					sub256_u64(find_result->scalar, (uint64_t)half);
 					find_result->found = true;
 
 					__threadfence_system();
