@@ -147,7 +147,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	Kparams.batches_per_launch = effectiveSlises;
 	Kparams.threads_total = threadsTotal;
 
-	div_256_u64(pRange, Kparams.batches_per_launch, runsTotal, &remRunsTotal);
+	div_256_u64(pRange, Kparams.points_per_run, runsTotal, &remRunsTotal);
 	if (remRunsTotal) {
 		add_256_u64(runsTotal, 1ull, runsTotal);
 	}
