@@ -279,7 +279,7 @@ uint64_t GetMaxThreadsByMem(cudaDeviceProp* prop) {
     const uint64_t reserveBytes = 64ull * 1024 * 1024;
     uint64_t usableMem = (totalGlobalMem > reserveBytes) ? (totalGlobalMem - reserveBytes) : (totalGlobalMem / 2);
     uint64_t maxThreadsByMem = usableMem / bytesPerThread;
-	return maxThreadsByMem;
+	return maxThreadsByMem - (maxThreadsByMem % prop->multiProcessorCount);
 }
 
 uint64_t GetUserMaxThreads(cudaDeviceProp* prop, uint64_t threadsPerBlock, uint64_t userBlocksPerSm) {
@@ -317,12 +317,15 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, uint64_t threadsPerBlock, const u
 	//printf("result (0): %llu\r\n", (unsigned long long)result);
 	
 	if (!(maxThreadsByRange[1] | maxThreadsByRange[2] | maxThreadsByRange[3])) {
-		result = std::min(maxThreadsByRange[0], result);
-		//printf("result (1): %llu\r\n", (unsigned long long)result);
+		//printf("result (1): %llu\r\n", (unsigned long long)maxThreadsByRange[0]);
+		uint64_t roundedBlock = (maxThreadsByRange[0] + (prop->multiProcessorCount * BLOCKS_PER_SM) - 1) / (prop->multiProcessorCount * BLOCKS_PER_SM);
+		//printf("result (2): %llu\r\n", (unsigned long long)roundedBlock);
+		result = std::min(roundedBlock * (prop->multiProcessorCount * BLOCKS_PER_SM), result);
+		//printf("result (3): %llu\r\n", (unsigned long long)result);
 	}
 	
 	result = std::max(result, minThreads);
-	//printf("result (2): %llu\r\n", (unsigned long long)result);
+	//printf("result (4): %llu\r\n", (unsigned long long)result);
 	
 	return result;
 }
