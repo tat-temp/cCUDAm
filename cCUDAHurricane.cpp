@@ -53,6 +53,7 @@ static bool g_inited = false;
 static std::atomic<int> g_threadcnt{0};
 static std::atomic<bool> g_found{false};
 static GpuPuzzle* g_GpuPuzzles[MAX_GPU_CNT];
+static uint64_t g_Runs[MAX_GPU_CNT];
 
 static void handle_sigint(int) {
 	g_sigint = 1;
@@ -373,11 +374,43 @@ void* puzzle_thr_proc(void* data)
 }
 #endif
 
+//void show_stat(u64 tm_start, u64 range) {
+//	uint64_t speed = 0ull;
+//	
+//	for (int i = 0; i < g_gpucnt; i++) {
+//		speed += g_GpuPuzzles[i]->GetStatsSpeed();
+//	}
+//
+//	u64 exp_sec = 0xFFFFFFFFFFFFFFFFull;
+//	if (speed) {
+//		exp_sec = range / (speed * 1000000ul); //in sec
+//	}
+//
+//	u64 exp_days = exp_sec / (3600 * 24);
+//	int exp_hours = (int)(exp_sec - exp_days * (3600 * 24)) / 3600;
+//	int exp_mins = (int)(exp_sec - exp_days * (3600 * 24) - exp_hours * 3600) / 60;
+//	int exp_secs = (int)(exp_sec - exp_days * (3600 * 24) - exp_hours * 3600 - exp_mins * 60);
+//
+//	u64 sec = (GetTickCount64() - tm_start) / 1000;
+//	u64 days = sec / (3600 * 24);
+//	int hours = (int)(sec - days * (3600 * 24)) / 3600;
+//	int mins = (int)(sec - days * (3600 * 24) - hours * 3600) / 60;
+//	int secs = (int)(sec - days * (3600 * 24) - hours * 3600 - mins * 60);
+//
+//	std::cout << "Speed: " << speed << " MKeys/s, Time: " <<
+//		days << "d:" << std::setw(2) << hours << "h:" << std::setw(2) << mins << "m." << std::setw(2) << secs << "s/" <<
+//		exp_days << "d:" << std::setw(2) << exp_hours << "h:" << std::setw(2) << exp_mins << "m." << std::setw(2) << exp_secs << "s\r\n";
+//	std::cout.flush();
+//}
+
 void show_stat(u64 tm_start, u64 range) {
 	uint64_t speed = 0ull;
 	
 	for (int i = 0; i < g_gpucnt; i++) {
-		speed += g_GpuPuzzles[i]->GetStatsSpeed();
+		if (!g_Runs[i]) continue;
+		
+		uint64_t r = g_GpuPuzzles[i]->Kparams.runs_total;
+		speed += (g_Runs[i] - r) * g_GpuPuzzles[i]->Kparams.points_per_run / (1000 * (GetTickCount64() - tm_start));
 	}
 
 	u64 exp_sec = 0xFFFFFFFFFFFFFFFFull;
@@ -443,6 +476,8 @@ bool find_key(TOutParams& pParams) {
 			g_GpuPuzzles[i]->Failed = true;
 			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << " FAILED" << "\r\n";
 		} else {
+			g_Runs[i] = g_GpuPuzzles[i]->Kparams.runs_total;
+
 			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << " PREPARED" << "\r\n";
 			std::cout << "RangeStart:  " << formatHex256(current) << "\r\n";
 			std::cout << "RangeLength: " << formatHex256(chunk_effective) << "\r\n";
@@ -459,6 +494,7 @@ bool find_key(TOutParams& pParams) {
 			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << ": Skip work.\r\n";
 			continue;
 		}
+		
 #ifdef _WIN32
 		thr_handles[i] = (HANDLE)_beginthreadex(NULL, 0, puzzle_thr_proc, (void*)g_GpuPuzzles[i], 0, &dwThreadId);
 #else

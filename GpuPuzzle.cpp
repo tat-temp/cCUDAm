@@ -165,6 +165,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	std::cout << std::left << std::setw(20) << " Blocks             " << " : " << Kparams.block_count << "\r\n";
 	std::cout << std::left << std::setw(20) << " Threads            " << " : " << Kparams.threads_total << "\r\n";	
 	std::cout << std::left << std::setw(20) << " Points/run         " << " : " << Kparams.points_per_run <<  "\r\n";
+	std::cout << std::left << std::setw(20) << " Runs               " << " : " << Kparams.runs_total <<  "\r\n";
 	
 	result = true;
 	
@@ -179,28 +180,87 @@ LExit:
 	return result;
 }
 
+//void GpuPuzzle::Execute() {
+//	cudaError_t err;
+//	uint64_t pnt_cnt;
+//
+//	Failed = false;
+//
+//#ifndef NO_GPU_MODE	
+//	err = cudaSetDevice(CudaIndex);
+//	if (err != cudaSuccess) {
+//		return;
+//	}
+//#endif
+//
+//	if (!Start()) {
+//		Failed = true;
+//		return;
+//	}
+//
+//	pnt_cnt = Kparams.points_per_run;
+//
+//	while (!m_stopFlag) {
+//		u64 t1 = GetTickCount64();
+//
+//#ifndef NO_GPU_MODE	
+//		ck(CallGpuKernel(Kparams), "gpuMainKernel call");
+//		
+//		ck(cudaDeviceSynchronize(), "gpuMainKernel sync");
+//        ck(cudaGetLastError(), "gpuMainKernel launch");
+//#else
+//		std::this_thread::sleep_for(std::chrono::milliseconds(11));
+//#endif
+//	
+//		if (Kparams.h_find_result->found == true) {
+//			Found = true;
+//			
+//			DumpFound(CudaIndex, &Kparams);
+//			
+//			break;
+//		}
+//		
+//		{
+//			u64 t2 = GetTickCount64();
+//			u64 tm = t2 - t1;
+//			if (!tm) tm = 1;
+//			
+//			uint64_t cur_speed = (uint64_t)(pnt_cnt / (1000 * tm));
+//			//printf("GPU %d kernel time %d ms, speed %d MH\r\n", CudaIndex, (int)tm, cur_speed);
+//			//std::cout << "GPU " << CudaIndex << " kernel time " << tm << " ms, speed " << cur_speed << " MH Idx: " << m_stat_idx << "\r\n";
+//
+//			m_speed_stat[m_stat_idx] = cur_speed;
+//			m_stat_idx = (m_stat_idx + 1) % STATS_WND_SIZE;
+//		}
+//	}
+//LExit:
+//
+//	Release();
+//}
+
 void GpuPuzzle::Execute() {
 	cudaError_t err;
 	uint64_t pnt_cnt;
+	uint64_t runs_cnt;
 
 	Failed = false;
 
 #ifndef NO_GPU_MODE	
 	err = cudaSetDevice(CudaIndex);
 	if (err != cudaSuccess) {
-		return;
+		goto LExit;
 	}
 #endif
 
 	if (!Start()) {
 		Failed = true;
-		return;
+		goto LExit;
 	}
 
 	pnt_cnt = Kparams.points_per_run;
+	runs_cnt = Kparams.runs_total;
 
-	while (!m_stopFlag) {
-		u64 t1 = GetTickCount64();
+	while (!m_stopFlag && runs_cnt > 0) {
 
 #ifndef NO_GPU_MODE	
 		ck(CallGpuKernel(Kparams), "gpuMainKernel call");
@@ -219,18 +279,8 @@ void GpuPuzzle::Execute() {
 			break;
 		}
 		
-		{
-			u64 t2 = GetTickCount64();
-			u64 tm = t2 - t1;
-			if (!tm) tm = 1;
-			
-			uint64_t cur_speed = (uint64_t)(pnt_cnt / (1000 * tm));
-			//printf("GPU %d kernel time %d ms, speed %d MH\r\n", CudaIndex, (int)tm, cur_speed);
-			//std::cout << "GPU " << CudaIndex << " kernel time " << tm << " ms, speed " << cur_speed << " MH Idx: " << m_stat_idx << "\r\n";
-
-			m_speed_stat[m_stat_idx] = cur_speed;
-			m_stat_idx = (m_stat_idx + 1) % STATS_WND_SIZE;
-		}
+		runs_cnt--;
+		Kparams.runs_total = runs_cnt;
 	}
 LExit:
 

@@ -14,8 +14,6 @@ private:
 	EcInt m_start;
 	EcInt m_end;
 	
-	TKparams Kparams;
-
 	int m_stat_idx;
 	uint64_t m_speed_stat[STATS_WND_SIZE];
 
@@ -23,7 +21,9 @@ private:
 	void Release();
 public:
 	GpuPuzzle() : m_stopFlag(false), m_stat_idx(0), m_speed_stat{},
-              CudaIndex(0), Failed(false), Found(false) { Kparams = {}; }
+              CudaIndex(0), Failed(false), Found(false) { Kparams = {0}; }
+
+	TKparams Kparams;
 	int CudaIndex; //gpu index in cuda
 	bool Failed;
 	bool Found;
