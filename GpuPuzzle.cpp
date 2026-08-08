@@ -145,6 +145,11 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	Kparams.h_find_result = hParams.find_result;
 #endif
 
+	// The pinned result page now belongs to Kparams, so drop the hParams reference: the
+	// ClearHParams at LExit must not free a page Kparams still points at. Every path that reaches
+	// LExit without getting this far still owns it there, which is the point.
+	hParams.find_result = nullptr;
+
 	Kparams.block_count = threadsTotal / threadsPerBlock;
 	Kparams.block_size = threadsPerBlock;
 	Kparams.points_per_run = effectiveBatchSize * threadsTotal * effectiveSlises;
@@ -385,26 +390,68 @@ void CalcEffectiveBatchSize(uint64_t threadsPerBlock, const uint64_t* range, uin
 	
 }
 
-void ClearHParams(THparams* hParams) {
+// The two deallocators are not interchangeable and the mistake is silent: cudaFree on a pointer
+// from cudaHostAlloc is rejected with cudaErrorInvalidValue, so it frees nothing. Worse, the error
+// then sits in this host thread's slot until somebody calls cudaGetLastError -- which is
+// PrepareCuda's post-launch check, running for the NEXT GPU -- and is reported there as a
+// setup-kernel failure. So: say which free failed, and drain the slot behind us.
+static void free_host_pinned(void* p, const char* what) {
+	if (!p) return;
 #ifndef NO_GPU_MODE
-	if (hParams->counts) cudaFreeHost(hParams->counts);
-	if (hParams->scalars) cudaFreeHost(hParams->scalars);
+	cudaError_t e = cudaFreeHost(p);
+	if (e != cudaSuccess) {
+		std::cerr << "cudaFreeHost(" << what << ") failed: " << cudaGetErrorString(e) << "\r\n";
+		cudaGetLastError();
+	}
 #else
-	if (hParams->counts) free(hParams->counts);
-	if (hParams->scalars) free(hParams->scalars);
+	(void)what;
+	free(p);
 #endif
 }
 
-void ClearKParams(TKparams* kParams) {
+static void free_device(void* p, const char* what) {
+	if (!p) return;
 #ifndef NO_GPU_MODE
-	if (kParams->counts) cudaFree(kParams->counts);
-	if (kParams->scalars) cudaFree(kParams->scalars);
-	if (kParams->h_find_result) cudaFree(kParams->h_find_result);
-	if (kParams->px) cudaFree(kParams->px);
-	if (kParams->py) cudaFree(kParams->py);
+	cudaError_t e = cudaFree(p);
+	if (e != cudaSuccess) {
+		std::cerr << "cudaFree(" << what << ") failed: " << cudaGetErrorString(e) << "\r\n";
+		cudaGetLastError();
+	}
 #else
-	if (kParams->h_find_result) free(kParams->h_find_result);
+	(void)p; (void)what;	// NO_GPU_MODE never reaches PrepareCuda, so there is nothing device-side
 #endif
+}
+
+void ClearHParams(THparams* hParams) {
+	free_host_pinned(hParams->counts, "counts");
+	free_host_pinned(hParams->scalars, "scalars");
+	// find_result belongs here only until PrepareCuda takes it; Prepare nulls the field at the
+	// handoff. Without this line every failure exit in the window between PrepareHost returning
+	// true and that handoff orphaned the page outright -- hParams is a stack local in Prepare and
+	// nothing else held the pointer.
+	free_host_pinned(hParams->find_result, "find_result");
+
+	hParams->counts = nullptr;
+	hParams->scalars = nullptr;
+	hParams->find_result = nullptr;
+}
+
+void ClearKParams(TKparams* kParams) {
+	free_device(kParams->counts, "d_counts");
+	free_device(kParams->scalars, "d_start_scalars");
+	free_device(kParams->px, "d_Px");
+	free_device(kParams->py, "d_Py");
+	// h_find_result came from cudaHostAlloc, so it takes cudaFreeHost. d_find_result is only the
+	// device-side alias of that same mapped page -- an address, not an allocation -- and must not
+	// be freed at all; dropping the pointer is the whole of releasing it.
+	free_host_pinned(kParams->h_find_result, "h_find_result");
+
+	kParams->counts = nullptr;
+	kParams->scalars = nullptr;
+	kParams->px = nullptr;
+	kParams->py = nullptr;
+	kParams->h_find_result = nullptr;
+	kParams->d_find_result = nullptr;
 }
 
 bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize) {
@@ -569,15 +616,9 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 LExit:	
 
 	if (!result) {
-#ifndef NO_GPU_MODE		
-		if (h_counts256) cudaFreeHost(h_counts256);
-		if (h_start_scalars) cudaFreeHost(h_start_scalars);
-		if (h_find_result) cudaFreeHost(h_find_result);
-#else
-		if (h_counts256) free(h_counts256);
-		if (h_start_scalars) free(h_start_scalars);
-		if (h_find_result) free(h_find_result);
-#endif
+		free_host_pinned(h_counts256, "h_counts256");
+		free_host_pinned(h_start_scalars, "h_start_scalars");
+		free_host_pinned(h_find_result, "h_find_result");
 	}
 
 	return result;
@@ -607,7 +648,13 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 		std::cout << "\r\n---Start points---\r\n";
 #endif
 		uint64_t mulBlocks = (uint64_t)((threadsTotal + threadsPerBlock - 1) / threadsPerBlock);;
-		
+
+		// The last-error slot is per host thread and sticky: successful calls do not clear it, only
+		// cudaGetLastError does. Prepare runs for every GPU on this one thread, so without this the
+		// check below reports whatever failed most recently ANYWHERE -- including in the previous
+		// GPU's cleanup -- as a launch failure of THIS setup kernel, and kills a healthy card.
+		cudaGetLastError();
+
 		ck(CallGpuMulKernel(mulBlocks, threadsPerBlock, d_start_scalars, d_Px, d_Py, (uint32_t)threadsTotal), "GpuMulKernel call");
 
 		ck(cudaDeviceSynchronize(), "gpuMulKernel sync");
@@ -658,10 +705,12 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 LExit:	
 
 	if (!result) {
-		if (d_counts) cudaFree(d_counts);
-		if (d_start_scalars) cudaFree(d_start_scalars);
-		if (d_Px) cudaFree(d_Px);
-		if (d_Py) cudaFree(d_Py);
+		// Only the four cudaMalloc'd buffers. d_find_result is the mapped alias of the caller's
+		// pinned page, which the caller still owns and frees.
+		free_device(d_counts, "d_counts");
+		free_device(d_start_scalars, "d_start_scalars");
+		free_device(d_Px, "d_Px");
+		free_device(d_Py, "d_Py");
 	}
 
 	return result;
