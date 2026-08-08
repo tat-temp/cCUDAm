@@ -385,13 +385,9 @@ void ClearHParams(THparams* hParams) {
 #ifndef NO_GPU_MODE
 	if (hParams->counts) cudaFreeHost(hParams->counts);
 	if (hParams->scalars) cudaFreeHost(hParams->scalars);
-	//if (hParams->px) cudaFreeHost(hParams->px);
-	//if (hParams->py) cudaFreeHost(hParams->py);
 #else
 	if (hParams->counts) free(hParams->counts);
 	if (hParams->scalars) free(hParams->scalars);
-	//if (hParams->px) free(hParams->px);
-	//if (hParams->py) free(hParams->py);
 #endif
 }
 
