@@ -25,6 +25,33 @@ __device__ __constant__ uint64_t c_Jy[4];
 #define WARP_FLUSH_HASHES()
 #define MAYBE_WARP_FLUSH() do { if ((local_hashes & (FLUSH_THRESHOLD - 1u)) == 0u) WARP_FLUSH_HASHES(); } while (0)
 		
+// Publish a hit into the mapped result struct, exactly once, in the order the host needs to observe
+// it. Every found path goes through here.
+//
+// The old code stored the scalar, set found = true, and only THEN issued __threadfence_system(). A
+// release fence orders what precedes it against what follows, so a fence placed after both orders
+// nothing *between* them -- and Copy_u64_x4 is four separate stores (Math.cuh:37), not one wide one.
+// Nothing stopped `found` from reaching the mapped page ahead of some or all of `scalar`. A host
+// that saw the flag early would hand a torn scalar to DumpFound, which multiplies it out and prints
+// a well-formed, self-consistent, completely wrong key -- there is no hash160 recheck host-side to
+// catch that. It stayed latent only because the sole host read happens after cudaStreamSynchronize,
+// which is already a full ordering point; adding the mid-launch poll that P1 wants would make it
+// live.
+//
+// atomicCAS picks a single publisher, so a second finder cannot overwrite a scalar the host may
+// already be reading. The _system variants are the ones that mean anything on mapped host memory
+// (device-scope atomics do not order against the host); they need sm_60+, which init_gpus already
+// requires.
+__device__ __forceinline__ void publish_found(TFindResult* __restrict__ find_result,
+                                              const uint64_t scalar[4])
+{
+	if (atomicCAS_system(&find_result->claimed, 0u, 1u) != 0u) return;
+
+	Copy_u64_x4(find_result->scalar, scalar);
+	__threadfence_system();								// scalar lands before the flag can
+	atomicExch_system(&find_result->found, 1u);
+}
+
 extern "C" __launch_bounds__(THREADS_PER_BLOCK, BLOCKS_PER_SM)
 __global__ void TestKernel(
 	uint64_t* __restrict__ Px,
@@ -105,10 +132,7 @@ __global__ void TestKernel(
 		if (__any_sync(mask, pref)) {
 			bool full = pref && hash160_full_match(prefix, u256_of(x1), c_target_words);
 			if (full) {
-				Copy_u64_x4(find_result->scalar, s1);
-				find_result->found = true;
-
-				__threadfence_system();
+				publish_found(find_result, s1);
 			}
 			
 			if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
@@ -164,11 +188,12 @@ __global__ void TestKernel(
 				if (__any_sync(mask, pref)) {
 					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 					if (full) {
-						Copy_u64_x4(find_result->scalar, s1);
-						add256_u64(find_result->scalar, (uint64_t)i + 1ull);
-						find_result->found = true;
-
-						__threadfence_system();
+						// In registers, not in the mapped struct: the old form did the add as a
+						// read-modify-write straight over PCIe.
+						uint64_t hit[4];
+						Copy_u64_x4(hit, s1);
+						add256_u64(hit, (uint64_t)i + 1ull);
+						publish_found(find_result, hit);
 					}
 					
 					if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
@@ -204,11 +229,10 @@ __global__ void TestKernel(
 				if (__any_sync(mask, pref)) {
 					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 					if (full) {
-						Copy_u64_x4(find_result->scalar, s1);
-						sub256_u64(find_result->scalar, (uint64_t)i + 1ull);
-						find_result->found = true;
-
-						__threadfence_system();
+						uint64_t hit[4];
+						Copy_u64_x4(hit, s1);
+						sub256_u64(hit, (uint64_t)i + 1ull);
+						publish_found(find_result, hit);
 					}
 					
 					if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
@@ -251,11 +275,10 @@ __global__ void TestKernel(
 			if (__any_sync(mask, pref)) {
 				bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 				if (full) {
-					Copy_u64_x4(find_result->scalar, s1);
-					sub256_u64(find_result->scalar, (uint64_t)half);
-					find_result->found = true;
-
-					__threadfence_system();
+					uint64_t hit[4];
+					Copy_u64_x4(hit, s1);
+					sub256_u64(hit, (uint64_t)half);
+					publish_found(find_result, hit);
 				}
 				
 				if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }

@@ -247,7 +247,11 @@ void GpuPuzzle::Execute() {
 			m_stat_idx = (m_stat_idx + 1) % STATS_WND_SIZE;
 		}
 	
-		if (Kparams.h_find_result->found == true) {
+		// Safe to read plainly: this is after cudaStreamSynchronize, which already orders every
+		// write the kernel made. If P1 adds a poll DURING the launch, that reader must go through a
+		// volatile TFindResult* -- the device's release fence makes the scalar visible, but nothing
+		// stops the compiler from hoisting a non-volatile load of `found` out of the poll loop.
+		if (Kparams.h_find_result->found != 0u) {
 			Found = true;
 			
 			DumpFound(CudaIndex, &Kparams);
@@ -664,7 +668,7 @@ LExit:
 }
 
 void DumpFound(int gpuIndex, TKparams* kParams) {
-	if (!kParams || !kParams->h_find_result || !kParams->h_find_result->found) return;
+	if (!kParams || !kParams->h_find_result || kParams->h_find_result->found == 0u) return;
 	
 	EcPoint p;
 	EcInt k;
