@@ -62,9 +62,23 @@ static std::atomic<int> g_threadcnt{0};
 static std::atomic<bool> g_found{false};
 static GpuPuzzle* g_GpuPuzzles[MAX_GPU_CNT];
 
+// Seconds of silence in the shutdown drain before we start saying why we are still here.
+#ifndef STOP_WARN_SECS
+#define STOP_WARN_SECS		30
+#endif
+
 static void handle_sigint(int) {
+	if (g_sigint) {
+		// Second Ctrl+C. The graceful path did not get us out -- most likely a worker is inside a
+		// kernel launch the driver never returns from, which nothing on this side can reclaim. Leave
+		// now rather than make the user go find SIGKILL. _Exit is async-signal-safe; std::exit is
+		// not, since it would run static destructors and flush streams from a signal context while
+		// other threads are still mutating them.
+		std::_Exit(EXIT_INTERRUPTED);
+	}
 	g_sigint = 1;
-	std::cerr << "\n[Ctrl+C] Interrupt received. Finishing current kernel slice and exiting...\n";
+	std::cerr << "\n[Ctrl+C] Interrupt received. Finishing current kernel slice and exiting..."
+	             " Press Ctrl+C again to abort immediately.\n";
 }
 static int parse_params(TInParams& pParams, int argc, char** argv);
 static int validate_params(TInParams& pInParams, TOutParams& pOutParams, char** argv);
@@ -441,8 +455,13 @@ int find_key(TOutParams& pParams) {
 #else
 	pthread_t thr_handles[MAX_GPU_CNT];
 #endif
+	// Whether thr_handles[i] holds a thread we actually started. The join loop used to test
+	// "!thr_handles[i]" instead, which is not portable -- pthread_t need not be comparable against 0
+	// -- and cannot tell a failed create from a thread that legitimately got handle value 0.
+	bool thr_started[MAX_GPU_CNT];
 
 	std::memset(&thr_handles, 0, sizeof(thr_handles));
+	std::memset(&thr_started, 0, sizeof(thr_started));
     g_threadcnt = 0;
 
 	div_256_u64(pParams.range, (uint64_t)g_gpucnt, chunk, &remainder);
@@ -476,7 +495,6 @@ int find_key(TOutParams& pParams) {
 			std::cout << "RangeLength: " << formatHex256(chunk_effective) << "\r\n";
 
 			prepared++;
-			g_threadcnt++;
 		}
 
 		add_256((const uint64_t*)&current, (const uint64_t*)&chunk_effective, (uint64_t*)&current);
@@ -487,18 +505,48 @@ int find_key(TOutParams& pParams) {
 		return EXIT_GPU_ERROR;
 	}
 
+	// g_threadcnt is charged HERE, per create, and only for a create that succeeded -- it used to be
+	// incremented up in the prepare loop, before any thread existed, while both create calls threw
+	// their return value away. Only a thread that actually starts ever decrements the counter (see
+	// puzzle_thr_proc), so crediting one that was never created left it permanently above zero and
+	// the drain loop below spinning forever, with SIGKILL the only way out.
+	//
+	// The charge precedes the create because the new thread can run to completion and decrement
+	// before this thread gets the next line; incrementing afterwards would let the counter dip
+	// negative. On failure we refund it, since nothing will ever decrement it.
+	int started = 0;
 	for (int i = 0; i < g_gpucnt; i++)
 	{
 		if (g_GpuPuzzles[i]->Failed) {
 			std::cout << "GPU " << g_GpuPuzzles[i]->CudaIndex << ": Skip work.\r\n";
 			continue;
 		}
-		
+
+		g_threadcnt.fetch_add(1, std::memory_order_relaxed);
+
 #ifdef _WIN32
 		thr_handles[i] = (HANDLE)_beginthreadex(NULL, 0, puzzle_thr_proc, (void*)g_GpuPuzzles[i], 0, &dwThreadId);
+		thr_started[i] = (thr_handles[i] != NULL);
 #else
-		pthread_create(&thr_handles[i], NULL, puzzle_thr_proc, (void*)g_GpuPuzzles[i]);
+		thr_started[i] = (pthread_create(&thr_handles[i], NULL, puzzle_thr_proc, (void*)g_GpuPuzzles[i]) == 0);
 #endif
+
+		if (thr_started[i]) {
+			started++;
+		} else {
+			g_threadcnt.fetch_sub(1, std::memory_order_relaxed);
+			std::cerr << "GPU " << g_GpuPuzzles[i]->CudaIndex << ": failed to start worker thread; "
+			             "its part of the range will NOT be scanned.\r\n";
+			// Safe to write from this thread: the create failed, so there is no worker for this
+			// object to race with. It also keeps the GPU out of the Stop() and join loops below.
+			g_GpuPuzzles[i]->Failed = true;
+			any_failed = true;
+		}
+	}
+
+	if (!started) {
+		std::cerr << "No worker thread could be started; nothing was scanned.\r\n";
+		return EXIT_GPU_ERROR;
 	}
 	
 	u64 tm_stats = GetTickCount64();
@@ -527,12 +575,29 @@ int find_key(TOutParams& pParams) {
 		g_GpuPuzzles[i]->Stop();
 	}
 
-	while (g_threadcnt) {
-		sleep(1);
+	// Deliberately no timeout and no g_sigint check here. This loop reaching zero is what gives the
+	// Failed reads below their happens-before edge (see the comment there); bailing out early would
+	// turn those into a data race on a plain bool, and returning while workers are still live would
+	// let main tear down g_GpuPuzzles underneath them. It is now provably bounded: g_threadcnt
+	// counts exactly the threads that started, each decrements on its way out of puzzle_thr_proc,
+	// and Stop() above has already cleared their loop guard -- so the wait is at most one kernel
+	// launch. The one thing it cannot bound is a wedged GPU whose launch never returns; that is what
+	// the second Ctrl+C in handle_sigint is for. Say so rather than sitting there silently.
+	{
+		u64 tm_wait = GetTickCount64();
+		while (g_threadcnt.load(std::memory_order_acquire)) {
+			sleep(1);
+			if (GetTickCount64() - tm_wait > STOP_WARN_SECS * 1000) {
+				std::cerr << "Still waiting for " << g_threadcnt.load(std::memory_order_relaxed)
+				          << " GPU worker(s) to finish the current kernel launch."
+				             " Press Ctrl+C again to abort.\r\n";
+				tm_wait = GetTickCount64();
+			}
+		}
 	}
-	
+
 	for (int i = 0; i < g_gpucnt; i++) {
-		if (!thr_handles[i]) {
+		if (!thr_started[i]) {
 			continue;
 		}
 #ifdef _WIN32
