@@ -44,9 +44,9 @@ __global__ void TestKernel(
     if (gid >= threadsTotal) return;
 	
 	//const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));
-    const unsigned full_mask = __activemask(); //0xFFFFFFFFu;
-    //const unsigned full_mask = 0xFFFFFFFFu;
-	
+	// There is no single warp mask any more. One captured here could not stay valid: the batch loop
+	// below drops lanes at different iterations, so the mask has to be re-derived. See there.
+
 	// Filter on hash160 WORD 2, not word 0: word 2 is the cheapest of the five to produce
     // (its RIPEMD-160 inputs are final 7 rounds earlier -- see CUDAHash.cu). Any single word
     // is an equally selective 32-bit filter, so this is a free choice.
@@ -61,13 +61,48 @@ __global__ void TestKernel(
 	
 	if ((rem[0]|rem[1]|rem[2]|rem[3]) == 0ull) return;
 	
+	// The mask handed to a warp intrinsic has to name exactly the lanes that reach it: CUDA requires
+	// every NON-EXITED thread named in a mask to execute the same intrinsic with the same mask, and
+	// on Volta+ a mask naming a live thread that never arrives can stall the warp waiting for it.
+	//
+	// The old code captured one __activemask() at the top of the kernel and reused it for every
+	// __any_sync/__syncwarp below. That breaks at the LOOP EXIT: rem is per-thread, and PrepareHost
+	// gives the first r1 threads one extra batch (GpuPuzzle.cpp:455), so on the final launch a lane
+	// whose warp straddles that boundary falls out of this loop one iteration before its neighbours.
+	// It is still LIVE -- it goes on to the write-back at the bottom of the kernel -- yet it stayed
+	// named in the captured mask and never arrived at the matching __any_sync.
+	//
+	// The other exits are fine and are deliberately left as they are: the rem==0 return above and
+	// the found-path returns inside the loop leave the kernel entirely, and exited threads are
+	// exempt from the rule. Only the loop exit produces a live absentee.
+	//
+	// The fix is the per-iteration __ballot_sync below, NOT the seed: every arriving lane votes, and
+	// the result names precisely the lanes that enter the body -- precisely the set that reaches the
+	// __any_sync calls. One ballot per batch is nothing against B keys' worth of hashing.
+	//
+	// Seed 0xFFFFFFFFu rather than __activemask(). Every lane of the warp either reaches the first
+	// ballot or has already EXITED at :40 / :44 / :62, and exited threads named in a mask are exempt,
+	// so the full mask is legal; __ballot_sync sets a bit only for a lane that is both active and
+	// voted true, so the seed self-corrects on iteration 0. It is also deterministic, which
+	// __activemask() is not: taken here it would be an instantaneous snapshot immediately after the
+	// rem==0 return -- the kernel's first per-thread divergent branch -- and the CUDA guide states
+	// outright that __activemask() cannot be used to determine which lanes execute a given branch.
+	// Two lanes observing different snapshots would then enter __ballot_sync with mismatched masks,
+	// which is undefined on its own. (Naming all 32 lanes is safe because blockDim.x is always a
+	// multiple of 32: GetThreadsPerBlock only ever returns THREADS_PER_BLOCK=256,
+	// MIN_THREADS_PER_BLOCK=32, or prop.maxThreadsPerBlock -- GpuPuzzle.cpp:283-288, Defs.h:15-16.)
+	unsigned mask = 0xFFFFFFFFu;
 	uint32_t batches_done = 0;
-	while (batches_done < batches_per_launch && ge256_u64(rem, (uint64_t)B)) {
+	while (true) {
+		const bool live = (batches_done < batches_per_launch) && ge256_u64(rem, (uint64_t)B);
+		mask = __ballot_sync(mask, live);
+		if (!live) break;
+
 		uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
 		uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(x1));   // by-value ABI: 1 reg out
 		
         bool pref = (hw2 == target_prefix);
-		if (__any_sync(full_mask, pref)) {
+		if (__any_sync(mask, pref)) {
 			bool full = pref && hash160_full_match(prefix, u256_of(x1), c_target_words);
 			if (full) {
 				Copy_u64_x4(find_result->scalar, s1);
@@ -76,7 +111,7 @@ __global__ void TestKernel(
 				__threadfence_system();
 			}
 			
-			if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
+			if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
 		}
 		
 		uint64_t subp[MAX_BATCH_SIZE / 2][4];
@@ -126,7 +161,7 @@ __global__ void TestKernel(
 				uint8_t prefix = odd ? 0x03 : 0x02;
 				uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(px3));   // by-value ABI: 1 reg out
 				bool pref = (hw2 == target_prefix);
-				if (__any_sync(full_mask, pref)) {
+				if (__any_sync(mask, pref)) {
 					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 					if (full) {
 						Copy_u64_x4(find_result->scalar, s1);
@@ -136,7 +171,7 @@ __global__ void TestKernel(
 						__threadfence_system();
 					}
 					
-					if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
+					if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
 				}
 				
 			}
@@ -166,7 +201,7 @@ __global__ void TestKernel(
 				uint8_t prefix = odd ? 0x03 : 0x02;
 				uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(px3));   // by-value ABI: 1 reg out
 				bool pref = (hw2 == target_prefix);
-				if (__any_sync(full_mask, pref)) {
+				if (__any_sync(mask, pref)) {
 					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 					if (full) {
 						Copy_u64_x4(find_result->scalar, s1);
@@ -176,7 +211,7 @@ __global__ void TestKernel(
 						__threadfence_system();
 					}
 					
-					if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
+					if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
 				}
 			}
 			
@@ -213,7 +248,7 @@ __global__ void TestKernel(
 			uint8_t prefix = odd ? 0x03 : 0x02;
 			uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(px3));   // by-value ABI: 1 reg out
 			bool pref = (hw2 == target_prefix);
-			if (__any_sync(full_mask, pref)) {
+			if (__any_sync(mask, pref)) {
 				bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 				if (full) {
 					Copy_u64_x4(find_result->scalar, s1);
@@ -223,7 +258,7 @@ __global__ void TestKernel(
 					__threadfence_system();
 				}
 				
-				if (__any_sync(full_mask, full)) { __syncwarp(full_mask); WARP_FLUSH_HASHES(); return; }
+				if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
 			}
 
             uint64_t last_dx[4];
