@@ -19,7 +19,7 @@
     } \
 }; \
 
-void CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream);
+cudaError_t CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream);
 cudaError_t CudaSetupKernel();
 
 cudaError_t CallGpuMulKernel(
@@ -217,7 +217,18 @@ void GpuPuzzle::Execute() {
 		u64 t1 = GetTickCount64();
 
 #ifndef NO_GPU_MODE	
-		CallGpuKernel(Kparams, m_cudaStream);
+		err = CallGpuKernel(Kparams, m_cudaStream);
+		if (err != cudaSuccess) {
+			// Same reasoning as the synchronize check below, and the same reason it is not
+			// ck(). This only fires on the native-cubin path -- a runtime <<<>>> launch
+			// reports through the synchronize -- where nothing was enqueued, so waiting on
+			// the stream would succeed and the run would be counted as scanned.
+			std::cerr << "GPU " << CudaIndex << ": kernel launch failed: "
+			          << cudaGetErrorString(err) << "\r\n";
+			Failed = true;
+			goto LExit;
+		}
+
 		err = cudaStreamSynchronize(m_cudaStream);
 		if (err != cudaSuccess) {
 			// Not ck(): that macro only prints and jumps, and it cannot set Failed because the

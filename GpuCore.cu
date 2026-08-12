@@ -376,11 +376,16 @@ __global__ void TestKernel(
     
 }
 
-void CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
+// Returns cudaSuccess when the launch was accepted. On the native path a failure
+// here is otherwise invisible: cuLaunchKernel does not touch the runtime's error
+// slot, so the following cudaStreamSynchronize succeeds with nothing enqueued and
+// the run loop would count a launch that never happened -- ending in exit code 2,
+// "Range exhausted: key not found", after computing nothing.
+cudaError_t CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 #if USE_NATIVE_CUBIN
 	TCubinCall* cc = NativeCubin();
 	if (!cc)
-		return;
+		return cudaErrorInitializationError;
 
 	// One entry per declared parameter; cuLaunchKernel reads exactly as many as the
 	// signature has and copies each by that parameter's size.
@@ -403,7 +408,9 @@ void CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 	p.stream         = cudaStream;
 	p.kernel_args    = args;
 	p.kernel_arg_cnt = 8;
-	cc->CallKernel(p);
+	if (!cc->CallKernel(p))
+		return cudaErrorLaunchFailure;   // CallKernel has already printed the CUresult
+	return cudaSuccess;
 #else
 	TestKernel <<< Kparams.block_count, Kparams.block_size, 0, cudaStream >>> (
 		Kparams.px,
@@ -415,6 +422,12 @@ void CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 		Kparams.batch_size,
 		Kparams.batches_per_launch
 	);
+	// Deliberately not cudaGetLastError() here. A runtime launch failure is already
+	// caught by the cudaStreamSynchronize in Execute(), and draining the sticky slot
+	// at this point would let an error latched earlier in this thread be reported as
+	// a launch failure -- the misattribution documented under H6 item 3. The default
+	// build's behaviour is unchanged.
+	return cudaSuccess;
 #endif
 }
 
