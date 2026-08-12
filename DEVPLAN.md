@@ -44,7 +44,7 @@ not individually recoverable from history. Everything after that is one commit p
 
 ---
 
-## Status — 2026-08-12
+## Status — 2026-08-13
 
 **The coverage chain is closed end to end, and the program now reports what it did.** Every key in
 the range is assigned to a thread, every thread's count is a whole number of batches so the kernel
@@ -297,6 +297,252 @@ loads, `-use_fast_math` (zero FP ops in device code), `cudaFuncSetCacheConfig(Pr
 
 ---
 
+## Hand-written SASS for TestKernel (RCAsm) — parked; the blocker is the instruction set
+
+An avenue for going past P3/P4, evaluated 2026-08-12, re-measured 2026-08-13, and **parked**, not
+rejected. Only `TestKernel` is in scope; `scalarMulKernelBase` is explicitly out (it is the
+one-time setup kernel, i.e. P5, and fixing P1 already shrinks it 12-24×).
+
+**Headline, corrected on 2026-08-13:** the earlier verdict — "round-trips almost, gated on CUDA
+12.8" — was drawn from a 24-instruction template and did not survive contact with the real kernel.
+The full `TestKernel` does **not** reassemble: 12.7% of its instructions have no encoder in
+RCAsm/cuAssembler. The note-section problems that framed the old verdict are real but secondary;
+they are what you hit *after* the instruction stream assembles, and it does not.
+
+**RCAsm** — <https://github.com/RetiredC/RCAsm>, GPLv3, Python, by RetiredCoder — is a SASS
+assembler over a vendored, modified **CuAssembler** (MIT, cloudcores). sm_89 and sm_120 only. It is
+a *template-injection* assembler, not a standalone one:
+
+1. Write a dummy `.cu` with the signature you want; `nvcc -cubin` → template cubin, kept as
+   `.cubin_orig`.
+2. CuAssembler disassembles it to `.cuasm` (the whole ELF as text).
+3. RCAsm compiles its own `.asm` dialect and **textually splices** the instruction stream in
+   between `.text.<kernel>:` and the `.L_x_N` end label, patching the register count — the
+   `EIATTR_REGCOUNT` word in `.nv.info` on sm_120, `SHI_REGISTERS` on sm_89.
+4. Reassemble → cubin, then copy `.note.nv.tkinfo`/`.note.nv.cuver` back from `.cubin_orig`.
+5. `CallCubin` (driver API, `cuModuleLoad` + `cuLaunchKernel`) loads it at runtime.
+
+What it buys over PTX is real and is what P3/P4 cannot reach: register assignment, **control
+codes** (the `[B------:R-:W0:-:S01]` prefix — wait-barrier mask, read/write barrier, yield, stall
+count), the uniform datapath, carry-flag control, and calls that are not forced inlines.
+
+**The actual prize is `Kernel02`.** It is a Kangaroo-style secp256k1 solver carrying hand-written
+SASS for exactly this project's arithmetic layer — `MulMod256`, `SqrMod256`, `MadMod256`,
+`SqrAddMod256`, `SubMod256`, `SubMod256_3` (our `sub_mod3`), `AddMod256`, `NegMod256`, `InvMod256`
+— with a claimed 120 G/s `MulMod256` on a 4090. That is a reference implementation of `Math.cuh`,
+independent of whether RCAsm itself is ever adopted. Its sources are in `asm/` (`mod_mul.asm`,
+`mod_inv.asm`, `mod_sub.asm`, `fuse.asm`, `main.asm`, `newKernelB.asm`).
+
+### Where the arithmetic actually is — `asm/GpuCore_sm120.map`
+
+`asm/GpuCore_sm120.asm` is the CuAssembler-format dump of the shipped kernel (1.47 MB, whole ELF
+as text, control codes included). `asm/GpuCore_sm120.map` maps every one of its 9,984 instructions
+to the `Math.cuh` function it came from.
+
+**How the map was built, and why it can be trusted:** compile `GpuCore.cu` with `-lineinfo`,
+confirm `.text.TestKernel` is **byte-identical** to the plain build (159,744 B — verified, so the
+attribution transfers with no drift), then read `nvdisasm -gi` inline call-stacks (max depth 6) and
+take the **outermost `Math.cuh` frame**. That folds `mul_256_by_64`/`add_320_to_256` into
+`mul_mod`, `add_320_to_256s` into `sqr_mod`, the 288-bit helpers into `inv_mod`, and resolves
+`mul_256_by_P0inv` — shared between `mul_mod:261` and `sqr_mod:383` — by real call site rather
+than by adjacency. Everything is `__forceinline__`, so there are no labels: what exists is one
+region per call site.
+
+| Function | Instrs | Share | Call sites | Per call | RCAsm hand-written |
+|---|---:|---:|---:|---:|---:|
+| `mul_mod` | 3,113 | 31.2% | 14 | ~222 | `MulMod256` **112** |
+| `inv_mod` | 890 | 8.9% | 1 | 890 | `InvMod256` 164 — *not comparable, see below* |
+| `sqr_mod` | 844 | 8.5% | 4 | 211 | `SqrMod256` **125** |
+| `sub_mod` | 250 | 2.5% | 14 | ~18 | `SubMod256` **16** |
+| `sub_mod3` | 125 | 1.3% | 4 | ~31 | `SubMod256_3` **18** |
+| `sub_mod_is_odd` | 27 | 0.3% | 3 | 9 | — |
+| `neg_mod` | 24 | 0.2% | 2 | 12 | `NegMod256` **8** |
+| `add_mod` | 0 | — | 0 | — | `AddMod256` 16 |
+| *hash* | 4,066 | 40.7% | (4) | — | — |
+
+Notes that matter before anyone acts on that table:
+
+- **`add_mod` is never called.** Dead in `TestKernel`.
+- **The `inv_mod` row is not a fair comparison and should not be quoted as one.** RCAsm's
+  `InvMod256` `CALL`s six separate helper `FUNCTION`s, so its 164 excludes work our inlined 890
+  includes — real calls instead of forced inlines being exactly what hand-written SASS buys.
+- **The hash 40.7% is a *static* count**, not the dynamic ~69% recorded under section C. Both hash
+  functions are emitted once, as `__noinline__` bodies inside `.text.TestKernel`
+  (`getHash160_33_from_limbs` at 0x171e0, `getHash160_w2_from_limbs` at 0x1f1b0), and called from
+  4 sites.
+- **`neg_mod` and `sub_mod_is_odd` are shredded** — ptxas scattered their 12 and 9 instructions
+  into 1-5 instruction fragments across ~0x250 bytes. There is no contiguous region to lift out;
+  they exist only in context.
+- Blocks ≥12 instructions cover 92.5% of the kernel; the other 7.5% is ptxas interleaving across
+  region boundaries. `mul_mod` at call sites `:157` and `:261` has the lowest density (64.8%,
+  92.1%) because `inv_mod`'s prologue is scheduled into it.
+
+### The real kernel does not reassemble (measured 2026-08-13, CUDA 13.0.88, sm_120)
+
+`asm/GpuCore_sm120.asm` → cubin **fails**. After `.tkinfo` is commented out to get the parser
+started, it dies at instruction #12:
+
+```
+/*00b0*/ HFMA2 R3, -RZ, RZ, 0, 0 ;   ->  Unknown InsKey(HFMA2_R_R_R_II_FI) in Repos!
+```
+
+Sweeping all 9,984 instructions rather than stopping at the first failure:
+**1,265 of them (12.7%) have no encoder**, across 17 InsKeys.
+
+| Missing | Count | Example |
+|---|---:|---|
+| `BRA.DIV` — values outside the learned range | 584 | `@!P1 BRA.DIV UR4, 0x16ea0` |
+| `ISETP` — unknown modifier (`.U64`) | 173 | `ISETP.GE.U64.AND P0, PT, R2, UR6, PT` |
+| `IADD.64` / `IADD.64.X` — 9 distinct keys | 444 | `IADD.64 R6, R6, -R62` |
+| `HFMA2_R_R_R_II_FI` | 24 | the MOV idiom |
+| `WARPSYNC.COLLECTIVE` + `ENDCOLLECTIVE` | 24 | |
+| `R2UR_P_UR_R`, `LDCU_UR_cAURI`, `CGAERRBAR` | 16 | |
+
+The shape of that list is the finding. `IADD.64` is the carry-chain backbone of every routine in
+`Math.cuh`, and RCAsm's `NewOpsHandler.py` hand-encodes exactly **one** of its ten forms
+(`IADD_R_P_R_R_P`). This is not a formatting problem that a toolkit version can fix.
+
+### The trap that invalidated the first measurement — worth recording
+
+The first sweep reported 1,569 missing. It was wrong. `Config.SM_VER` **defaults to 89**, and the
+only thing that changes it is `CuAsmParser.set_sm()`. A harness that constructs `CuAsmParser()` and
+calls `parse()` without `set_sm(120)` silently skips the two sm_120-gated encoders in
+`NewOpsHandler.check_new_ops` — `LDCU_UR_cAI` (25 instructions) and `IADD_R_P_R_R_P` (279),
+exactly the 304 difference. Anyone driving RCAsm headless will hit this. Set both
+`Config.SM_VER = 120` and `cap.set_sm(120)`.
+
+### What the template test got right, and where it misled
+
+The 24-instruction template test (2026-08-12) still stands on its own terms — it is just not
+representative. Kept because each item is independently true:
+
+- **`.tkinfo`.** 13.0's nvdisasm emits a directive `CuAsmParser` has no handler for; the string
+  appears nowhere in cuAssembler. Must be neutralized before anything parses. Reproduced on the
+  real kernel.
+- **`.note.nv.cuver` does not exist in CUDA 13.0 cubins** and RCAsm's `patch_cubin` requests it
+  unconditionally, so that step `KeyError`s.
+- **`.note.nv.cuinfo` is truncated 0x20 → 0x08 bytes** by the round-trip — data loss, not a
+  formatting quibble — and the ELF header flags degrade
+  `EF_CUDA_SM120 EF_CUDA_VIRTUAL_SM(...)` → `EF_CUDA_SM120 unrecognized:0`.
+- **3 of the template's 24 instructions differed**, all **bit 101** on the `desc[UR4]` global
+  memory ops (`LDG.E.64.CONSTANT` ×2, `STG.E.64` ×1): cuAssembler's `LDG_R_ARURI_P`/`STG_ARURI_R`
+  set it, ptxas leaves it clear. Both decode to identical instruction text.
+- `cuobjdump -sass` reads the patched cubin (rc=0) while `nvdisasm` refuses it, so malformed notes
+  are not fatal to all tooling.
+- **Keep any template body trivial.** The `HFMA2` MOV idiom that broke the first template is not a
+  template artifact at all — it occurs **24 times in the real kernel** and is the first thing the
+  full round-trip trips over. RCAsm's own sample is one line for this reason.
+- **The single-struct signature is free.** `.nv.constant0.TestKernel` is 952 bytes (0x3b8) for
+  *both* the 8-argument form and a single by-value struct — params at `0x380`, 56 bytes. Still
+  true, but no longer needed: the native path below passes 8 arguments properly.
+
+**Is CUDA 12.8 still worth installing?** Demoted from "the gate" to "one experiment". The note
+sections above are genuine 12.8-vs-13.0 drift. The InsKey gap probably is not — but there is a
+plausible mechanism worth one test: if 12.8's nvdisasm prints these as *unfused* 32-bit forms
+(`IADD3` pairs rather than `IADD.64`, `ULDC` rather than `LDCU`), the listing it produces might be
+inside cuAssembler's learned vocabulary even though 13.0's is not. That is a hypothesis, not a
+finding. It is cheap to settle once 12.8 is installed and it would change the verdict, so run it
+before writing off the route — but do not plan around it.
+
+### Native cubin path — implemented, `make NATIVE_CUBIN=1`
+
+Independent of whether RCAsm is ever adopted, the host can now load `TestKernel` from a `.cubin`
+through the driver API instead of the runtime `<<<>>>` launch, so a hand-written kernel can be
+swapped in without rebuilding anything:
+
+```
+make cubin SM=120 && make NATIVE_CUBIN=1 SM=120 -j4
+```
+
+`NATIVE_CUBIN=<path>` names the file (default `GpuCore.cubin`); the path is resolved at **run**
+time relative to the working directory. Unset, the build is unchanged — verified byte-identical
+device code (159,744 B). The hook is `CallGpuKernel` in `GpuCore.cu`, plus the five `CudaCopy*`
+wrappers, all behind `#if USE_NATIVE_CUBIN`.
+
+Two things found while building it that dictated the design:
+
+1. **The `__constant__` tables are `STB_LOCAL`.** `c_Gx`/`c_Gy`/`c_Jx`/`c_Jy`/`c_target_words` are
+   local symbols in a normal cubin, so `cuModuleGetGlobal` cannot find them and the kernel would
+   run against an empty constant bank. `extern "C"` does **not** help — measured. Only
+   `-rdc=true` does.
+2. **`-rdc=true -cubin` produces an unloadable file** — ELF `Type: REL` with 10 undefined symbols,
+   and `cuModuleLoad` requires `ET_EXEC`. The `cubin` target therefore does a two-step device link
+   (`-rdc=true -c`, then `-dlink -cubin`), giving `Type: EXEC`, 219,240 B, 0 undefined symbols, all
+   five tables `GLOBAL`.
+
+**`-rdc` is not free, and this matters for any benchmark.** It stops `getHash160_33/_w2` being
+emitted inside `.text.TestKernel` and gives them their own sections: 0x27000 → 0x17700 + 0x8080 +
+0x7e80, i.e. **159,744 → 161,280 bytes, +96 instructions (+0.96%)**. The native-cubin kernel is
+therefore *not* the same code as the default build. Diff against `make sass` before reading
+anything into a timing difference.
+
+`NativeCubin()` keys one `CUmodule` per **GPU**, not per thread: `Prepare` uploads the constants
+from the main thread while `Execute` launches from the worker thread, and both must reach the same
+module. A `CUmodule` belongs to a context, and the runtime primary context is per-device and shared
+across threads, so per-device is the correct granularity.
+
+### `CallCubin.cpp` / `CallCubin.h` — the five issues, now fixed
+
+Copied from RCAsm's `Kernel01`, with `CopyToSymbol` and a `cuFuncSetAttribute` call added by the
+owner. All five findings from 2026-08-12 have been addressed:
+
+1. **`ArgCnt` was hardcoded to 1** — correct for RCAsm's one-struct convention, wrong for
+   `TestKernel`'s 8 arguments: `cuLaunchKernel` reads as many `kernelParams` entries as the
+   signature declares, so it read 56 bytes past an 8-byte allocation and passed the garbage as
+   `Px`/`Py`/`find_result`. **Fixed:** `TCallKernelParams` gained `kernel_args`/`kernel_arg_cnt`;
+   supply them for a multi-argument kernel, leave them zero and the old single-struct behaviour is
+   unchanged. The `malloc` is gone with them.
+2. **`~TCubinCall()` never called `cuModuleUnload`** and a second `LoadCubin` leaked the first
+   module. **Fixed:** new `Unload()`, called from the destructor and at the head of `LoadCubin`;
+   copy ctor and assignment deleted.
+3. **Context.** `cuModuleLoad` needs a current context and `cudaSetDevice` alone does not create
+   one (the primary context is lazy). **Fixed:** `cudaFree(0)` in `LoadCubin`.
+4. **Build.** `#pragma comment(lib, "cuda.lib")` is MSVC-only. **Fixed:** wrapped in
+   `#ifdef _MSC_VER`; the Makefile adds `CallCubin.cpp` to `CPU_SRC` and
+   `-L$(CUDA_PATH)/lib64/stubs -lcuda` under `NATIVE_CUBIN`.
+5. **Two `res != cudaSuccess` comparisons mixed `CUresult` with `cudaError_t`** — working only
+   because both enums are 0. **Fixed** to `CUDA_SUCCESS`.
+
+Also: `cuFuncSetAttribute` is now skipped when `sharedSize == 0` (the case here), every error
+message names the symbol or function it failed on, `CopyToSymbol` bounds-checks against the
+symbol's real size, and a `CUDA_ERROR_NOT_FOUND` from `cuModuleGetGlobal` says outright that the
+cubin needs `-rdc=true`.
+
+### Licensing — decide before this goes further
+
+RCAsm is **GPLv3**; the CuAssembler underneath is MIT. `CallCubin.cpp/h` are RCAsm's files and the
+copy in this tree has the `// (c) RetiredCoder, 2026` line removed. This repository has no LICENSE
+file at all. GPLv3 is copyleft; adopting RCAsm's runtime helper is a licensing decision, and the
+dropped notice is a separate matter from the licence choice.
+
+### Blocked on, in order
+
+1. **The 17 missing InsKeys.** This is now the gate, and it is the expensive one: encoders for the
+   `IADD.64` family (9 forms, 444 instructions), `ISETP.*.U64`, and `BRA.DIV` would have to be
+   hand-written into `NewOpsHandler.py` the way `IADD_R_P_R_R_P` already is. Nothing downstream is
+   worth starting until this is either done or shown to be unnecessary (see item 2).
+2. **CUDA 12.8 alongside 13.0** — one experiment, not a prerequisite: does 12.8's nvdisasm emit
+   unfused forms that cuAssembler already knows? Cheap, and it would change item 1 entirely.
+3. **A real GPU.** Everything past "produces a cubin" is unverifiable without one. That now
+   includes the native cubin path itself: `cuModuleLoad` accepting the device-linked cubin, and
+   `cuModuleGetGlobal` resolving the five now-`GLOBAL` constant tables, are both **untested**.
+   A hand-written-SASS kernel whose cubin `nvdisasm` will not read is a failure mode
+   indistinguishable from a bug in the assembly.
+4. `pip install PyQt5 QScintilla` even for batch builds: RCAsm's `compiler.py` imports `utils.py`,
+   which imports PyQt5 at module scope, so it is not usable headless as shipped. (Worked around
+   here with a `MetaPathFinder` stub; that is a harness hack, not a fix.)
+
+### If the route is abandoned
+
+The `asm/GpuCore_sm120.map` work stands on its own and is worth keeping either way: it is the only
+thing that says where `mul_mod`'s 31.2% actually sits, and the `Kernel02` reference implementations
+in `asm/` are readable regardless of whether RCAsm can assemble anything. The realistic near-term
+use of the table above is as a **target for P3/P4**, not as a plan to hand-assemble: ptxas emits
+~222 instructions where `MulMod256` uses 112, and that ratio is the size of the prize whichever way
+it is claimed.
+
+---
+
 ## Remaining fix plan
 
 ### Next up
@@ -345,7 +591,11 @@ loads, `-use_fast_math` (zero FP ops in device code), `cudaFuncSetCacheConfig(Pr
 11. **P2** — build `-DMAX_BATCH_SIZE=256`. Correct `BYTES_PER_THREAD` to the real 128 B/thread
     **only together with a real `threadsTotal` cap** — the current 128× over-reservation is the
     only thing bounding thread count today.
-12. **P3 then P4**, measuring after each.
+12. **P3 then P4**, measuring after each. Size the prize from `asm/GpuCore_sm120.map` first: ptxas
+    spends ~222 instructions per `mul_mod` where RCAsm's hand-written `MulMod256` uses 112, and
+    `mul_mod` is 31.2% of the kernel. Past P3/P4 the remaining headroom is hand-written SASS — see
+    the parked RCAsm section above, now blocked on 17 missing InsKeys rather than on a toolkit
+    version.
 13. **H8 + H9** — fuse carry chains into single `asm volatile` blocks with declared operands; give
     `inv_mod` a `uint64_t*` signature. Add a startup self-test kernel regardless — it converts
     H8's failure mode from "silently wrong keys" into "refuses to start".
@@ -383,6 +633,21 @@ wsl -d Ubuntu-22.04 -- bash -lc 'rm -rf /tmp/hb && mkdir -p /tmp/hb \
 Build out of tree as above rather than in `/mnt/c`: the Makefile drops `.o` files next to the
 sources, and `/mnt/c` is slow. Note CUDA 13 has dropped some older SASS targets, so `SM=` values
 from the Makefile comment are not all still valid — check before trusting that list (H12).
+
+**CUDA 12.8** is worth having for the parked RCAsm/SASS work only, and is no longer the gate it was
+described as: on 13.0 the cubin↔cuasm round-trip mangles three `.note.*` sections *and* — the
+larger problem — 12.7% of the real kernel's instructions have no encoder at all. See that section.
+Nothing else in this project needs 12.8, and cubins built by it run under any recent CUDA.
+
+**nvcc `-lineinfo` does not change codegen here** — verified, `.text.TestKernel` byte-identical at
+159,744 B with and without. That is what makes `nvdisasm -gi` usable to attribute SASS back to
+`Math.cuh` (`asm/GpuCore_sm120.map`). `-rdc=true` **does** change codegen; see the native-cubin
+notes.
+
+**Python in WSL has no pip** (`ensurepip` is stripped and `sudo` needs a password). The round-trip
+harness got its `pyelftools`/`sympy` by installing them with Windows' Python
+(`C:\python39\python.exe`, 3.14.3) via `pip install --target <dir>` and putting that directory on
+`PYTHONPATH` — both are pure Python, so this works across the platform and version gap.
 
 ### What exists now
 

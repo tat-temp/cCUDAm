@@ -1,6 +1,10 @@
 # Build output
 *.o
 cCUDAHurricane
+*.cubin
+
+# Disassembly dumps -- regenerable with `make sass`
+*.cuasm
 
 # Test output
 tests_results.txt

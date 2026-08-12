@@ -33,14 +33,68 @@ CPU_SRC := cCUDAHurricane.cpp EcInt.cpp GpuPuzzle.cpp EcPoint.cpp Ec.cpp
 GPU_SRC := GpuCore.cu GpuEc.cu
 HDRS    := $(wildcard *.h *.cuh)
 
+# Native cubin path. `make NATIVE_CUBIN=1` launches TestKernel through the driver
+# API (CallCubin.cpp: cuModuleLoad + cuLaunchKernel) out of a prebuilt .cubin
+# instead of the runtime <<<>>> launch, so a hand-written-SASS kernel can be
+# swapped in without rebuilding the host. Give a path to name the file:
+# `make NATIVE_CUBIN=asm/TestKernel.cubin`. Default GpuCore.cubin, which
+# `make cubin` produces. The path is resolved at RUN time, relative to the
+# process's working directory -- keep the cubin next to the binary.
+#
+# The cubin must export the five __constant__ tables, so build it with -rdc=true
+# (see the `cubin` target): without it nvcc gives every device variable internal
+# linkage and cuModuleGetGlobal cannot find c_Gx/c_Gy/c_Jx/c_Jy/c_target_words.
+NATIVE_CUBIN ?=
+ifneq ($(strip $(NATIVE_CUBIN)),)
+ifeq ($(strip $(NATIVE_CUBIN)),1)
+CUBIN_FILE := GpuCore.cubin
+else
+CUBIN_FILE := $(NATIVE_CUBIN)
+endif
+NATIVE_DEFS := -DUSE_NATIVE_CUBIN=1 -DNATIVE_CUBIN_PATH='"$(CUBIN_FILE)"'
+NVCCFLAGS   += $(NATIVE_DEFS)
+CCFLAGS     += $(NATIVE_DEFS)
+CPU_SRC     += CallCubin.cpp
+# libcuda is the driver library, not part of the runtime. A build host with no
+# driver installed links against the stub; the real one is found at load time.
+LDFLAGS     += -L$(CUDA_PATH)/lib64/stubs -lcuda
+else
+CUBIN_FILE := GpuCore.cubin
+endif
+
 CPP_OBJECTS := $(CPU_SRC:.cpp=.o)
 CU_OBJECTS  := $(GPU_SRC:.cu=.o)
 
 TARGET := cCUDAHurricane
 
-.PHONY: all clean ptxinfo sass
+.PHONY: all clean ptxinfo sass cubin
 
 all: $(TARGET)
+
+# The cubin that NATIVE_CUBIN loads, built with the shipped device flags.
+#
+# Two steps, not one: `-rdc=true -cubin` emits a RELOCATABLE cubin (ELF type REL,
+# with ~10 undefined symbols), and cuModuleLoad only accepts ET_EXEC -- so it has to
+# go through a device link. -rdc=true itself is needed because without it nvcc gives
+# every __device__/__constant__ variable internal linkage and cuModuleGetGlobal
+# cannot find the constant tables.
+#
+# It is not free. -rdc stops getHash160_33/_w2 being emitted inside
+# .text.TestKernel and gives them their own sections, so the device code is NOT the
+# same as the default build: .text.TestKernel 0x27000 -> 0x17700 plus 0x8080 +
+# 0x7e80 of hash, i.e. 159744 -> 161280 bytes total (+96 instructions, +0.96%).
+# Diff against `make sass` before treating a timing difference as a real one.
+#
+# Single-arch only: -cubin with several -gencode flags does not produce one cubin.
+cubin: GpuCore.cu $(HDRS) GpuHash.cu
+ifneq ($(words $(SM_ARCHS)),1)
+	@echo "cubin: pick a single arch, e.g. make cubin SM=120 (got: $(SM_ARCHS))"; exit 1
+else
+	$(NVCC) $(NVCCFLAGS) -rdc=true -c -o GpuCore-rdc.o GpuCore.cu
+	$(NVCC) $(NVCCFLAGS) -dlink -cubin -o $(CUBIN_FILE) GpuCore-rdc.o
+	@rm -f GpuCore-rdc.o
+	@echo "wrote $(CUBIN_FILE)"
+endif
 
 $(TARGET): $(CPP_OBJECTS) $(CU_OBJECTS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)
@@ -83,4 +137,4 @@ sass: $(GPU_SRC) $(HDRS)
 	done
 
 clean:
-	rm -f $(CPP_OBJECTS) $(CU_OBJECTS) $(TARGET) $(PTXINFO_OBJS) $(SASS_OBJS)
+	rm -f $(CPP_OBJECTS) $(CU_OBJECTS) $(TARGET) $(PTXINFO_OBJS) $(SASS_OBJS) GpuCore-rdc.o

@@ -5,6 +5,57 @@
 #include "GpuHash.cu"
 #include "Math.cuh"
 
+// ---- Native cubin path (make NATIVE_CUBIN=...) ---------------------------------
+// TestKernel is launched through the driver API out of a prebuilt .cubin instead of
+// the runtime <<<>>> launch, so a hand-written-SASS kernel can be dropped in without
+// rebuilding the host. Everything below this kernel's own source stays compiled and
+// linked as before -- only the launch and the constant uploads are rerouted.
+#if USE_NATIVE_CUBIN
+#include "CallCubin.h"
+#include <stdio.h>
+#include <mutex>
+
+#ifndef NATIVE_CUBIN_PATH
+#define NATIVE_CUBIN_PATH "GpuCore.cubin"
+#endif
+
+// One module per GPU, not per thread: a CUmodule belongs to a context, and the
+// runtime's primary context is per-device and shared by every thread that selects
+// that device. Prepare() uploads the constants from the main thread while Execute()
+// launches from the worker thread, and both must reach the same module.
+static TCubinCall g_cubin[MAX_GPU_CNT];
+static bool       g_cubin_ready[MAX_GPU_CNT];
+static std::mutex g_cubin_lock;
+
+static TCubinCall* NativeCubin()
+{
+	int dev = 0;
+	if ((cudaGetDevice(&dev) != cudaSuccess) || (dev < 0) || (dev >= MAX_GPU_CNT))
+		return NULL;
+
+	std::lock_guard<std::mutex> guard(g_cubin_lock);
+	if (!g_cubin_ready[dev])
+	{
+		if (!g_cubin[dev].LoadCubin(NATIVE_CUBIN_PATH))
+			return NULL;
+		g_cubin_ready[dev] = true;
+		printf("GPU %d: loaded native cubin %s\n", dev, NATIVE_CUBIN_PATH);
+	}
+	return &g_cubin[dev];
+}
+
+// The five __constant__ tables live in the cubin's own module, so cudaMemcpyToSymbol
+// -- which addresses the runtime-linked module -- would write to the wrong place.
+static cudaError_t NativeToSymbol(const char* name, const void* value, size_t size)
+{
+	TCubinCall* cc = NativeCubin();
+	if (!cc)
+		return cudaErrorInitializationError;
+	return cc->CopyToSymbol(name, const_cast<void*>(value), (int)size)
+		? cudaSuccess : cudaErrorInvalidSymbol;
+}
+#endif
+
 #define BLOCK_CNT	gridDim.x
 #define BLOCK_X		blockIdx.x
 #define THREAD_X	threadIdx.x
@@ -326,7 +377,34 @@ __global__ void TestKernel(
 }
 
 void CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
-	
+#if USE_NATIVE_CUBIN
+	TCubinCall* cc = NativeCubin();
+	if (!cc)
+		return;
+
+	// One entry per declared parameter; cuLaunchKernel reads exactly as many as the
+	// signature has and copies each by that parameter's size.
+	void* args[8] = {
+		&Kparams.px,
+		&Kparams.py,
+		&Kparams.scalars,
+		&Kparams.counts,
+		&Kparams.d_find_result,
+		&Kparams.threads_total,
+		&Kparams.batch_size,
+		&Kparams.batches_per_launch
+	};
+
+	TCallKernelParams p = {};
+	snprintf(p.kernel_name, sizeof(p.kernel_name), "TestKernel");
+	p.blockSize      = (int)Kparams.block_size;
+	p.blockCnt       = (int)Kparams.block_count;
+	p.sharedSize     = 0;
+	p.stream         = cudaStream;
+	p.kernel_args    = args;
+	p.kernel_arg_cnt = 8;
+	cc->CallKernel(p);
+#else
 	TestKernel <<< Kparams.block_count, Kparams.block_size, 0, cudaStream >>> (
 		Kparams.px,
 		Kparams.py,
@@ -337,28 +415,56 @@ void CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 		Kparams.batch_size,
 		Kparams.batches_per_launch
 	);
+#endif
 }
 
 cudaError_t CudaCopyTargetWords(const void* value) {
+#if USE_NATIVE_CUBIN
+	return NativeToSymbol("c_target_words", value, 5 * sizeof(uint32_t));
+#else
 	return cudaMemcpyToSymbol(c_target_words, value, 5 * sizeof(uint32_t));
+#endif
 }
 
 cudaError_t CudaCopyGx(const void* value, size_t size) {
+#if USE_NATIVE_CUBIN
+	return NativeToSymbol("c_Gx", value, size);
+#else
 	return cudaMemcpyToSymbol(c_Gx, value, size);
+#endif
 }
 
 cudaError_t CudaCopyGy(const void* value, size_t size) {
+#if USE_NATIVE_CUBIN
+	return NativeToSymbol("c_Gy", value, size);
+#else
 	return cudaMemcpyToSymbol(c_Gy, value, size);
+#endif
 }
 
 cudaError_t CudaCopyJx(const void* value) {
+#if USE_NATIVE_CUBIN
+	return NativeToSymbol("c_Jx", value, 4 * sizeof(uint64_t));
+#else
 	return cudaMemcpyToSymbol(c_Jx, value, 4 * sizeof(uint64_t));
+#endif
 }
 
 cudaError_t CudaCopyJy(const void* value) {
+#if USE_NATIVE_CUBIN
+	return NativeToSymbol("c_Jy", value, 4 * sizeof(uint64_t));
+#else
 	return cudaMemcpyToSymbol(c_Jy, value, 4 * sizeof(uint64_t));
+#endif
 }
 
 cudaError_t CudaSetupKernel() {
+#if USE_NATIVE_CUBIN
+	// cudaFuncSetCacheConfig would configure the runtime-linked TestKernel, which is
+	// not the one being launched. DEVPLAN records PreferL1 as a verified non-win, so
+	// there is nothing to reproduce against the cubin's function here.
+	return cudaSuccess;
+#else
 	return cudaFuncSetCacheConfig(TestKernel, cudaFuncCachePreferL1);
+#endif
 }
