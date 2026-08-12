@@ -220,9 +220,12 @@ void GpuPuzzle::Execute() {
 		err = CallGpuKernel(Kparams, m_cudaStream);
 		if (err != cudaSuccess) {
 			// Same reasoning as the synchronize check below, and the same reason it is not
-			// ck(). This only fires on the native-cubin path -- a runtime <<<>>> launch
-			// reports through the synchronize -- where nothing was enqueued, so waiting on
-			// the stream would succeed and the run would be counted as scanned.
+			// ck(). A REJECTED launch enqueues nothing, so the synchronize that follows would
+			// wait on an empty stream and succeed, and the run would be counted as scanned.
+			// Fires on both paths: cuLaunchKernel returns its status directly, and the
+			// runtime <<<>>> discards a synchronous rejection into the last-error slot that
+			// no synchronize ever reads. H12 lands here -- on a card that is not sm_120 the
+			// very first launch is cudaErrorNoKernelImageForDevice.
 			std::cerr << "GPU " << CudaIndex << ": kernel launch failed: "
 			          << cudaGetErrorString(err) << "\r\n";
 			Failed = true;

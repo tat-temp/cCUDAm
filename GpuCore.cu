@@ -376,11 +376,28 @@ __global__ void TestKernel(
     
 }
 
-// Returns cudaSuccess when the launch was accepted. On the native path a failure
-// here is otherwise invisible: cuLaunchKernel does not touch the runtime's error
-// slot, so the following cudaStreamSynchronize succeeds with nothing enqueued and
-// the run loop would count a launch that never happened -- ending in exit code 2,
-// "Range exhausted: key not found", after computing nothing.
+// Returns cudaSuccess when the launch was ACCEPTED -- not when the kernel finished.
+//
+// Both paths need this and neither gets it for free. A rejected launch enqueues
+// nothing, so the cudaStreamSynchronize in Execute() then waits on an empty stream
+// and returns cudaSuccess: the run loop counts launches that never happened and the
+// program exits 2, "Range exhausted: key not found", having computed nothing.
+//
+//  - native: cuLaunchKernel returns its status directly and never touches the
+//    runtime's error slot.
+//  - runtime: <<<>>> expands to cudaLaunchKernel and DISCARDS its return. Synchronous
+//    rejections -- cudaErrorNoKernelImageForDevice (i.e. H12, on any card that is not
+//    sm_120), cudaErrorLaunchOutOfResources, cudaErrorInvalidConfiguration, and the
+//    local-memory allocation failure TestKernel's 16 KB frame invites -- are left in
+//    the per-thread last-error slot, which only cudaGetLastError reads. A synchronize
+//    does NOT report them; it only reports failures of a kernel that actually started.
+//    This is the same hole as the native path, through a different slot.
+//
+// The slot is drained immediately before the launch so the value read after it can
+// only describe that launch. That is what keeps the H6 item-3 misattribution out --
+// a stale error latched earlier in this thread cannot be reported as a launch
+// failure if it is no longer there. GpuEc.cu's CallGpuMulKernel already uses the
+// launch-then-cudaGetLastError half of this pattern, and PrepareCuda the drain half.
 cudaError_t CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 #if USE_NATIVE_CUBIN
 	TCubinCall* cc = NativeCubin();
@@ -412,6 +429,8 @@ cudaError_t CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 		return cudaErrorLaunchFailure;   // CallKernel has already printed the CUresult
 	return cudaSuccess;
 #else
+	cudaGetLastError();   // drain, so the read below can only describe this launch
+
 	TestKernel <<< Kparams.block_count, Kparams.block_size, 0, cudaStream >>> (
 		Kparams.px,
 		Kparams.py,
@@ -422,12 +441,8 @@ cudaError_t CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 		Kparams.batch_size,
 		Kparams.batches_per_launch
 	);
-	// Deliberately not cudaGetLastError() here. A runtime launch failure is already
-	// caught by the cudaStreamSynchronize in Execute(), and draining the sticky slot
-	// at this point would let an error latched earlier in this thread be reported as
-	// a launch failure -- the misattribution documented under H6 item 3. The default
-	// build's behaviour is unchanged.
-	return cudaSuccess;
+
+	return cudaGetLastError();
 #endif
 }
 
