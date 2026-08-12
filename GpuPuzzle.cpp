@@ -1,6 +1,5 @@
 #include <iostream>
 #include <cstring>
-#include <cinttypes> // Required for PRIu64
 #include <thread> // Required for std::this_thread::sleep_for
 #include <algorithm> // Required for std::min
 #include <cuda_runtime.h>
@@ -118,10 +117,6 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	threadsTotal = GetThreadsCount(&prop, threadsPerBlock, pRange, maxUserBlockPerSm, effectiveBatchSize, effectiveSlises);
 		
 	CalcEffectiveBatchSize(threadsPerBlock, pRange, threadsTotal, &effectiveBatchSize, &effectiveSlises);
-
-#if DEBUG_MODE > 0
-	std::cout << "GPU " << CudaIndex << ": Threads/Block: " << threadsPerBlock << " Total threads: " << threadsTotal << "\r\n";
-#endif
 
 	if (threadsTotal == 0llu) {
 		std::cerr << "Search interval is too small for the specified parameters.\r\n";
@@ -490,9 +485,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 
 	// h_counts256
 	{
-#if DEBUG_MODE > 0
-		std::cout << "\r\n---Points/thread---\r\n";
-#endif
 		for (uint64_t i = 0; i < threadsTotal; ++i) {
 			h_counts256[i*4+0] = per_thread_cnt[0];
 			h_counts256[i*4+1] = per_thread_cnt[1];
@@ -502,19 +494,12 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 			if (i < r1) {
 				add_256_u64((const uint64_t*)&h_counts256[i*4], batchSize, (uint64_t*)&h_counts256[i*4]);
 			}
-#if DEBUG_MODE > 0
-			std::cout << "[%6" << i << "]: " << formatHex256(&h_counts256[i*4]) << "\r\n";
-#endif
 		}
 	}
 
 	// h_start_scalars
 	half = (uint32_t)batchSize >> 1;
     {
-#if DEBUG_MODE > 0
-		std::cout << "\r\n---Start scalars---\r\n";
-#endif
-
         uint64_t cur[4] = { start[0], start[1], start[2], start[3] };
 		
         for (uint64_t i = 0; i < threadsTotal; ++i) {
@@ -529,53 +514,36 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 			if (i < r1) {
 				add_256_u64((const uint64_t*)&next, batchSize, (uint64_t*)&next);
 			}
-			
-#if DEBUG_MODE > 0
-			std::cout << "[%6" << i << "]: " << formatHex256(&h_start_scalars[i*4]) << "\r\n";
-#endif
-			
+
             cur[0]=next[0]; cur[1]=next[1]; cur[2]=next[2]; cur[3]=next[3];
         }
     }
 
-/*	
+/*
 	// p(x,y)
 	{
-#if DEBUG_MODE > 0
-		std::cout << "\r\n---Start points---\r\n";
-#endif
-
 		EcPoint p;
 		EcInt k;
-		
+
 		for (uint64_t i = 0; i < threadsTotal; ++i) {
 			k.LoadFromBuffer32((uint8_t*)&h_start_scalars[i*4]);
 			p = Ec::MultiplyG(k);
-			
+
 			h_px[i*4+0] = p.x.data[0];
 			h_px[i*4+1] = p.x.data[1];
 			h_px[i*4+2] = p.x.data[2];
 			h_px[i*4+3] = p.x.data[3];
-			
+
 			h_py[i*4+0] = p.y.data[0];
 			h_py[i*4+1] = p.y.data[1];
 			h_py[i*4+2] = p.y.data[2];
 			h_py[i*4+3] = p.y.data[3];
-			
-#if DEBUG_MODE > 0
-			std::cout << "[%6" << i << "]: x:" << formatHex256(&h_px[i*4]) << "\r\n";
-			std::cout << "[%6" << i << "]: y:" << formatHex256(&h_py[i*4]) << "\r\n";
-#endif
 		}
 	}
 */
-	
+
 	// B pointer
 	{
-#if DEBUG_MODE > 0
-		std::cout << "\r\n---B (batch size point)---\r\n";
-#endif
-
 		EcPoint p;
 		EcInt k;
 		
@@ -584,12 +552,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 
 		std::memcpy(&hParams->bx, p.x.data, 32);
 		std::memcpy(&hParams->by, p.y.data, 32);
-
-#if DEBUG_MODE > 0
-		std::cout << "x:" << formatHex256((const uint64_t*)&p.x.data) << "\r\n";
-		std::cout << "y:" << formatHex256((const uint64_t*)&p.y.data) << "\r\n";
-#endif
-
 	}
 
 	// find_result
@@ -597,15 +559,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 		std::memset(h_find_result, 0, sizeof(TFindResult));
 	}
 
-//#if DEBUG_MODE > 0
-//	for (uint64_t i = 0; i < threadsTotal; ++i) {
-//		printf("[%6" PRIu64 "]: threads: %s\r\n", i, formatHex256(&h_counts256[i*4]).c_str());
-//		printf("[%6" PRIu64 "]: start:   %s\r\n", i, formatHex256(&h_start_scalars[i*4]).c_str());
-//		printf("[%6" PRIu64 "]: x:       %s\r\n", i, formatHex256(&h_px[i*4]).c_str());
-//		printf("[%6" PRIu64 "]: y:       %s\r\n", i, formatHex256(&h_py[i*4]).c_str());
-//	}
-//#endif
-	
 	hParams->counts = h_counts256;
 	hParams->scalars = h_start_scalars;
 	hParams->find_result = h_find_result;
@@ -644,9 +597,6 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 
 	// Start points P(x1, y1)
 	{
-#if DEBUG_MODE > 0
-		std::cout << "\r\n---Start points---\r\n";
-#endif
 		uint64_t mulBlocks = (uint64_t)((threadsTotal + threadsPerBlock - 1) / threadsPerBlock);;
 
 		// The last-error slot is per host thread and sticky: successful calls do not clear it, only
@@ -659,20 +609,10 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 
 		ck(cudaDeviceSynchronize(), "gpuMulKernel sync");
         ck(cudaGetLastError(), "gpuMulKernel launch");
-		
-		for (uint64_t i = 0; i < threadsTotal; ++i) {
-#if DEBUG_MODE > 0
-			std::cout << "[%6" << i << "]: x:" << formatHex256(&d_Px[i*4]) << "\r\n";
-			std::cout << "[%6" << i << "]: y:" << formatHex256(&d_Py[i*4]) << "\r\n";
-#endif
-		}
 	}
 
 	// c_target_words
 	{
-#if DEBUG_MODE > 0
-		std::cout << "\r\n---Target hash (truncated)---\r\n" << formatHex256((uint64_t*)hParams->hash160) << "\r\n";
-#endif
         uint32_t target_words[5];
         target_words[0] = (uint32_t)hParams->hash160[ 0] | ((uint32_t)hParams->hash160[ 1] << 8) | ((uint32_t)hParams->hash160[ 2] << 16) | ((uint32_t)hParams->hash160[ 3] << 24);
         target_words[1] = (uint32_t)hParams->hash160[ 4] | ((uint32_t)hParams->hash160[ 5] << 8) | ((uint32_t)hParams->hash160[ 6] << 16) | ((uint32_t)hParams->hash160[ 7] << 24);
