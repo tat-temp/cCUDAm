@@ -1063,7 +1063,33 @@ it is claimed.
 9. **C8 + C9 + C10 — canonicalization, all three together.** A partial fix leaves the
    non-canonical value free to propagate through the untouched routine. `MulModP` matters most
    despite the lowest probability, because it feeds the shared Gx/Gy constant table.
-10. **`make ptxinfo SM=120`** — record registers, spill stores/loads, stack frame. **Gates 11/12.**
+10. **`make ptxinfo SM=120`** **[DONE — 2026-08-14]** No GPU needed; nvcc alone. Recorded:
+
+    | build | registers | stack frame | spill st / ld |
+    |---|---:|---:|---:|
+    | plain (`make`) | **122** | 16,384 B | **0 / 0** |
+    | `-rdc` (what `NATIVE_CUBIN` loads) | **126** | 16,384 B | **0 / 0** |
+    | `-rdc`, hash bodies force-inlined | 128 | 16,544 B | **208 / 272** |
+
+    `getHash160_33` and `getHash160_w2` each report 0 stack frame and 0 spills, consistent with
+    §9.1 of `asm/TESTKERNEL_TEMPLATE.md` finding zero memory instructions in either.
+
+    **What this gates.** `__launch_bounds__(256, 2)` asks for 512 threads/SM, which on sm_120's
+    64K-register file allows 128 registers/thread. The shipped kernel sits at 122 — inside the
+    budget, with 6 to spare, and **no spilling at all today**. So P2/P3/P4 are not fighting spills;
+    they are fighting the 512-thread occupancy cap that 122 registers already implies.
+
+    **And it is a warning about P3.** Forcing both hash bodies inline pushes registers to the 128
+    ceiling and introduces 208/272 bytes of spill traffic that does not exist now. That is the
+    aggressive upper bound rather than P3 as specified (which drops `__noinline__` from
+    `getHash160_w2_from_limbs` only, leaving the decision to the compiler) — but it says plainly
+    that the inlining direction has a cliff, and P3 must be measured, not assumed.
+
+    **One unrelated result from the same run, and it matters for the SASS route:** with the hash
+    bodies inlined the `-rdc` cubin has **one** `.text` section instead of three. That is the
+    condition `str_index@` keys on, so a `-rdc` build in that shape should round-trip — which is
+    what would allow a cuAssembler-rebuilt `TestKernel` to be loaded through `NATIVE_CUBIN` and
+    checked against `proof.py`. Untested; see *Still to do*.
 11. **P2** — build `-DMAX_BATCH_SIZE=256`. Correct `BYTES_PER_THREAD` to the real 128 B/thread
     **only together with a real `threadsTotal` cap** — the current 128× over-reservation is the
     only thing bounding thread count today.
