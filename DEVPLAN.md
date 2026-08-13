@@ -52,6 +52,75 @@ loop drains to zero, every provisioned thread actually launches, and the run bud
 the launches required. When the run ends, the exit code and the console distinguish found,
 exhausted, GPU failure and interruption. `proof.py` runs again and now actually checks the answer.
 
+### Verified on real hardware — 2026-08-13
+
+**`proof.py` passed 592/592, and the native cubin loads and launches.** Everything above had been
+argued from source and from stub harnesses; this is the first time any of it executed on a device.
+
+592 tests is the default generator at this batch size: 512 edge (128 each of start-A `start+2k`,
+start-B `start+1+2k`, end-A `end-2k`, end-B `end-1-2k`) plus 80 quartile randoms, with the
+dedicated residue block empty because the edge blocks already span every class mod B on their own.
+Two properties make the count mean something rather than just being large:
+
+- **The coverage invariant ran first.** `proof.py:601` computes `{(v - raw_start) % B}` over the
+  whole test set and `sys.exit(1)`s if any class is missing, so a partial cover cannot be reported
+  as a pass. All B residue classes were tested.
+- **A pass requires the *key*, not the banner.** The harness compares the recovered private key
+  against the planted one; a `FOUND MATCH` with the wrong key scores `WRONG_KEY`. This is the check
+  whose absence let the pre-fix harness report 18/18 on a build that got 17 of them wrong.
+
+What that closes, on device rather than by argument:
+
+| | |
+|---|---|
+| **C1 / C2 / C3** | The 256 end-of-range keys are the direct C1 witness — they sit in the partial-batch tail the old loop guard dropped. Full mod-B cover exercises every offset within a batch. |
+| **H1 / H5** | 592 runs each terminated on their own and returned a distinguishable exit code. |
+| **H7** | 592 publications through `publish_found`, none torn — a torn scalar surfaces as a well-formed `WRONG_KEY`, which is exactly what the harness now looks for. |
+| **The launch chain** | Constant-table upload, kernel launch, mapped-result read and teardown all work end to end, per GPU, 592 times. |
+| **The native cubin path** | `cuModuleLoad` accepts the two-step device-linked `ET_EXEC` image, `cuModuleGetFunction("TestKernel")` resolves, `cuModuleGetGlobal` finds the `-rdc=true`-exported constant tables, `CopyToSymbol` fills them, and `cuLaunchKernel` accepts the 8-entry `args[]` — end to end, correctly, 592 times. The `ArgCnt = 1` and `STB_LOCAL` findings were both real and both correctly fixed. |
+
+**What 592/592 is not evidence for** — worth stating, because a big green number invites the wrong
+inference:
+
+- **H4 is structurally excluded.** `proof.py` enforces a power-of-two range length, so
+  `batch_cnt ≡ 0 (mod 32)` and `r1 = 0` — the straddling warp never exists. The H4 repro under
+  *Targeted repros* remains the only thing that tests it, and it needs a non-power-of-two range.
+- **The ragged configurations are untouched.** Every row of the C1 measured-effect table except the
+  clean power-of-two one is outside what `proof.py` generates. That table is still host-side.
+- **C7, C8/C9/C10** are unreachable here: `range_start ≥ 2·B` in any puzzle range, and the
+  canonicalization defects sit at ~2^-224 on pseudorandom operands.
+- **H12 is unaffected.** One card, one architecture. The portability defect is a claim about
+  *other* cards and no run on this one can speak to it.
+
+**The run was the native-cubin build**, not the default one:
+
+```
+make cubin SM=120 && make NATIVE_CUBIN=1 SM=120 -j4
+```
+
+That makes the native path the *first* configuration of this program ever shown to be correct on
+hardware, and it upgrades several things from "the call returned success" to "the call did the
+right thing":
+
+- **`CopyToSymbol` genuinely uploads.** This is the one that could most easily have looked fine and
+  been silently empty — a kernel running against a zeroed `c_Gx` launches happily, runs at full
+  speed and finds nothing. 592 found keys is the direct refutation; the `-rdc=true` fix for the
+  `STB_LOCAL` constant tables works.
+- **The 8-entry `args[]` is laid out correctly.** The old hardcoded `ArgCnt = 1` read 56 bytes past
+  an 8-byte allocation; anything wrong in the replacement would surface as wrong keys or a fault,
+  not as a clean sweep.
+- **`-rdc=true` device code is correct code.** The linked cubin is *not* the default build's kernel
+  — 159,744 → 161,280 bytes, with `getHash160_33/_w2` moved out of `.text.TestKernel` into their own
+  sections. That ABI change is now known not to break anything.
+
+The mirror-image caveat, which matters because `make` with no flags is what anyone else would
+build: **the default `<<<>>>` path did not run.** Under `USE_NATIVE_CUBIN` the launch, all five
+`CudaCopy*` wrappers and the H15 drain-and-check are compiled out, and the device code that
+executed came from the `-rdc` cubin rather than from `GpuCore.o`. Nothing suggests the default
+build is broken — same sources, same ptxas, and its device code is byte-identical to the
+pre-native-path build — but it is a separate configuration and it has not been proven. Closing that
+is one rebuild and one rerun; see *Still to do* item 6.
+
 ### Fixed
 
 | ID | What | Where the fix landed |
@@ -200,11 +269,12 @@ destructor but without the nulling double-frees all four.
 
 ### Still open
 
-Everything below not marked **[FIXED]**. With coverage, reporting and warp-sync correctness now
-settled, the highest-value remainder is **C7** (the last silent key-loss path), **P1** (14-27 second
-kernel launches, which also governs Ctrl-C latency and therefore how usable exit code 4 is), and
-**H12** (the binary will not launch on anything but sm_120, so none of this has run on real
-hardware yet).
+Everything below not marked **[FIXED]**. With coverage and reporting now confirmed on hardware
+(592/592), the highest-value remainder is **H4's repro** — the one correctness fix the passing run
+structurally could not exercise, since `proof.py` only generates power-of-two ranges — then **C7**
+(the last silent key-loss path), **P1** (14-27 second kernel launches, which also governs Ctrl-C
+latency and therefore how usable exit code 4 is), and **H12** (still one line, and still the reason
+the binary runs on exactly one architecture).
 
 ---
 
@@ -299,17 +369,30 @@ loads, `-use_fast_math` (zero FP ops in device code), `cudaFuncSetCacheConfig(Pr
 
 ---
 
-## Hand-written SASS for TestKernel (RCAsm) — parked; the blocker is the instruction set
+## Hand-written SASS for TestKernel (RCAsm) — toolchain works on CUDA 13.0; the round-trip is dead
 
-An avenue for going past P3/P4, evaluated 2026-08-12, re-measured 2026-08-13, and **parked**, not
-rejected. Only `TestKernel` is in scope; `scalarMulKernelBase` is explicitly out (it is the
-one-time setup kernel, i.e. P5, and fixing P1 already shrinks it 12-24×).
+An avenue for going past P3/P4, evaluated 2026-08-12, re-measured and re-scoped 2026-08-13. Only
+`TestKernel` is in scope; `scalarMulKernelBase` is explicitly out (it is the one-time setup kernel,
+i.e. P5, and fixing P1 already shrinks it 12-24×).
 
-**Headline, corrected on 2026-08-13:** the earlier verdict — "round-trips almost, gated on CUDA
-12.8" — was drawn from a 24-instruction template and did not survive contact with the real kernel.
-The full `TestKernel` does **not** reassemble: 12.7% of its instructions have no encoder in
-RCAsm/cuAssembler. The note-section problems that framed the old verdict are real but secondary;
-they are what you hit *after* the instruction stream assembles, and it does not.
+**Headline, corrected twice — read this before the sections below, some of which predate it.**
+
+1. *2026-08-12:* "round-trips almost, gated on CUDA 12.8." Drawn from a 24-instruction template.
+   Did not survive contact with the real kernel.
+2. *2026-08-13, first pass:* "the full `TestKernel` does not reassemble — 12.7% of its instructions
+   have no encoder." True in its headline number, wrong in its breakdown, and wrong in what it
+   implied. Only **5.1%** genuinely lack an encoder; the other 7.6% are known forms with unlearned
+   operand values. More importantly it invited the inference "RCAsm cannot build our kernel,
+   therefore RCAsm is not usable" — which does not follow.
+3. *2026-08-13, current:* **`asm/GpuCore_sm120.asm` will not round-trip, and that does not block
+   hand-written SASS.** Every unencodable form is one ptxas selected and a human author does not
+   use: RCAsm's own hand-written sources contain zero `IADD.64`, zero `HFMA2`, zero `ISETP…U64`,
+   zero `WARPSYNC`. The round-trip is only needed if the plan is to *edit ptxas output*; it is not
+   needed to *write a kernel*.
+4. *2026-08-13, measured:* **RCAsm builds working cubins on CUDA 13.0.88**, sm_89 and sm_120, with
+   three one-line fixes — all in the RCAsm/cuAssembler tree, none in this project. The
+   "12.8 or nothing" framing is dead. The only step left unmeasured is `cuModuleLoad`, which needs
+   a GPU. See the measured section below.
 
 **RCAsm** — <https://github.com/RetiredC/RCAsm>, GPLv3, Python, by RetiredCoder — is a SASS
 assembler over a vendored, modified **CuAssembler** (MIT, cloudcores). sm_89 and sm_120 only. It is
@@ -379,7 +462,7 @@ Notes that matter before anyone acts on that table:
   region boundaries. `mul_mod` at call sites `:157` and `:261` has the lowest density (64.8%,
   92.1%) because `inv_mod`'s prologue is scheduled into it.
 
-### The real kernel does not reassemble (measured 2026-08-13, CUDA 13.0.88, sm_120)
+### The real kernel does not reassemble (measured 2026-08-13, re-run same day, CUDA 13.0.88, sm_120)
 
 `asm/GpuCore_sm120.asm` → cubin **fails**. After `.tkinfo` is commented out to get the parser
 started, it dies at instruction #12:
@@ -389,20 +472,59 @@ started, it dies at instruction #12:
 ```
 
 Sweeping all 9,984 instructions rather than stopping at the first failure:
-**1,265 of them (12.7%) have no encoder**, across 17 InsKeys.
+**1,265 of them (12.7%) fail to assemble.** They split into two groups that need to be kept apart,
+because they are different problems with different costs:
 
-| Missing | Count | Example |
+**Group 1 — genuinely no encoder (508 instructions, 5.1%), 15 InsKeys:**
+
+| Missing InsKey | Count | Example |
 |---|---:|---|
-| `BRA.DIV` — values outside the learned range | 584 | `@!P1 BRA.DIV UR4, 0x16ea0` |
-| `ISETP` — unknown modifier (`.U64`) | 173 | `ISETP.GE.U64.AND P0, PT, R2, UR6, PT` |
-| `IADD.64` / `IADD.64.X` — 9 distinct keys | 444 | `IADD.64 R6, R6, -R62` |
-| `HFMA2_R_R_R_II_FI` | 24 | the MOV idiom |
-| `WARPSYNC.COLLECTIVE` + `ENDCOLLECTIVE` | 24 | |
-| `R2UR_P_UR_R`, `LDCU_UR_cAURI`, `CGAERRBAR` | 16 | |
+| `IADD_*` — `IADD.64` / `IADD.64.X`, 9 distinct keys | 444 | `IADD.64 R6, R6, -R62` |
+| `HFMA2_R_R_R_II_FI` | 24 | `HFMA2 R3, -RZ, RZ, 0x0, 0` — the MOV idiom |
+| `WARPSYNC_R_II` + `ENDCOLLECTIVE` | 24 | `WARPSYNC.COLLECTIVE R4, 0x16ad0` |
+| `R2UR_P_UR_R` | 8 | `R2UR P1, URZ, R4` |
+| `LDCU_UR_cAURI` | 4 | `LDCU.128 UR8, c[0x3][URZ]` |
+| `CGAERRBAR` | 4 | `CGAERRBAR` |
 
-The shape of that list is the finding. `IADD.64` is the carry-chain backbone of every routine in
+**Group 2 — the InsKey *is* known, the operand isn't (757 instructions, 7.6%):**
+
+| Failure | Count | Example |
+|---|---:|---|
+| `Assembling failed (NewVals): Insufficient…` | 584 | `@!P1 BRA.DIV UR4, 0x16ea0` |
+| `Assembling failed (NewModi): Unknown modifier` | 173 | `ISETP.GE.U64.AND P0, PT, R2, UR6, PT` |
+
+**Do not read those two rows as "584 `BRA.DIV`s".** They are bucketed by *error string*, not by
+mnemonic, so each aggregates every instruction that failed that way across all mnemonics; the
+example is just the first one seen. The kernel contains **8** `BRA.DIV` in total (77 plain `BRA`,
+4 `BRA.CONV`) and 18 `ISETP…U64` lines. An earlier version of this table labelled these rows by
+their examples and so implied that one `BRA.DIV` encoder would clear 584 instructions. It would
+clear at most 8. Group 2 is not an encoder-writing problem at all — cuAssembler *solves* for
+encodings from disassembly samples, and "insufficient values" means its repository has not seen
+enough variety of that form, which is fed rather than coded.
+
+The shape of Group 1 is the finding. `IADD.64` is the carry-chain backbone of every routine in
 `Math.cuh`, and RCAsm's `NewOpsHandler.py` hand-encodes exactly **one** of its ten forms
 (`IADD_R_P_R_R_P`). This is not a formatting problem that a toolkit version can fix.
+
+**But every missing form is a ptxas *choice*, not a requirement** — which is why this blocks the
+round-trip and not the route. Counting the same mnemonics across RCAsm's own hand-written Kernel02
+sources in `asm/` (`mod_mul`, `mod_inv`, `mod_sub`, `fuse`, `main`, `newKernelB`) against our
+ptxas-generated `asm/GpuCore_sm120.asm`:
+
+| Form | Hand-written | ptxas-generated |
+|---|---:|---:|
+| `IADD.64` | **0** | 723 |
+| `IADD3` | 754 | 3,757 |
+| `HFMA2` | **0** | 24 |
+| `ISETP…U64` | **0** | 18 |
+| `WARPSYNC` | **0** | 13 |
+| `R2UR` | **0** | 8 |
+| `CGAERRBAR` | **0** | 4 |
+
+Hand-written SASS carries its carries in the classic `IADD3`/`IADD3.X` chain, which cuAssembler
+knows; ptxas prefers the fused 64-bit form, which it does not. Nothing in Group 1 has to be written
+by a person authoring a kernel — so the correct conclusion is **"`GpuCore_sm120.asm` will not
+round-trip"**, not "RCAsm cannot build a cubin".
 
 ### The trap that invalidated the first measurement — worth recording
 
@@ -424,8 +546,11 @@ representative. Kept because each item is independently true:
 - **`.note.nv.cuver` does not exist in CUDA 13.0 cubins** and RCAsm's `patch_cubin` requests it
   unconditionally, so that step `KeyError`s.
 - **`.note.nv.cuinfo` is truncated 0x20 → 0x08 bytes** by the round-trip — data loss, not a
-  formatting quibble — and the ELF header flags degrade
-  `EF_CUDA_SM120 EF_CUDA_VIRTUAL_SM(...)` → `EF_CUDA_SM120 unrecognized:0`.
+  formatting quibble. **Now fixed**: add it to `patch_cubin`'s copy list, see below.
+- ~~ELF header flags degrade `EF_CUDA_SM120 EF_CUDA_VIRTUAL_SM(...)` → `EF_CUDA_SM120
+  unrecognized:0`.~~ **Did not reproduce.** On the full end-to-end run the flags come out
+  bit-identical to the template — `0x6007802` for sm_120, `0x6005904` for sm_89. Whatever produced
+  the degraded flags in the template experiment, it is not inherent to the round-trip.
 - **3 of the template's 24 instructions differed**, all **bit 101** on the `desc[UR4]` global
   memory ops (`LDG.E.64.CONSTANT` ×2, `STG.E.64` ×1): cuAssembler's `LDG_R_ARURI_P`/`STG_ARURI_R`
   set it, ptxas leaves it clear. Both decode to identical instruction text.
@@ -438,19 +563,95 @@ representative. Kept because each item is independently true:
   *both* the 8-argument form and a single by-value struct — params at `0x380`, 56 bytes. Still
   true, but no longer needed: the native path below passes 8 arguments properly.
 
-**Is CUDA 12.8 still worth installing?** Demoted from "the gate" to "one experiment". The note
-sections above are genuine 12.8-vs-13.0 drift. The InsKey gap probably is not — but there is a
-plausible mechanism worth one test: if 12.8's nvdisasm prints these as *unfused* 32-bit forms
-(`IADD3` pairs rather than `IADD.64`, `ULDC` rather than `LDCU`), the listing it produces might be
-inside cuAssembler's learned vocabulary even though 13.0's is not. That is a hypothesis, not a
-finding. It is cheap to settle once 12.8 is installed and it would change the verdict, so run it
-before writing off the route — but do not plan around it.
+**Is CUDA 12.8 still worth installing? No — settled 2026-08-13.** It was "the gate", then "one
+experiment", and it is now neither: RCAsm builds working cubins on 13.0.88 with three one-line
+fixes, measured end to end (next section). The remaining 12.8 hypothesis — that its nvdisasm prints
+unfused forms cuAssembler already knows — would only ever have helped the *round-trip*, which is
+not the route. Do not install 12.8 for this.
 
-### Native cubin path — implemented, `make NATIVE_CUBIN=1`
+### RCAsm builds cubins on CUDA 13.0 — measured end to end, 2026-08-13
+
+The experiment the previous revision of this section called for. Test vehicle is **Kernel01**, not
+Kernel02: Kernel02 ships only `.asm` sources — no `.cu` template, no build scripts, no host code —
+and injection is the only route to a cubin, so reconstructing it would mean guessing two 8-byte
+parameter fields the SASS never reads. Kernel01 ships `kernel.cu`, `main.asm`, `mul.asm` and the
+`a_`/`b_` scripts, and is RCAsm's own working demo.
+
+**Result: `RESULT: SUCCESS` on both sm_89 and sm_120.**
+
+| | template (nvcc 13.0) | RCAsm output |
+|---|---:|---:|
+| sm_89 | 3,240 B | **5,032 B** |
+| sm_120 | 5,336 B | **7,324 B** |
+
+sm_120 output: ELF `Type: EXEC`, flags `0x6007802` (**identical** to the template), `.note.nv.tkinfo`
+0xa4 and `.note.nv.cuinfo` 0x20 (**both identical** to the template after the fix below),
+`mulKernel` `GLOBAL FUNC` size 2304, `REG:255`, 144 SASS lines via `cuobjdump -sass` against the
+template's 24. The injected body is visibly RCAsm's, including sm_120 uniform-datapath forms
+(`LDCU.64 UR0, c[0x0][0x358]`). The `REG:255` confirms the `EIATTR_REGCOUNT` patch — the
+line-offset hack over nvdisasm's comment text — still lands on **13.0's** output format, which was
+the single most-likely-to-break step.
+
+**Three one-line fixes, all in the RCAsm/cuAssembler tree, none in this project:**
+
+1. `cuAssembler/CuAsm/config.py` — `NVDISASM_PATH` is hardcoded to
+   `/usr/local/cuda-12.8/bin/nvdisasm` (the source comment reads "ONLY 12.8 IS TESTED!").
+   Repoint it, or override `Config.NVDISASM_PATH` at runtime. Without this the cubin→cuasm
+   direction dies at `FileNotFoundError` and nothing else can run.
+2. **Neutralize the `.tkinfo` directive** — comment out the *single* bare `.tkinfo` line in the
+   generated `.cuasm` (the other five matches are comments). Without it, `CuAsmParser.parse`
+   asserts `Unknown directive .tkinfo!!!`, `cuasm2cubin` swallows it into `False`, and
+   `create_cubin` returns before `patch_cubin` is ever reached — which is why the `.cuver`
+   `KeyError` had never actually been observed.
+3. `compiler.py replace_sections_data` — wrap the two `section_by_name` calls in
+   `try/except KeyError: continue`, **and** add `".note.nv.cuinfo"` to `patch_cubin`'s copy list.
+   The first half handles `.note.nv.cuver`; the second repairs the 0x20 → 0x08 truncation by
+   copying the section back from `.cubin_orig`.
+
+**`.note.nv.cuver` really is absent from CUDA 13.0 cubins** — verified directly rather than
+inferred: a freshly compiled `-arch=sm_120 -cubin` carries exactly `.note.nv.tkinfo` and
+`.note.nv.cuinfo`, nothing else. So `patch_cubin`'s unconditional request for it always
+`KeyError`s on 13.0. Confirmed at `compiler.py:885` → `compiler.py:803`.
+
+**The control that makes the result interpretable.** `nvdisasm` still refuses the *injected*
+cubin, which by itself would be alarming — this document already warns that a hand-written kernel
+`nvdisasm` cannot read is indistinguishable from a bug in the assembly. So the round-trip was run
+with **no injection at all**: template → `.cuasm` → cubin → notes patched back.
+
+| | `nvdisasm` |
+|---|---|
+| original template | ACCEPTS, 24 SASS lines |
+| round-tripped, notes unpatched | REJECTS — `Invalid note section: '.note.nv.tkinfo'` |
+| round-tripped, **notes patched** | **ACCEPTS, 24 SASS lines** |
+
+So cuAssembler's ELF writing is sound on 13.0 once the notes are restored, and the note handling is
+the whole of the toolkit-version problem. `.text.mulKernel` round-trips 384 → 384 bytes with
+**3 differing bytes**, at offsets 76, 92 and 140 — all byte 12 of an instruction, i.e. bits 96-103.
+That is the same **bit 101** `desc[UR4]` discrepancy the template test found, reproduced exactly and
+now localized.
+
+**What `nvdisasm` is actually complaining about in the injected cubin is not a defect.** With the
+notes fixed the error changes to `Could not establish the target of 'BRXU' branch operation`.
+`BRXU` is an indirect branch through a uniform register — it appears once in the assembled cubin,
+zero times in the template, and three times in RCAsm's own `main.asm`
+(``BRXU LoopAdr0, `(.label_loop_beg)``). It is RCAsm's loop/call idiom, and `nvdisasm` cannot
+statically resolve an indirect target. `cuobjdump -sass` reads all 144 lines. **This does mean
+`nvdisasm` is not a usable check on hand-written RCAsm output — use `cuobjdump`.**
+
+**Still unverified: `cuModuleLoad`.** No GPU here. `scratchpad/rcasm_load_test.cpp` does exactly
+that one step — `cuInit` → `cuDevicePrimaryCtxRetain` → `cuModuleLoad` → `cuModuleGetFunction` →
+attribute dump — and deliberately stops short of launching, since `mulKernel` takes a by-value
+struct and a wrong launch is a hang rather than an error. It compiles against CUDA 13 (note:
+`cuCtxCreate` became `cuCtxCreate_v4` with a new signature in 13.0, hence the primary-context
+route, which is also the context `CallCubin.cpp` reaches via `cudaFree(0)`).
+
+### Native cubin path — implemented and **verified on hardware**, `make NATIVE_CUBIN=1`
 
 Independent of whether RCAsm is ever adopted, the host can now load `TestKernel` from a `.cubin`
 through the driver API instead of the runtime `<<<>>>` launch, so a hand-written kernel can be
-swapped in without rebuilding anything:
+swapped in without rebuilding anything. **This is the build that passed `proof.py` 592/592** — see
+*Verified on real hardware* at the top; the path is not merely wired up, it is the one configuration
+of this program with a known-good result on a device:
 
 ```
 make cubin SM=120 && make NATIVE_CUBIN=1 SM=120 -j4
@@ -477,6 +678,12 @@ emitted inside `.text.TestKernel` and gives them their own sections: 0x27000 →
 0x7e80, i.e. **159,744 → 161,280 bytes, +96 instructions (+0.96%)**. The native-cubin kernel is
 therefore *not* the same code as the default build. Diff against `make sass` before reading
 anything into a timing difference.
+
+The 592/592 run settles the *correctness* half of that — out-of-lining the two hash bodies changes
+nothing about the answers — but says nothing about the cost half. It also means the two builds are
+now asymmetric in what has been proven about them, in the direction nobody would guess: the
+**non**-default build is the verified one. Keep both honest — `make sass` on each, and run
+`proof.py` against whichever one a timing claim is about.
 
 `NativeCubin()` keys one `CUmodule` per **GPU**, not per thread: `Prepare` uploads the constants
 from the main thread while `Execute` launches from the worker thread, and both must reach the same
@@ -519,20 +726,49 @@ dropped notice is a separate matter from the licence choice.
 
 ### Blocked on, in order
 
-1. **The 17 missing InsKeys.** This is now the gate, and it is the expensive one: encoders for the
-   `IADD.64` family (9 forms, 444 instructions), `ISETP.*.U64`, and `BRA.DIV` would have to be
-   hand-written into `NewOpsHandler.py` the way `IADD_R_P_R_R_P` already is. Nothing downstream is
-   worth starting until this is either done or shown to be unnecessary (see item 2).
-2. **CUDA 12.8 alongside 13.0** — one experiment, not a prerequisite: does 12.8's nvdisasm emit
-   unfused forms that cuAssembler already knows? Cheap, and it would change item 1 entirely.
-3. **A real GPU.** Everything past "produces a cubin" is unverifiable without one. That now
-   includes the native cubin path itself: `cuModuleLoad` accepting the device-linked cubin, and
-   `cuModuleGetGlobal` resolving the five now-`GLOBAL` constant tables, are both **untested**.
-   A hand-written-SASS kernel whose cubin `nvdisasm` will not read is a failure mode
-   indistinguishable from a bug in the assembly.
-4. `pip install PyQt5 QScintilla` even for batch builds: RCAsm's `compiler.py` imports `utils.py`,
-   which imports PyQt5 at module scope, so it is not usable headless as shipped. (Worked around
-   here with a `MetaPathFinder` stub; that is a harness hack, not a fix.)
+1. **Nothing, if the goal is a hand-written kernel.** This item used to read "the 17 missing
+   InsKeys, and it is the expensive one." That was the right blocker for the wrong goal. The
+   missing encoders block *re-assembling ptxas output*; they do not block *authoring* SASS, because
+   every one of them is a form ptxas chose and a hand-writer does not use — see the two comparison
+   tables above. Writing the `IADD.64` family into `NewOpsHandler.py` is only worth doing if the
+   round-trip itself is the goal (e.g. to diff a modified kernel against the original), and it buys
+   444 of 9,984 instructions, not the 584 the old table implied.
+2. ~~**Does RCAsm work on CUDA 13.0 at all?**~~ **Settled 2026-08-13 — yes.** Kernel01 assembles
+   for both sm_89 and sm_120, with three one-line fixes and no GPU required to get that far. See
+   *RCAsm builds cubins on CUDA 13.0* above for the fixes, the output, and the un-injected control
+   that proves the ELF writing is sound. ~~CUDA 12.8~~ is not needed and should not be installed
+   for this.
+2c. **Run `scratchpad/rcasm_load_test.cpp` on the GPU.** The one remaining unknown, and it is a
+   single command: does the driver accept an RCAsm-assembled cubin? Everything up to
+   `cuModuleLoad` is now measured. Note that `nvdisasm` is *not* a usable pre-check on RCAsm
+   output — it refuses any kernel containing `BRXU`, which is RCAsm's own loop idiom — so the
+   driver's verdict is the only one that counts. Use `cuobjdump -sass` for eyeballing.
+3. ~~**A real GPU.**~~ **Cleared 2026-08-13, and more completely than this item asked for.** The
+   native cubin path did not merely load — `proof.py` passed **592/592 through it**, so
+   `cuModuleLoad`, `cuModuleGetGlobal`, `CopyToSymbol` and `cuLaunchKernel` are all verified to do
+   the right thing, not just to return success. **The carrier is proven.** Whatever instruction
+   stream item 1 eventually produces has a loading path that is known-good and a known-good
+   reference result to be diffed against — which is worth more here than it sounds, because it
+   turns "the hand-written kernel is wrong" and "the harness around it is wrong" into separable
+   questions. What a GPU is still needed for is judging the assembly itself: a hand-written-SASS
+   kernel whose cubin `nvdisasm` will not read is a failure mode indistinguishable from a bug in
+   the assembly.
+4. ~~`pip install PyQt5 QScintilla` even for batch builds.~~ **Not needed.** RCAsm's `compiler.py`
+   imports `utils.py`, which imports `QByteArray`/`QFileDialog`/`QWidget` at module scope — but
+   only *at import time*; the headless path never calls into them. Three empty classes injected
+   into `sys.modules` are enough, and no RCAsm file needs editing. There is also **no batch entry
+   point at all** — `rcasm.py` only opens the Qt editor, and `compiler.compile_code` is reached
+   solely from the editor's F5 handler, so a driver has to be written. That driver is
+   `scratchpad/rc_drive.py` (~40 lines: stub Qt, set `defs.SM_VER`/`PROJECT_PATH`/`AUTO_RUN=False`,
+   reproduce `editor.collect_all_lines`, call `compile_code(liness, True)`, never `run_exe`).
+5. **Two traps worth keeping**, both of which cost time here:
+   - `cuAssembler/CuAsm/__init__.py` does `from CuAsm.X import Y`, so `cuAssembler/` must be on
+     `sys.path` for `CuAsm` to resolve as a *top-level* package — importing it as
+     `cuAssembler.CuAsm.*` alone fails.
+   - Worse, the package is reachable under **two names that are distinct module objects**:
+     measured, `CuAsm.config.Config is cuAssembler.CuAsm.config.Config` → **False**. Setting
+     `Config.SM_VER` on the wrong one is a silent no-op, and `Config.SM_VER` defaults to 89 —
+     the same trap that invalidated the first gap measurement. Set both.
 
 ### If the route is abandoned
 
@@ -655,7 +891,10 @@ harness got its `pyelftools`/`sympy` by installing them with Windows' Python
 
 Host-side harnesses were built against the real project headers with g++. They are stub-based by
 necessity — until the WSL nvcc route above was found there was no CUDA toolchain at all, and there
-is still no GPU, so **nothing below has ever executed on a device**:
+is no GPU *on this dev machine*, so **nothing below has ever executed on a device**. They are still
+the only coverage that runs here, and they remain the only coverage for the ragged configurations
+`proof.py` does not generate — but they are no longer the only evidence in the project: see
+*Verified on real hardware* at the top.
 
 - **`fixtest.cpp`** — `sub_256` over 200k randomized definitional checks (`r + b == a` with
   `carry == borrow`) plus targeted all-ones cases; hex parsing accept/reject; range-length
@@ -738,19 +977,22 @@ that runs on the dev machine. (This plan document itself is now carried in the r
 
 ### Still to do
 
-1. **Build on the real target:** `make SM=<your arch>` — and address H12, or the binary will not
-   launch on anything but sm_120. The WSL nvcc route above already answers the *compile* half for
-   any arch CUDA 13 still emits SASS for; what it cannot answer is whether the resulting image
-   loads on the card in front of you.
+1. ~~**Build on the real target.**~~ **Done** — the image builds, loads and runs on the card in
+   hand. H12 is untouched by that: it is a claim about every *other* card, and one line
+   (`-gencode arch=compute_120,code=compute_120`) still stands between this and running anywhere
+   else. Note CUDA 13 has dropped some older SASS targets, so the Makefile comment's list of
+   supported `SM=` values is not to be trusted without checking.
 2. **Device-side canonicalization test:** the hash file is already host-compilable
    (`-D__device__= -D__forceinline__=inline -D__noinline__=` plus `__byte_perm`/`__funnelshift_r`
    stubs, per the comment at `GpuHash.cu:282`). Give `Math.cuh` the same treatment and assert
    `mul_mod`/`sqr_mod`/`inv_mod` outputs are `< p` — the direct test for C8/C9.
-3. **Coverage regression on real hardware:** `proof.py` works again and generates the right cases —
-   dual-parity keys at range start *and end*, full mod-B residue cover, per-quartile random keys
-   with mod-B diversity. The end-of-range and full-mod-B blocks are the ones that would have failed
-   before the C1 fix. **This has not yet been run against a real GPU** — it is the single highest-
-   value outstanding verification step, and it is blocked on H12 for any card that is not sm_120.
+3. ~~**Coverage regression on real hardware.**~~ **Done — 592/592**, see *Verified on real
+   hardware*. This also subsumes what was item 5 (known-answer end-to-end with the key at the very
+   last scalar): the 128 end-A and 128 end-B tests are that case, run 256 times at both parities.
+   What it leaves open is everything `proof.py` structurally cannot generate — a **non-power-of-two
+   range**, which is both the H4 trigger and every losing row of the C1 measured-effect table.
+   A single run of `--range 1:0x204000400 --grid 1024,2 --slices 64` covers both at once and is the
+   highest-value outstanding verification step now.
 4. **Targeted repros:**
    - C2: `--range 1000:1FFF` must scan and terminate.
    - C4: `--range 100:FF` and `--range 0:FFFF…FF` must be rejected with a clear message.
@@ -759,8 +1001,10 @@ that runs on the dev machine. (This plan document itself is now carried in the r
    - H5: exit code 4 — Ctrl-C a real scan mid-range and confirm it reports interruption rather
      than exhaustion. The only H5 path not yet exercised. Do this **after** P1, or the signal will
      take up to 27 s to be observed and the test will look like a hang.
-   - H4: `--range 1:0x204000400 --grid 1024,2 --slices 64` (see the reachability note above) must
-     complete rather than hang. Note `compute-sanitizer --tool synccheck` will **not** flag the
+   - H4 — **now the top verification item, promoted into item 3**:
+     `--range 1:0x204000400 --grid 1024,2 --slices 64` (see the reachability note above) must
+     complete rather than hang. The 592/592 run says nothing here — a power-of-two range gives
+     `r1 = 0`, so the straddling warp the fix exists for is never created. Note `compute-sanitizer --tool synccheck` will **not** flag the
      original defect — its "Invalid Arguments" check does not cover a named thread that never
      arrives — so a clean synccheck run is not evidence either way.
    - H3: the **second Ctrl+C** must terminate the process. Not empirically tested — MSYS2 cannot
@@ -769,5 +1013,11 @@ that runs on the dev machine. (This plan document itself is now carried in the r
      before invoking the handler, so the second press terminates by default and the `_Exit` is
      belt-and-braces; on POSIX, glibc's `signal()` keeps the handler installed, so the second press
      is what actually reaches `std::_Exit`. Test with a wedged GPU, not a healthy one.
-5. **Known-answer end-to-end:** a solved low puzzle (e.g. #30) with the key placed at the very
-   last scalar of the range — the single case that distinguishes "fixed C1" from "still broken".
+5. ~~**Known-answer end-to-end.**~~ **Done** — folded into item 3; the end-A/end-B blocks place the
+   key at the last scalars of the range and the harness compares the recovered key, which is the
+   pair of properties this item was asking for.
+6. **Re-run `proof.py` against the plain build** — `make clean && make SM=120 -j4`. The 592/592 was
+   `NATIVE_CUBIN=1`, which compiles out the `<<<>>>` launch, all five `CudaCopy*` wrappers and the
+   H15 drain-and-check, and substitutes `-rdc` device code for `GpuCore.o`'s. So the configuration
+   `make` produces by default is the *unverified* one. Expected to pass — but "expected to pass" is
+   what this whole document exists to distrust, and it is one rebuild.
