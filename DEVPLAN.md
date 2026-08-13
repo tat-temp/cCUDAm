@@ -320,7 +320,7 @@ These were verified, not assumed:
 | **C5** **[FIXED]** | **`sub_256` lost the borrow.** `uint64_t bi = b[i] + borrow;` wrapped to 0 when `b[i] == 0xFFFF…FFFF`. | `Math.h` |
 | **C6** **[FIXED]** | **Hex parsing silently truncated.** `--target-hash160 1z…` yielded `hash160[0]=0x01` and returned **true** — the GPU scanned the whole range against a fabricated target. | `Utils.h` |
 | **C7** | **`inv_mod(0)` returns 0 instead of trapping.** If any factor of the Montgomery product is zero, every `dx_inv_i` is wrong **and the jump reuses the same `inverse`**, so `x1/y1` become garbage and every subsequent batch of that thread hashes nonsense. **Concretely reachable:** `--range 200:…` with B=1024 → thread 0's first centre is `s1 = 1024 = B`, so `c_Jx - x1 == 0`. Unreachable for canonical `2^(k-1)`-aligned ranges. | `GpuCore.cu:85-100`, `Math.cuh:538` |
-| **C8** | **`mul_mod`/`sqr_mod` emit "almost reduced" results** — no final conditional subtract of P, and the carry out of `r[3]` is dropped. Deterministic witness: `a=2, b=(p+1)/2` → product is exactly `p+1 < 2^256`, both folds contribute 0, `mul_mod` returns `p+1` verbatim. Consumers need canonical form: `SHA256_33_from_limbs` serializes limbs raw, and `sub_mod_is_odd` derives the 0x02/0x03 prefix from `r[0]&1` (p is odd, so the prefix flips). ~2^-224 on pseudorandom operands. | `Math.cuh:279-283`, `401-405` |
+| **C8** | **`mul_mod`/`sqr_mod` emit "almost reduced" results** — no final conditional subtract of P, and the carry out of `r[3]` is dropped. Deterministic witness: `a=2, b=(p+1)/2` → product is exactly `p+1 < 2^256`, both folds contribute 0, `mul_mod` returns `p+1` verbatim. Consumers need canonical form: `SHA256_33_from_limbs` serializes limbs raw, and `sub_mod_is_odd` derives the 0x02/0x03 prefix from `r[0]&1` (p is odd, so the prefix flips). ~2^-224 on pseudorandom operands. **RCAsm's hand-written `MulMod256` has the same defect** — measured on hardware, it returns `p+1` for `(P-1)²` and for that exact `a=2, b=(p+1)/2` witness — so the SASS route inherits C8 rather than fixing it, and this must be fixed on its own terms either way. | `Math.cuh:279-283`, `401-405` |
 | **C9** | **`inv_mod` normalizes only to `[0, 2^256)`.** The `while ((int)r[8] > 0) sub_288_P(r);` loop stops the instant word 8 is zero; the last subtract maps `[2^256, 2^256+p)` → `[K, 2^256)`, which contains `[p, 2^256)`. | `Math.cuh:645-650` |
 | **C10** | **Host `MulModP`/`AddModP` leave results in `[P, 2^256)`.** Matters most because `init_g_points` memcpy's `p.x.data`/`p.y.data` straight into the Gx/Gy table uploaded to constant memory for **every thread on every GPU**. Deterministic per build — always or never wrong. | `EcInt.cpp:264-265`, `187-192` |
 | **C11** | A match makes the whole warp `return`, skipping the state write-back. Benign today. | `GpuCore.cu:79/139/179/226` |
@@ -813,6 +813,51 @@ writing `TestKernel`'s body in RCAsm's dialect and proving it computes the right
      `Config.SM_VER` on the wrong one is a silent no-op, and `Config.SM_VER` defaults to 89 —
      the same trap that invalidated the first gap measurement. Set both.
 
+### RCAsm's `MulMod256` is "almost reduced" too — measured on hardware 2026-08-13
+
+The correctness question, answered. RCAsm's Kernel01 *is* a `MulMod256` benchmark whose host
+harness already cross-checks every GPU result against `EcInt::MulModP`, so the test was mostly a
+build. Run on the RTX 5090:
+
+```
+KAT mismatch at vector 6
+  expected: 0000000000000000 0000000000000000 0000000000000000 0000000000000001
+  got     : FFFFFFFFFFFFFFFF FFFFFFFFFFFFFFFF FFFFFFFFFFFFFFFF FFFFFFFEFFFFFC30
+KAT FAILED: 3 of 256 vectors wrong, first at 6
+CHECKRES OK
+```
+
+`got - P == 1` exactly. **It returned `P+1` where `1` is correct** — congruent, not canonical.
+That is **C8, in RCAsm's implementation**: no final conditional subtract of P. The multiply itself
+is right; 253 of 256 vectors are exact and the 3 failures are all the same congruent value.
+
+Failing vectors are `(P-1)²`, `2·(P+1)/2` and `(P+1)/2·2` — every one of them a product that lands
+exactly on `P+1`. Seven of the 18 edge vectors *could* have exposed this; the other four have
+products small enough that the computation never overshoots.
+
+Three things follow, in ascending order of importance:
+
+1. **Hand-written SASS does not fix C8 — it inherits it.** Adopting `MulMod256` gets ~2× on the
+   instruction count and the *same* canonicalization defect. C8 has to be fixed on its own terms
+   whichever implementation is used, and Hardening item 9 stays exactly where it is.
+2. **This is a legitimate choice upstream, and a dangerous one here.** For a Kangaroo solver a
+   non-canonical intermediate is usually harmless because the next operation re-reduces. This
+   project has two consumers that cannot tolerate it: `SHA256_33_from_limbs` serializes limbs raw,
+   and `sub_mod_is_odd` derives the 0x02/0x03 compressed-pubkey prefix from `r[0]&1`. P is odd, so
+   `P+1` versus `1` **flips the parity**, which flips the prefix, which changes the hash — a
+   silently missed key. Same reasoning as C8's own entry.
+3. **`CHECKRES OK` printed on the same run.** RCAsm's shipped check compares the SASS against
+   `EcInt::MulModP`, and that C++ produces the identical `P+1`. Both sides share the convention, so
+   the self-consistency check passes while both are non-canonical. **This is the H14 lesson
+   again**: a harness that compares an implementation against a reference sharing its bug reports
+   success and proves nothing. The only reason this was caught is that the known-answer vectors
+   come from Python arbitrary-precision `(a*b) % P` and share nothing with either side.
+
+**And it would have been missed by a random-operand test.** All 238 random vectors passed —
+a random product landing in `[P, 2^256)` has probability ~2^-224. Only the deliberately
+constructed edge cases found it. Whatever else is built here, the edge vectors are the part that
+earns its keep.
+
 ### What it would actually take — read before committing to this
 
 The question has flipped. It was "is this possible?"; it is now "is it worth it?", and the honest
@@ -856,6 +901,12 @@ found-key latency and TDR risk.
    or it does not. **That is the single most valuable thing this route inherited** — it did not
    exist a day ago, and without it a subtly wrong carry chain would surface as silently missed
    keys, which is the failure mode this entire document exists to eliminate.
+   **Partially answered, and not in RCAsm's favour:** `MulMod256` is arithmetically correct but
+   non-canonical — see the measured section above. It computes `a·b mod P` and returns it in
+   `[0, 2^256)` rather than `[0, P)`, exactly like our own `mul_mod`. So the 2× instruction win
+   comes with C8 attached, and any adoption has to add the final conditional subtract back —
+   which costs some of the 112-vs-222 advantage the whole case rests on. **Nobody has measured
+   how much.** Do that before believing the ~15%.
 
 **The cheapest real experiment**, if the appetite is there: implement `MulMod256` alone as an RCAsm
 `FUNCTION`, call it from a template kernel, and check its output against the host `MulModP` over
