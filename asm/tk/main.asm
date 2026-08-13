@@ -151,17 +151,25 @@ KERNEL TestKernel(regcnt=255, \
 // on hardware, it returns p+1 where 1 is correct. The host side of this check must
 // compare against EcInt::MulModP, which shares the convention, or against Python
 // (a*b) % P with the same allowance. Do not "fix" it here.
+// The regions below are delimited so variants.py can cut them out and build a bisect
+// ladder -- identity / +local memory / +call / both. A fault that only appears in one
+// variant names its own cause; guessing at an ILLEGAL_INSTRUCTION from the disassembly
+// does not.
+//@@CALL_BEGIN
     [B0-----:R-:W-:-:S01]    NOP
     [B-1----:R-:W-:-:S02]    NOP
     [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointA
 call_func MulMod256(RFirst=PntX, RSecond=PntY, Ro=Prod, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointA
+//@@CALL_END
 
 // Local-frame round trip. R1 is the frame pointer set up above.
+//@@LOCAL_BEGIN
     [B------:R-:W-:-:S02]    STL.128 [R1], Prod0
     [B------:R-:W-:-:S02]    STL.128 [R1+0x10], Prod4
     [B------:R-:W0:-:S01]    LDL.128 Prod0, [R1]
     [B------:R-:W0:-:S02]    LDL.128 Prod4, [R1+0x10]
     [B0-----:R-:W-:-:S02]    NOP
+//@@LOCAL_END
 
 //====================================================================================
 // STAGE 2 GOES HERE: the batch loop.
@@ -175,11 +183,21 @@ call_func MulMod256(RFirst=PntX, RSecond=PntY, Ro=Prod, Rt=Tmp, Pt=0, Ret="[B---
 //====================================================================================
 
 //---- write back -------------------------------------------------------------------
-// Px carries the MulMod256 result (stage 1b); the other three are identity.
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], Prod0
+// Px carries the MulMod256 result (stage 1b); the other three are identity. In the
+// no-call variants Prod is never written, so those store PntX instead and stay a pure
+// identity kernel.
+//@@STOREPROD_BEGIN
+    [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], Prod0
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], Prod2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], Prod4
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], Prod6
+//@@STOREPROD_END
+//@@STOREPNTX_BEGIN
+//  [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], PntX0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], PntX2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], PntX4
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], PntX6
+//@@STOREPNTX_END
     [B-1----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], PntY0
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], PntY2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], PntY4

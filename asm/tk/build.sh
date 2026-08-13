@@ -22,8 +22,12 @@ rm -rf "$WORK" && mkdir -p "$WORK"
 # which declare their own KERNELs. Copying just the three arithmetic units keeps
 # Kernel02's sources as the single copy instead of duplicating 70 KB into the repo.
 cp "$ASM/mod_mul.asm" "$ASM/mod_sub.asm" "$ASM/mod_inv.asm" "$WORK"/
-cp "$OUT/main.asm" "$WORK"/
-echo "project: $(cd "$WORK" && ls *.asm | tr '\n' ' ')"
+# MAIN selects the kernel source (variants.py generates a bisect ladder); OUTNAME names
+# the resulting cubin. Defaults reproduce the committed TestKernel.cubin.
+MAIN="${MAIN:-$OUT/main.asm}"
+OUTNAME="${OUTNAME:-TestKernel.cubin}"
+cp "$MAIN" "$WORK"/main.asm
+echo "project: $(cd "$WORK" && ls *.asm | tr '\n' ' ')   (kernel from $MAIN)"
 
 # 1. Template -> cubin. Two-step device link, not `-rdc=true -cubin`: the single-step
 #    form emits ELF type REL with undefined symbols and cuModuleLoad takes only EXEC.
@@ -78,13 +82,13 @@ PY
 python3 "$OUT/rc_build.py" "$RCASM" "$WORK" 120
 
 # 5. Results.
-cp -f "$WORK/kernel_sm120.cubin" "$OUT/TestKernel.cubin"
+cp -f "$WORK/kernel_sm120.cubin" "$OUT/$OUTNAME"
 echo "--- injected ---"
-readelf -h "$OUT/TestKernel.cubin" 2>/dev/null | grep -E "Type:|Flags:"
-"$CUDA/bin/cuobjdump" -res-usage "$OUT/TestKernel.cubin"
+readelf -h "$OUT/$OUTNAME" 2>/dev/null | grep -E "Type:|Flags:"
+"$CUDA/bin/cuobjdump" -res-usage "$OUT/$OUTNAME"
 echo "--- instruction count ---"
-"$CUDA/bin/cuobjdump" -sass "$OUT/TestKernel.cubin" | grep -cP '^\s+/\*[0-9a-f]+\*/' || true
+"$CUDA/bin/cuobjdump" -sass "$OUT/$OUTNAME" | grep -cP '^\s+/\*[0-9a-f]+\*/' || true
 echo
-echo "wrote $OUT/TestKernel.cubin"
+echo "wrote $OUT/$OUTNAME"
 echo "NOTE: use cuobjdump, not nvdisasm -- nvdisasm refuses any kernel containing BRXU,"
 echo "      which is RCAsm's own call/loop idiom."
