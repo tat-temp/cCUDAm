@@ -7,6 +7,13 @@ Same signature, same parameter ABI, same constant tables, same inputs, two cubin
 ./abtest ab_compiled.cubin ../../asm/tk/TestKernel.cubin 256
 ```
 
+`build.sh` builds only side A (the compiled kernel) and the harness. Side B —
+`asm/tk/TestKernel.cubin` — is a **committed fixture**, because rebuilding it needs an
+RCAsm checkout plus `pyelftools`/`sympy` and the machine that can build it is generally
+not the machine with the GPU. `cuModuleLoad` reporting `CUDA_ERROR_FILE_NOT_FOUND (301)`
+for side B means the fixture is missing, not that the cubin is bad. Rebuild it with
+`RCASM=/path/to/RCAsm ../../asm/tk/build.sh`.
+
 Arguments: `<cubinA> <cubinB> [threads] [iters]`. `threads` must be a multiple of 256
 (defaults to 256); `iters` reports the best launch time of N.
 
