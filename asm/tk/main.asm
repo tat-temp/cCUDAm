@@ -49,11 +49,20 @@
 // barrier 1 is `B-1----`, not `B1-----`, which is rejected as "Illegal control code
 // text". Every one of these is written by hand; there is no scheduler.
 
+// REGISTER ALIGNMENT IS A HARDWARE RULE, not a style preference, and getting it wrong
+// costs a CUDA_ERROR_ILLEGAL_INSTRUCTION at run time with nothing wrong in the listing:
+//   * a .64 access needs its register operand EVEN;
+//   * a .128 access needs it a MULTIPLE OF 4.
+// The assembler encodes whatever number it is given -- there is no check anywhere in the
+// path -- so the first sign of a violation is the launch dying. Every 256-bit value here
+// is therefore 4-aligned, which is also why Kernel02 places jPntX at R28, TmpTmp at R84
+// and rx at R84: every one of its .128 bases is a multiple of 4. R50/R51 are left unused
+// to keep Prod aligned after the 2-register Thr; that is the price and it is worth it.
 KERNEL TestKernel(regcnt=255, \
     ThrID=R2, BlockID=R3, gID=R4, TmpA=R5, TmpB=R6, \
     PntX=R8, PntY=R16, Scal=R24, Rem=R32, \
     AddrX=R40, AddrY=R42, AddrS=R44, AddrC=R46, Thr=R48, \
-    Prod=R50, Tmp=R58, \
+    Prod=R52, Tmp=R60, \
     uDesc=UR4, uCallM=UR6 )
 {
 //---- frame ------------------------------------------------------------------------
@@ -162,7 +171,11 @@ KERNEL TestKernel(regcnt=255, \
 call_func MulMod256(RFirst=PntX, RSecond=PntY, Ro=Prod, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointA
 //@@CALL_END
 
-// Local-frame round trip. R1 is the frame pointer set up above.
+// Local-frame round trip. R1 is the frame pointer set up above. Prod MUST be 4-aligned
+// for these four -- see the note on the KERNEL line. This block is what found that rule:
+// with Prod at R50 the kernel loaded, reported its 16 KB frame, launched, and died with
+// CUDA_ERROR_ILLEGAL_INSTRUCTION, while the identical stream minus these four
+// instructions ran clean.
 //@@LOCAL_BEGIN
     [B------:R-:W-:-:S02]    STL.128 [R1], Prod0
     [B------:R-:W-:-:S02]    STL.128 [R1+0x10], Prod4

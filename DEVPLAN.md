@@ -953,6 +953,67 @@ Method, tables and caveats: [`asm/TESTKERNEL_TEMPLATE.md`](asm/TESTKERNEL_TEMPLA
 **This does not move the ~15% ceiling** — lifting the hash verbatim makes it exactly as fast as it
 is now. It removes risk and effort, not the bound, and the next section still applies.
 
+### Hand-written SASS computes the right answer — RTX 5090, 2026-08-14
+
+The load-bearing unknown, closed. Everything before this establishes that RCAsm *builds* something
+the driver *accepts*; none of it says the instruction stream is correct. `asm/tk/` stage 1b is one
+real field operation — `Px = MulMod256(x1, y1)` through a real out-of-line `call_func`, the result
+round-tripped through the 16 KB local frame — run side by side with a compiled kernel doing
+`Px = mul_mod(x1, y1)` over identical inputs (`rcasm_test/abtest/`):
+
+| | EXACT | non-canonical | WRONG |
+|---|---:|---:|---:|
+| A — compiled `mul_mod` | 253 | 3 | 0 |
+| B — hand-written `MulMod256` | **253** | **3** | **0** |
+
+Identical, thread for thread, over 256 threads. `call_func` calls and returns correctly, the
+register bindings resolve, the local frame is real storage, and the multiply is a multiply. The
+3 non-canonical are **C8 in both implementations** — the harness classifies against an independent
+oracle (schoolbook 256×256→512 then fold by K, cross-checked by a 5-case selftest that runs before
+any CUDA call), so "congruent but ≥ P" is reported as its own verdict rather than as a pass or a
+failure. First 4 threads carry constructed edge cases including `(P-1)²` and `2·(P+1)/2`.
+
+**What this does not say:** stage 2 is the batch loop, and none of it is written. This is one
+multiply, not a walk.
+
+### The alignment rule that nothing in the toolchain enforces — 2026-08-14
+
+Getting to that result cost a GPU round trip, and the reason is worth its own entry because it will
+recur throughout stage 2.
+
+**A `.128` access needs its data register operand to be a multiple of 4; a `.64` access needs it
+even.** Nothing checks this. The RCAsm dialect encodes the register number exactly as written,
+cuAssembler does not validate it, and the ELF writer does not either — so a violation produces a
+cubin that loads, resolves every constant table, reports `REG:255 STACK:16384`, disassembles
+cleanly under `cuobjdump`, and then dies at launch with `CUDA_ERROR_ILLEGAL_INSTRUCTION (715)`.
+
+Stage 1b bound `Prod` to R50, so `STL.128 [R1], R50` was emitted and the launch died. Reading the
+disassembly did not find it: it decodes correctly and the call arithmetic checks out by hand. What
+found it was a **four-variant bisect ladder** (`asm/tk/variants.py`, `rcasm_test/abtest/bisect_run.sh`)
+cutting the two constructs stage 1b adds over stage 1:
+
+| variant | STL/LDL | BRXU | result |
+|---|---|---|---|
+| `id` | — | — | launched |
+| `local` | 2/2 | — | **faulted** |
+| `call` | — | 2 | launched, and matched A exactly |
+| `full` | 2/2 | 2 | **faulted** |
+
+Exactly the variants containing a `.128` op faulted. Fix: `Prod` R50 → R52, `Tmp` R58 → R60,
+leaving R50/R51 unused so `Prod` clears the 2-register `Thr`.
+
+Neither reference implementation trips this, which is why it never showed up in the sources this
+work was modelled on: **every `.128` base in Kernel02 is 4-aligned** (`jPntX=R28`, `TmpTmp=R84`,
+`rx=R84`, `jmpSixA=R88`, `jmpSixB=R96`), and so is ptxas's own `subp[]` traffic in the shipped
+kernel (`STL.128 [R9], R4`, `LDL.128 R32, [R1]` — R4/R8/R12/R32 throughout). RetiredCoder aligns
+every 256-bit value to 4 as a matter of course.
+
+`asm/tk/align_check.sh` is the guard — it strips bracketed address operands (the `[R1]` in
+`STL.128 [R1], R52` carries no requirement on the register *number*), reports every violating
+register and exits non-zero. Verified to **discriminate**, not merely to pass: it flags the pre-fix
+cubins with `R50, R54`, clears the rebuilt ones, and clears the shipped ptxas kernel. Run it after
+every build; it costs nothing and it catches a whole class of launch faults without a GPU.
+
 ### What it would actually take — read before committing to this
 
 The question has flipped. It was "is this possible?"; it is now "is it worth it?", and the honest

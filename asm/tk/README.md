@@ -14,9 +14,16 @@ RCASM=/path/to/RCAsm ./build.sh
 
 | stage | what | state |
 |---|---|---|
-| 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **builds** — 64 instructions |
-| 1b | `call_func MulMod256` + a local-frame round trip | **builds** — 184 instructions |
+| 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
+| 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
 | 2 | suffix products, `InvMod256`, the ± walk, the point jump | not written |
+
+**Stage 1b matches the compiled kernel exactly on an RTX 5090** — 253 EXACT, 3 non-canonical,
+0 wrong out of 256 threads, which is *the same verdict side A gets*. That is the first
+hand-written SASS in this project shown to compute the right answer on a device, and it
+settles the two things the whole route rests on: `call_func` really calls and returns, and
+`MulMod256` really multiplies. The 3 non-canonical are C8, present identically in both
+implementations — see below.
 
 Stage 1 is deliberately an *identity* kernel: it loads `x1`/`y1`/`s1`/`rem` and writes
 them straight back, so it proves every part of the carrier the arithmetic sits on top of
@@ -76,8 +83,18 @@ Fix 4 is needed because the device linker rewrites `.nv.reservedSmem.offset0`'s 
 CUDA-specific value the validation table does not know. It is safe: that table is
 validation-only, and `__updateSymtab` copies `st_info` verbatim from the source cubin.
 
-## Three things that cost time here
+## Four things that cost time here
 
+- **Register alignment is a hardware rule and nothing in this path checks it.** A `.128`
+  access needs its *data* register operand to be a multiple of 4; a `.64` access needs it
+  even. The dialect, cuAssembler and the ELF writer all encode whatever number is written,
+  so a violation is invisible until the launch dies with `CUDA_ERROR_ILLEGAL_INSTRUCTION`
+  — from a cubin that loads, reports the right register and frame usage, and disassembles
+  cleanly. Stage 1b put `Prod` at R50 and `STL.128 [R1], R50` cost a GPU round trip and a
+  four-variant bisect ladder to localise. Kernel02 never trips this because every one of
+  its `.128` bases is 4-aligned by construction (`jPntX=R28`, `TmpTmp=R84`, `rx=R84`), and
+  so is ptxas's own local traffic. **Run `./align_check.sh *.cubin` after every build** —
+  it exits non-zero on a violation and it names the register.
 - **Register names must not end in a digit.** RCAsm resolves `name<N>` to `R<base+N>` by
   stripping trailing digits, so `x1` is ambiguous with `x` index 1 and is rejected.
 - **In a control code's wait mask, barrier N occupies slot N.** Waiting on barrier 1 is
@@ -97,7 +114,13 @@ call/loop idiom.
 ```bash
 cuobjdump -res-usage TestKernel.cubin   # expect REG:255 STACK:16384 CONSTANT[0]:952
 cuobjdump -sass TestKernel.cubin
+./align_check.sh TestKernel.cubin       # register alignment; exits 1 on a violation
 ```
+
+`align_check.sh` is the cheap one and the one that catches a whole class of launch faults
+before a GPU is involved. Verified to discriminate rather than merely pass: it flags the
+pre-fix cubins (`R50, R54`) and clears the shipped ptxas kernel, whose own `subp[]`
+traffic — `STL.128 [R9], R4`, `LDL.128 R32, [R1]` — is 4-aligned throughout.
 
 `STACK:16384` is the one to watch. The frame comes from the *template*, not from the
 injected code, so a template without it yields a kernel whose `IADD3 R1, R1, -0x4000`

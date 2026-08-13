@@ -3,9 +3,6 @@
 #
 #   ./bisect_run.sh
 #
-# The full stage-1b kernel dies with CUDA_ERROR_ILLEGAL_INSTRUCTION. It contains exactly
-# two things the identity kernel does not, so:
-#
 #   id     identity only         -- if this faults, the fault is in the prologue/IO
 #   local  + STL/LDL             -- if only this and full fault, it is local memory
 #   call   + call_func           -- if only this and full fault, it is the call
@@ -14,6 +11,14 @@
 # A mismatch verdict is EXPECTED for id/local/call: they compute different things from
 # the compiled kernel by construction. The only thing being read here is whether the
 # LAUNCH completes.
+#
+# ANSWERED 2026-08-14. local and full faulted, id and call did not, which named the
+# .128 local access -- Prod was bound to R50 and a .128 op needs a register that is a
+# multiple of 4. Fixed by moving Prod to R52; asm/tk/align_check.sh now catches the whole
+# class without a GPU. Kept because stage 2 adds far more of both constructs, and because
+# the run also produced the first real result: `call` matched the compiled kernel EXACTLY
+# (253 EXACT / 3 non-canonical / 0 wrong, same as side A), so call_func and MulMod256 are
+# both correct on hardware.
 cd "$(dirname "$0")"
 [ -x ./abtest ] || { echo "build first: ./build.sh"; exit 1; }
 

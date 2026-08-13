@@ -88,6 +88,15 @@ readelf -h "$OUT/$OUTNAME" 2>/dev/null | grep -E "Type:|Flags:"
 "$CUDA/bin/cuobjdump" -res-usage "$OUT/$OUTNAME"
 echo "--- instruction count ---"
 "$CUDA/bin/cuobjdump" -sass "$OUT/$OUTNAME" | grep -cP '^\s+/\*[0-9a-f]+\*/' || true
+
+# 6. Register alignment. A .128 access needs a register that is a multiple of 4 and a .64
+#    needs an even one; nothing in the RCAsm path checks, so a violation assembles fine
+#    and dies at LAUNCH with CUDA_ERROR_ILLEGAL_INSTRUCTION. Not fatal to the build --
+#    the cubin is still worth having to look at -- but it must be impossible to miss.
+echo "--- register alignment ---"
+CUDA="$CUDA" "$OUT/align_check.sh" "$OUT/$OUTNAME" || {
+    echo "  ^^ THIS WILL FAULT AT LAUNCH. See asm/tk/README.md."
+}
 echo
 echo "wrote $OUT/$OUTNAME"
 echo "NOTE: use cuobjdump, not nvdisasm -- nvdisasm refuses any kernel containing BRXU,"
