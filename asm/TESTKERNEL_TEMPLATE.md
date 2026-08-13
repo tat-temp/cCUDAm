@@ -156,21 +156,32 @@ Driver-provided slots below the params, sm_120 | sm_89:
 
 ### Constant tables — bank 3
 
-At their ELF symbol offsets, no relocation, no base. Byte-identical in the shipped kernel and in
-the template:
+**There are two different layouts and only one of them is the one to write SASS against.**
+`-rdc=true` + device link reorders the tables; the plain `-cubin` build leaves them in declaration
+order. The injection template and `NATIVE_CUBIN` both use the device-linked form, so **the `-rdc`
+column is the correct one**. Measured 2026-08-14, and the shipped `GpuCore.cu` and
+`tmpl_TestKernel.cu` agree with each other **exactly** in that column — which is what makes a
+hand-written body portable between them.
 
-| symbol | offset | size |
-|---|---|---:|
-| `c_target_words` | `0x0` | 20 |
-| `c_Gx` | `0x18` | 16,384 |
-| `c_Gy` | `0x4018` | 16,384 |
-| `c_Jx` | `0x8018` | 32 |
-| `c_Jy` | `0x8038` | 32 |
-| *total* | | `0x8058` |
+| symbol | **offset, `-rdc` (use this)** | offset, plain `-cubin` | size |
+|---|---|---|---:|
+| `c_Jy` | **`0x0`** | `0x8038` | 32 |
+| `c_Jx` | **`0x20`** | `0x8018` | 32 |
+| `c_Gy` | **`0x40`** | `0x4018` | 16,384 |
+| `c_Gx` | **`0x4040`** | `0x18` | 16,384 |
+| `c_target_words` | **`0x8040`** | `0x0` | 20 |
+| *total* | `0x8054` | `0x8058` | |
 
-Addressed as `c[0x3][...]`. Note `LDCU.128 UR, c[0x3][URZ]` is one of the known-missing encoders
-(DEVPLAN Group 1), so the uniform 128-bit form of a bank-3 load is unavailable; 16 of 17 probed
-`c[0x0]`/`c[0x3]` forms encode.
+Confirmed against emitted code rather than only the symbol table: the shipped `-rdc` kernel reads
+`c[0x3][0x8040]`, `[0x8044]`, `[0x8048]`, `[0x804c]`, `[0x8050]` — `c_target_words[0..4]` — and
+reaches `c_Gx`/`c_Gy` through register displacements (`c[0x3][R29]`, `c[0x3][R3-0x10]`).
+
+An earlier revision of this table listed only the plain-build offsets and did not say so. Writing
+a kernel against those would read `c_Jy` where `c_target_words` lives: no fault, no diagnostic,
+just wrong points.
+
+Addressed as `c[0x3][...]`. `LDCU.128 UR, c[0x3][URZ]` was recorded as a missing encoder; that was
+part of the untaught-repository problem (§9.3) rather than a real gap.
 
 ---
 
