@@ -29,6 +29,19 @@ ifneq ($(strip $(TIMING)),)
 NVCCFLAGS += -DKERNEL_TIMING=$(TIMING)
 endif
 
+# Points-only build. `make NO_HASH=1` compiles the hash layer out of TestKernel's hot path,
+# leaving the EC walk -- the batch-inversion ladder, the +/- walk and the point jump -- as the
+# whole kernel. This is the reference a hand-written-SASS TestKernel has to reproduce: the SASS
+# route rewrites the arithmetic and lifts the hash verbatim, so the arithmetic is what needs an
+# independent, measurable baseline. See asm/TESTKERNEL_TEMPLATE.md.
+#
+# It CANNOT find a key. Every candidate is folded into a sink instead of hashed (GpuCore.cu), so
+# `found` is never set from a match. Do not run proof.py against this build.
+NO_HASH ?=
+ifneq ($(strip $(NO_HASH)),)
+NVCCFLAGS += -DNO_HASH=1
+endif
+
 CPU_SRC := cCUDAHurricane.cpp EcInt.cpp GpuPuzzle.cpp EcPoint.cpp Ec.cpp
 GPU_SRC := GpuCore.cu GpuEc.cu
 HDRS    := $(wildcard *.h *.cuh)

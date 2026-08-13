@@ -67,6 +67,28 @@ __device__ __constant__ uint64_t c_Jx[4];
 __device__ __constant__ uint64_t c_Jy[4];
 
 
+// Points-only build: `make NO_HASH=1`. Compiles the hash layer out of the hot path so the EC walk
+// can be measured and validated on its own -- it is the reference that a hand-written-SASS
+// TestKernel has to reproduce, and the hash layer is the part that route lifts verbatim rather
+// than rewriting (asm/TESTKERNEL_TEMPLATE.md §9).
+//
+// The trap this macro exists for: with the hash calls gone, px3, lam and s are dead in all four
+// candidate blocks, and nvcc deletes essentially the whole walk -- what survives is the inverse
+// chain and the point jump. A "points/sec" number off that build would be measuring nothing, and a
+// correctness comparison against it would compare against code that was never emitted. So every
+// candidate x-coordinate is folded into a sink that escapes exactly once, at the end of the kernel.
+// Five XORs per candidate against ~222 instructions for the mul_mod feeding it.
+//
+// This build cannot find a key and is not meant to: `found` is never set from a hash match.
+#ifndef NO_HASH
+#define NO_HASH 0
+#endif
+
+#if NO_HASH
+#define HASH_CONSUME(sink, prefix, X) \
+	do { (sink) ^= (X)[0] ^ (X)[1] ^ (X)[2] ^ (X)[3] ^ (uint64_t)(prefix); } while (0)
+#endif
+
 #define FLUSH_THRESHOLD 65536u
 //#define WARP_FLUSH_HASHES() do { \
 //    unsigned long long v = warp_reduce_add_ull((unsigned long long)local_hashes); \
@@ -171,24 +193,31 @@ __global__ void TestKernel(
 	// MIN_THREADS_PER_BLOCK=32, or prop.maxThreadsPerBlock -- GpuPuzzle.cpp:283-288, Defs.h:15-16.)
 	unsigned mask = 0xFFFFFFFFu;
 	uint32_t batches_done = 0;
+#if NO_HASH
+	uint64_t sink = 0ull;
+#endif
 	while (true) {
 		const bool live = (batches_done < batches_per_launch) && ge256_u64(rem, (uint64_t)B);
 		mask = __ballot_sync(mask, live);
 		if (!live) break;
 
 		uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
+#if NO_HASH
+		HASH_CONSUME(sink, prefix, x1);
+#else
 		uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(x1));   // by-value ABI: 1 reg out
-		
+
         bool pref = (hw2 == target_prefix);
 		if (__any_sync(mask, pref)) {
 			bool full = pref && hash160_full_match(prefix, u256_of(x1), c_target_words);
 			if (full) {
 				publish_found(find_result, s1);
 			}
-			
+
 			if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
 		}
-		
+#endif
+
 		uint64_t subp[MAX_BATCH_SIZE / 2][4];
 		uint64_t acc[4], tmp[4];
 		
@@ -234,6 +263,9 @@ __global__ void TestKernel(
 				sub_mod_is_odd(&odd, s, y1);
 
 				uint8_t prefix = odd ? 0x03 : 0x02;
+#if NO_HASH
+				HASH_CONSUME(sink, prefix, px3);
+#else
 				uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(px3));   // by-value ABI: 1 reg out
 				bool pref = (hw2 == target_prefix);
 				if (__any_sync(mask, pref)) {
@@ -246,10 +278,10 @@ __global__ void TestKernel(
 						add256_u64(hit, (uint64_t)i + 1ull);
 						publish_found(find_result, hit);
 					}
-					
+
 					if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
 				}
-				
+#endif
 			}
 			
 			{
@@ -275,6 +307,9 @@ __global__ void TestKernel(
 				sub_mod_is_odd(&odd, s, y1);
 
 				uint8_t prefix = odd ? 0x03 : 0x02;
+#if NO_HASH
+				HASH_CONSUME(sink, prefix, px3);
+#else
 				uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(px3));   // by-value ABI: 1 reg out
 				bool pref = (hw2 == target_prefix);
 				if (__any_sync(mask, pref)) {
@@ -285,9 +320,10 @@ __global__ void TestKernel(
 						sub256_u64(hit, (uint64_t)i + 1ull);
 						publish_found(find_result, hit);
 					}
-					
+
 					if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
 				}
+#endif
 			}
 			
 			uint64_t gxmi[4];
@@ -321,6 +357,9 @@ __global__ void TestKernel(
 			sub_mod_is_odd(&odd, s, y1);
 
 			uint8_t prefix = odd ? 0x03 : 0x02;
+#if NO_HASH
+			HASH_CONSUME(sink, prefix, px3);
+#else
 			uint32_t hw2 = getHash160_w2_from_limbs(prefix, u256_of(px3));   // by-value ABI: 1 reg out
 			bool pref = (hw2 == target_prefix);
 			if (__any_sync(mask, pref)) {
@@ -331,9 +370,10 @@ __global__ void TestKernel(
 					sub256_u64(hit, (uint64_t)half);
 					publish_found(find_result, hit);
 				}
-				
+
 				if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
 			}
+#endif
 
             uint64_t last_dx[4];
             sub_mod(last_dx, &c_Gx[(size_t)i*4], x1);
@@ -369,6 +409,14 @@ __global__ void TestKernel(
 		batches_done++;
 	}
 	
+#if NO_HASH
+	// The one escape for the sink. Every candidate x-coordinate the walk produced is folded into
+	// it, so this single comparison is what keeps ~2,000 instructions per batch from being deleted.
+	// It is outside the loop, and the compare is against a value the arithmetic cannot be shown not
+	// to produce -- which is exactly what makes it un-eliminable. It will not fire (2^-64/thread),
+	// and this build cannot report a real key anyway.
+	if (sink == 0xD1CEB0EDFACADE01ull) publish_found(find_result, s1);
+#endif
 	{ const uint64_t idx = gid*4 + 0; Px[idx] = x1[0]; Py[idx] = y1[0]; counts256[idx] = rem[0]; start_scalars[idx] = s1[0]; }
     { const uint64_t idx = gid*4 + 1; Px[idx] = x1[1]; Py[idx] = y1[1]; counts256[idx] = rem[1]; start_scalars[idx] = s1[1]; }
     { const uint64_t idx = gid*4 + 2; Px[idx] = x1[2]; Py[idx] = y1[2]; counts256[idx] = rem[2]; start_scalars[idx] = s1[2]; }
