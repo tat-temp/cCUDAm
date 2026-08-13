@@ -2,6 +2,8 @@
 *.o
 cCUDAHurricane
 *.cubin
+# ...except the RCAsm probe fixtures, which are inputs rather than build output
+!rcasm_test/*.cubin
 
 # Disassembly dumps -- regenerable with `make sass`
 *.cuasm
