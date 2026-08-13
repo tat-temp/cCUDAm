@@ -858,6 +858,36 @@ a random product landing in `[P, 2^256)` has probability ~2^-224. Only the delib
 constructed edge cases found it. Whatever else is built here, the edge vectors are the part that
 earns its keep.
 
+### What a hand-written `TestKernel` template looks like — [`asm/TESTKERNEL_TEMPLATE.md`](asm/TESTKERNEL_TEMPLATE.md)
+
+Written up separately because it is long. The template exists, compiles, produces byte-identical
+parameter metadata to the shipped kernel, and has been driven through the full RCAsm inject path
+successfully with the constant tables keeping `GLOBAL` binding — so `cuModuleGetGlobal` and the
+existing `CopyToSymbol` path survive. It needs a **fourth** one-line fix beyond the three above:
+`'@"STT_CUDA_OBJECT"': 13` in `CuAsmParser.py:104`, because the device linker rewrites
+`.nv.reservedSmem.offset0`'s symbol type to a CUDA-specific value the validation table does not know.
+
+Two results from that work matter here.
+
+**The encoder gap does not block this route — proven.** The template cubin *fails* a plain
+round-trip (`IADD3 ... -R10`, `Unknown modifiers: {'5_cNEG'}`) and *succeeds* under injection,
+because `inject_kernel` replaces the instruction stream before the assembler sees it. The 12.7%
+measured above only ever blocked re-assembling ptxas output, which is not what anyone would do.
+
+**But the hybrid is closed, and that is expensive.** A device link emitting a separately linkable
+`__device__` function creates a `.nv.prototype` section carrying a `str_index@` expression that
+CuAsmParser does not implement, so *any* cubin with more than one `.text` section fails to
+reassemble — including the shipped `GpuCore.cubin`, which has three. Under `-rdc` that is exactly
+what `getHash160_33`/`_w2` become. So the hash layer cannot be kept as nvcc-compiled callees and
+must be hand-written too: **4,066 instructions, 40.7% of the kernel**, replacing code recorded here
+as machine-checked against `hashlib` and at its floor. Inlining them instead does not help —
+injection discards the whole template body regardless.
+
+Implementing `str_index@` is therefore the highest-leverage single item on this route. It is not a
+one-liner like the other four, but it removes ~4,000 instructions of hand-written hash code from
+the estimate and is the difference between rewriting the 31% worth rewriting and rewriting
+everything including the part this document says not to touch.
+
 ### What it would actually take — read before committing to this
 
 The question has flipped. It was "is this possible?"; it is now "is it worth it?", and the honest
