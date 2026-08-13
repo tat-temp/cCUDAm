@@ -389,10 +389,12 @@ i.e. P5, and fixing P1 already shrinks it 12-24×).
    use: RCAsm's own hand-written sources contain zero `IADD.64`, zero `HFMA2`, zero `ISETP…U64`,
    zero `WARPSYNC`. The round-trip is only needed if the plan is to *edit ptxas output*; it is not
    needed to *write a kernel*.
-4. *2026-08-13, measured:* **RCAsm builds working cubins on CUDA 13.0.88**, sm_89 and sm_120, with
-   three one-line fixes — all in the RCAsm/cuAssembler tree, none in this project. The
-   "12.8 or nothing" framing is dead. The only step left unmeasured is `cuModuleLoad`, which needs
-   a GPU. See the measured section below.
+4. *2026-08-13, measured end to end:* **RCAsm builds working cubins on CUDA 13.0.88** — sm_89 and
+   sm_120, three one-line fixes, all in the RCAsm/cuAssembler tree and none in this project — **and
+   the driver loads them** (RTX 5090, sm_120). The "12.8 or nothing" framing is dead and nothing is
+   blocking the route any more. What remains unproven is that hand-written SASS *computes the right
+   answer*, which is the whole of the risk; and the realistic prize is **~15%**, not the 31.2%
+   `mul_mod` static share. See *What it would actually take* before planning around it.
 
 **RCAsm** — <https://github.com/RetiredC/RCAsm>, GPLv3, Python, by RetiredCoder — is a SASS
 assembler over a vendored, modified **CuAssembler** (MIT, cloudcores). sm_89 and sm_120 only. It is
@@ -638,12 +640,49 @@ zero times in the template, and three times in RCAsm's own `main.asm`
 statically resolve an indirect target. `cuobjdump -sass` reads all 144 lines. **This does mean
 `nvdisasm` is not a usable check on hand-written RCAsm output — use `cuobjdump`.**
 
-**Still unverified: `cuModuleLoad`.** No GPU here. `scratchpad/rcasm_load_test.cpp` does exactly
-that one step — `cuInit` → `cuDevicePrimaryCtxRetain` → `cuModuleLoad` → `cuModuleGetFunction` →
-attribute dump — and deliberately stops short of launching, since `mulKernel` takes a by-value
-struct and a wrong launch is a hang rather than an error. It compiles against CUDA 13 (note:
-`cuCtxCreate` became `cuCtxCreate_v4` with a new signature in 13.0, hence the primary-context
-route, which is also the context `CallCubin.cpp` reaches via `cudaFree(0)`).
+### The driver accepts it — RTX 5090, 2026-08-13
+
+`rcasm_test/rcasm_load_test.cpp` against `rcasm_test/kernel_sm120.cubin`:
+
+```
+  device: NVIDIA GeForce RTX 5090 (sm_120)
+  OK    cuModuleLoad
+  OK    cuModuleGetFunction
+    NUM_REGS        255
+    MAX_THREADS     256
+    SHARED_BYTES    0
+    LOCAL_BYTES     0
+    CONST_BYTES     0
+    BINARY_VERSION  120
+```
+
+**The RCAsm carrier is proven end to end.** Assemble → load → resolve, on CUDA 13.0.88 hardware.
+Combined with the native cubin path's 592/592, every piece of machinery between "hand-written
+`.asm`" and "a kernel this program launches" is now measured rather than assumed.
+
+Two details in that dump are worth more than the verdict line:
+
+- **`MAX_THREADS 256` is derived, not echoed.** The driver computed it from `NUM_REGS 255` against
+  the register file — so it did not merely tolerate the injected `EIATTR_REGCOUNT`, it *acted* on
+  it. That is the strongest available evidence that RCAsm's regcount patch — a line-offset hack
+  over nvdisasm's comment text, and the step most likely to break silently on a new toolkit —
+  produces metadata the driver genuinely consumes.
+- **`BINARY_VERSION 120`** — the driver classifies the round-tripped image as a native sm_120
+  binary, despite the note sections having been rebuilt and patched.
+
+**What this does *not* establish: that an RCAsm-built kernel computes the right answer.** Nothing
+has been launched. Load and resolve are necessary, not sufficient, and the probe stops there
+deliberately — `mulKernel` takes a by-value struct, so a wrong launch is a hang, not a diagnostic.
+Correctness of hand-written SASS remains entirely unproven and is the whole of the risk in this
+route.
+
+**A constraint to design around, visible here for the first time:** 255 registers per thread caps
+the block at 256 threads and holds occupancy very low. That is presumably deliberate in Kernel01,
+which is a `MulMod256` throughput benchmark. `TestKernel` is not that shape — it needs occupancy to
+hide memory latency, and it already carries a 16 KB local frame (P2). RCAsm also supports only 63
+uniform registers on sm_120 per its README. Any hand-written `TestKernel` has to live inside that
+budget, and `make ptxinfo SM=120` (Hardening item 10, still not run) is what says how much room
+there actually is.
 
 ### Native cubin path — implemented and **verified on hardware**, `make NATIVE_CUBIN=1`
 
@@ -738,11 +777,15 @@ dropped notice is a separate matter from the licence choice.
    *RCAsm builds cubins on CUDA 13.0* above for the fixes, the output, and the un-injected control
    that proves the ELF writing is sound. ~~CUDA 12.8~~ is not needed and should not be installed
    for this.
-2c. **Run `scratchpad/rcasm_load_test.cpp` on the GPU.** The one remaining unknown, and it is a
-   single command: does the driver accept an RCAsm-assembled cubin? Everything up to
-   `cuModuleLoad` is now measured. Note that `nvdisasm` is *not* a usable pre-check on RCAsm
-   output — it refuses any kernel containing `BRXU`, which is RCAsm's own loop idiom — so the
-   driver's verdict is the only one that counts. Use `cuobjdump -sass` for eyeballing.
+2c. ~~**Run the probe on the GPU.**~~ **Cleared 2026-08-13 — the driver accepts it.** RTX 5090,
+   sm_120: `cuModuleLoad` and `cuModuleGetFunction` both succeed, and `MAX_THREADS 256` shows the
+   driver acted on the injected register count rather than merely tolerating it. `rcasm_test/`
+   carries the probe and its fixtures. Note `nvdisasm` is *not* a usable pre-check on RCAsm output
+   — it refuses any kernel containing `BRXU`, RCAsm's own loop idiom — so use `cuobjdump -sass`.
+
+**Nothing is blocking any more.** The route is open and the remaining work is the work itself:
+writing `TestKernel`'s body in RCAsm's dialect and proving it computes the right answer. See
+*What it would actually take* below before committing to that.
 3. ~~**A real GPU.**~~ **Cleared 2026-08-13, and more completely than this item asked for.** The
    native cubin path did not merely load — `proof.py` passed **592/592 through it**, so
    `cuModuleLoad`, `cuModuleGetGlobal`, `CopyToSymbol` and `cuLaunchKernel` are all verified to do
@@ -769,6 +812,55 @@ dropped notice is a separate matter from the licence choice.
      measured, `CuAsm.config.Config is cuAssembler.CuAsm.config.Config` → **False**. Setting
      `Config.SM_VER` on the wrong one is a silent no-op, and `Config.SM_VER` defaults to 89 —
      the same trap that invalidated the first gap measurement. Set both.
+
+### What it would actually take — read before committing to this
+
+The question has flipped. It was "is this possible?"; it is now "is it worth it?", and the honest
+answer is that the ceiling is lower than the 31.2% `mul_mod` figure suggests.
+
+**Size the prize dynamically, not statically.** Per scanned key the split is ~2,707 hashing +
+~1,207 field-math instructions — hashing is **69%** and is essentially at its floor. Hand-written
+SASS addresses the other 31%. RCAsm's `MulMod256` is 112 instructions where ptxas spends ~222, so
+call it a 2× improvement on the addressable part:
+
+| | now | field math halved |
+|---|---:|---:|
+| hashing | 2,707 | 2,707 |
+| field math | 1,207 | ~603 |
+| **total** | **3,914** | **~3,310** |
+
+That is **~15%**, and it assumes every field routine is rewritten and every one hits the 2× ratio.
+It is a real number and worth having, but it is the same order as P3 (5-15%, unmeasured) and P4
+(2-5%) combined — and those are days of work against a rewrite of 4,000+ instructions of hand-
+scheduled SASS. **Do P1/P2/P3/P4 and measure before starting this.** P1 in particular is worth more
+than 15% in wall-clock terms it does not even show up in, because it governs Ctrl-C latency,
+found-key latency and TDR risk.
+
+**Four things that are known to need solving:**
+
+1. **The template.** A `.cu` declaring `TestKernel` with a matching signature, to inject into.
+   Already scouted: `.nv.constant0.TestKernel` is 952 bytes (0x3b8) for *both* the 8-argument form
+   and a single by-value struct, params at `0x380`, 56 bytes — so either shape works and the
+   8-argument form is already what `CallCubin` passes.
+2. **The structure mismatch.** `Math.cuh` is `__forceinline__` throughout, so the shipped kernel
+   has one *region per call site* and no labels — 14 separate `mul_mod` regions. RCAsm's Kernel02
+   instead `CALL`s real `FUNCTION`s. That is the more sensible structure and it is what makes 112
+   instructions reusable 14 times, but it means the rewrite is a restructure, not a transcription.
+3. **The register budget.** Kernel01 runs at 255 registers, which caps the block at 256 threads.
+   `TestKernel` needs occupancy and already carries a 16 KB local frame. Run
+   `make ptxinfo SM=120` first — it is Hardening item 10 and it gates this as much as it gates
+   P2/P3/P4.
+4. **Correctness.** No reference test exists for a hand-written kernel *except* end-to-end, and
+   that is precisely what is now available and known-good: `proof.py` at 592/592 through the native
+   cubin path. A hand-written `TestKernel` dropped into the same harness either reproduces 592/592
+   or it does not. **That is the single most valuable thing this route inherited** — it did not
+   exist a day ago, and without it a subtly wrong carry chain would surface as silently missed
+   keys, which is the failure mode this entire document exists to eliminate.
+
+**The cheapest real experiment**, if the appetite is there: implement `MulMod256` alone as an RCAsm
+`FUNCTION`, call it from a template kernel, and check its output against the host `MulModP` over
+random operands. It settles whether hand-written SASS is maintainable *here* — by the people who
+would maintain it — at a cost of one function rather than one kernel.
 
 ### If the route is abandoned
 
