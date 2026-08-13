@@ -1,0 +1,89 @@
+# A/B — hand-written SASS `TestKernel` vs the ptxas-compiled one
+
+Same signature, same parameter ABI, same constant tables, same inputs, two cubins.
+
+```bash
+./build.sh
+./abtest ab_compiled.cubin ../../asm/tk/TestKernel.cubin 256
+```
+
+Arguments: `<cubinA> <cubinB> [threads] [iters]`. `threads` must be a multiple of 256
+(defaults to 256); `iters` reports the best launch time of N.
+
+## It answers two questions, and keeps them apart
+
+1. **Do A and B agree with each other?** — the A/B question.
+2. **Is each of them right?** — against an independent oracle.
+
+(2) exists because both sides can be wrong the same way, and here they demonstrably are:
+this project's `mul_mod` is "almost reduced" (DEVPLAN C8) and RCAsm's `MulMod256` has
+been measured on hardware to have the identical defect, returning `p+1` where `1` is
+correct. A harness that only diffed A against B would print a clean pass over two
+non-canonical implementations — the H14 lesson restated. So every result is classified:
+
+| | |
+|---|---|
+| `EXACT` | bit-identical to the canonical `(a*b) mod P` |
+| `NON-CANON` | congruent but ≥ P, i.e. canonical + k·P — **C8's signature** |
+| `WRONG` | not congruent at all |
+
+`NON-CANON` is not a pass and not a failure: it is the expected, known defect. What
+matters for a drop-in replacement is that A and B agree *bit for bit*, because
+`SHA256_33_from_limbs` serializes limbs raw and `sub_mod_is_odd` derives the
+compressed-pubkey prefix from `r[0]&1` — congruence is not enough for either.
+
+## The oracle checks itself first
+
+A wrong oracle would invalidate everything, so `selftest()` runs before any CUDA call and
+aborts on failure. Five cases, two of which are exactly the ones C8 turns on:
+`(P-1)²  == 1`, `2·(P+1)/2 == 1`, plus `1·1`, `0·x`, `(P-1)·1`.
+
+```bash
+./abtest --selftest     # oracle only, no GPU needed
+```
+
+It earned its keep immediately: `(P+1)/2`'s low limb carries the bit shifted down out of
+limb 1, and the first version of that constant dropped it. The value still looked
+plausible, its double was not `P+1`, and the edge case would have silently stopped
+testing anything.
+
+## What is under test right now
+
+The SASS kernel is at **stage 1b** (see `asm/tk/README.md`), so `ab_kernel.cu` mirrors
+exactly that and nothing more:
+
+```
+Px      = mul_mod(x1, y1)     <- the operation being compared
+Py      = y1                  <- identity
+scalars = s1                  <- identity
+counts  = rem                 <- identity
+```
+
+The identity fields are checked too. They are not filler: they catch a wrong parameter
+offset, a wrong `gid`, or a bad address, which would otherwise look like an arithmetic
+failure.
+
+The inputs are deterministic (xorshift, fixed seed) and the first four threads carry
+constructed edge cases rather than random operands — `(P-1)²`, `2·(P+1)/2`,
+`(P+1)/2·2`, `1·1`. Random 256-bit operands never reach them: a product landing in
+`[P, 2^256)` has probability ~2⁻²²⁴, which is precisely how C8 stayed invisible.
+
+## Timing
+
+Reported, and labelled meaningless until both kernels do the same work. The compiled
+kernel is `REG:78 STACK:0`; the hand-written one is `REG:255 STACK:16384`, which caps it
+at one block per SM. That is a real difference to fix, not a measurement artifact — but
+it cannot be read as an arithmetic result either.
+
+## Running it in WSL
+
+There is no driver in WSL, so only `--selftest` works there, and even that needs the stub
+under its SONAME:
+
+```bash
+mkdir -p /tmp/cudastub
+ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /tmp/cudastub/libcuda.so.1
+LD_LIBRARY_PATH=/tmp/cudastub ./abtest --selftest
+```
+
+Everything else needs the GPU host.

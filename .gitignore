@@ -16,3 +16,7 @@ tests_results.txt
 
 # Python
 __pycache__/
+
+# A/B harness build output
+rcasm_test/abtest/abtest
+rcasm_test/abtest/ab_compiled.cubin
