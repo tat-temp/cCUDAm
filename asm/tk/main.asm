@@ -53,7 +53,8 @@ KERNEL TestKernel(regcnt=255, \
     ThrID=R2, BlockID=R3, gID=R4, TmpA=R5, TmpB=R6, \
     PntX=R8, PntY=R16, Scal=R24, Rem=R32, \
     AddrX=R40, AddrY=R42, AddrS=R44, AddrC=R46, Thr=R48, \
-    uDesc=UR4 )
+    Prod=R50, Tmp=R58, \
+    uDesc=UR4, uCallM=UR6 )
 {
 //---- frame ------------------------------------------------------------------------
 // The driver hands the thread's local-memory base in c[0x0][0x37c]; the kernel carves
@@ -65,6 +66,11 @@ KERNEL TestKernel(regcnt=255, \
     [B------:R-:W1:-:S01]    S2R BlockID, SR_CTAID.X
 // sm_120 has 63 uniform registers, not 255, and URZ has to be materialised first.
     [B------:R-:W-:-:S01]    UMOV URZ, 0x00
+// High word of every call_func return "address". BRXU's target is
+// next_PC + UR + imm with the UR pair sign-extended, so the high half is all-ones and
+// is set once here; the call site only ever writes the low word. Straight from
+// Kernel02's prologue (main.asm: UMOV uCallInv1, 0xFFFFFFFF).
+    [B------:R-:W-:-:S01]    UMOV uCallM1, 0xFFFFFFFF
     [B------:R-:W2:-:S01]    LDCU.64 uDesc, c[0x0][0x358]
     [B------:R-:W3:-:S01]    LDC.64 AddrX, c[0x0][0x380]
     [B------:R-:W3:-:S01]    LDC.64 AddrY, c[0x0][0x388]
@@ -125,6 +131,39 @@ KERNEL TestKernel(regcnt=255, \
     [B------:R-:W-:-:S04] @P0 EXIT
 
 //====================================================================================
+// STAGE 1b -- prove the last two pieces of the carrier with ONE real field operation.
+//
+// Prod = MulMod256(PntX, PntY), through a real out-of-line CALL rather than an inline
+// expansion, then round-tripped through the local frame and written to Px. Py, Scal and
+// Rem stay identity. Checkable directly: the host computes MulModP(x, y) over the same
+// inputs, so a wrong carry chain, a wrong register binding or a bad frame all surface
+// as a mismatch rather than as something subtle three stages later.
+//
+// What this exercises that stage 1 does not:
+//   * call_func -- the whole reason the hash layer can be LIFTED instead of rewritten.
+//     The caller loads the return address into a uniform pair and the callee ends with
+//     the Ret= string; RCAsm appends the body after the kernel and patches the label
+//     index and the byte offset (16 per instruction) into the UMOV below.
+//   * the 16 KB local frame, via an STL/LDL round trip. If the template's declared
+//     frame were wrong this writes into memory the driver never reserved.
+//
+// NOTE the C8 caveat: MulMod256 is arithmetically correct but NON-CANONICAL -- measured
+// on hardware, it returns p+1 where 1 is correct. The host side of this check must
+// compare against EcInt::MulModP, which shares the convention, or against Python
+// (a*b) % P with the same allowance. Do not "fix" it here.
+    [B0-----:R-:W-:-:S01]    NOP
+    [B-1----:R-:W-:-:S02]    NOP
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointA
+call_func MulMod256(RFirst=PntX, RSecond=PntY, Ro=Prod, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointA
+
+// Local-frame round trip. R1 is the frame pointer set up above.
+    [B------:R-:W-:-:S02]    STL.128 [R1], Prod0
+    [B------:R-:W-:-:S02]    STL.128 [R1+0x10], Prod4
+    [B------:R-:W0:-:S01]    LDL.128 Prod0, [R1]
+    [B------:R-:W0:-:S02]    LDL.128 Prod4, [R1+0x10]
+    [B0-----:R-:W-:-:S02]    NOP
+
+//====================================================================================
 // STAGE 2 GOES HERE: the batch loop.
 //   suffix products -> STL subp[]      (SubMod256, MulMod256)
 //   one inversion                      (call_func InvMod256)
@@ -136,10 +175,11 @@ KERNEL TestKernel(regcnt=255, \
 //====================================================================================
 
 //---- write back -------------------------------------------------------------------
-    [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], PntX0
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], PntX2
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], PntX4
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], PntX6
+// Px carries the MulMod256 result (stage 1b); the other three are identity.
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], Prod0
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], Prod2
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], Prod4
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], Prod6
     [B-1----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], PntY0
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], PntY2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], PntY4

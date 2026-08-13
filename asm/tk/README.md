@@ -14,12 +14,34 @@ RCASM=/path/to/RCAsm ./build.sh
 
 | stage | what | state |
 |---|---|---|
-| 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **builds** — identity kernel, 64 instructions |
+| 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **builds** — 64 instructions |
+| 1b | `call_func MulMod256` + a local-frame round trip | **builds** — 184 instructions |
 | 2 | suffix products, `InvMod256`, the ± walk, the point jump | not written |
 
 Stage 1 is deliberately an *identity* kernel: it loads `x1`/`y1`/`s1`/`rem` and writes
-them straight back. It proves every part of the carrier the arithmetic sits on top of,
-and a diff against the C++ reference with `batches_per_launch = 0` must be byte-identical.
+them straight back, so it proves every part of the carrier the arithmetic sits on top of
+and nothing else.
+
+Stage 1b adds exactly one real field operation — `Px = MulMod256(x1, y1)`, through a real
+out-of-line **call**, with the result round-tripped through the local frame. `y1`, `s1`
+and `rem` stay identity. That makes the two remaining unknowns falsifiable on their own:
+
+- **`call_func` works, and the offsets are right.** Verified in the emitted SASS rather
+  than assumed: the call at `0x300` is `BRXU URZ 0x160` → `0x310 + 0x160 = 0x470`, which
+  is where RCAsm appended the `MulMod256` body; the return address it patched into the
+  caller is `UR6 = 0xfffff790`, and `0xB80 + (-0x870) = 0x310` is precisely the
+  instruction after the call. `UR7 = 0xffffffff` is the sign-extension half.
+  This is the mechanism the hash-layer lift depends on.
+- **The local frame is real.** `STL.128 [R1]` / `LDL.128 [R1]` against the 16 KB the
+  template declares.
+- **Register bindings resolve.** The body opens with
+  `IMAD.WIDE.U32 R50, R8, R16, RZ` = `Ro0 = RFirst0 * RSecond0` with `Ro=Prod(R50)`,
+  `RFirst=PntX(R8)`, `RSecond=PntY(R16)`.
+
+**C8 applies to the check.** `MulMod256` is arithmetically correct but non-canonical — on
+hardware it returns `p+1` where `1` is correct. Compare against `EcInt::MulModP`, which
+shares the convention, or against Python `(a*b) % P` with that allowance. Do not "fix" it
+here; C8 has to be fixed on its own terms for whichever implementation ships.
 
 ## What the build does
 
