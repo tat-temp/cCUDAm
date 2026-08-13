@@ -395,6 +395,17 @@ i.e. P5, and fixing P1 already shrinks it 12-24×).
    blocking the route any more. What remains unproven is that hand-written SASS *computes the right
    answer*, which is the whole of the risk; and the realistic prize is **~15%**, not the 31.2%
    `mul_mod` static share. See *What it would actually take* before planning around it.
+5. *2026-08-14:* **the 12.7% encoder gap is not an encoder gap, and the hash layer does not have to
+   be hand-written.** Both corrections come from the same measurement and both cut against what the
+   two sections below say. cuAssembler *learns* encodings from samples; its shipped sm_120
+   repository had never been fed real sm_120 SASS, and its feeder could not even parse sm_120
+   (`CuInsFeeder.py:639` gates on `getMajor() in {7,8}`). Feed it our own kernel and 1,265 failures
+   become **24**, all one instruction form with a trivial equivalent. Separately: `getHash160_33`
+   and `getHash160_w2` touch **no memory at all**, are already out-of-line `CALL`ed functions in
+   the shipped cubin, and reassemble **byte-for-byte** — so they can be lifted into an RCAsm
+   `FUNCTION` rather than rewritten. Full measurement in
+   [`asm/TESTKERNEL_TEMPLATE.md`](asm/TESTKERNEL_TEMPLATE.md) §9. **The ~15% ceiling is unchanged**
+   — this removes risk and effort, not the bound.
 
 **RCAsm** — <https://github.com/RetiredC/RCAsm>, GPLv3, Python, by RetiredCoder — is a SASS
 assembler over a vendored, modified **CuAssembler** (MIT, cloudcores). sm_89 and sm_120 only. It is
@@ -464,7 +475,20 @@ Notes that matter before anyone acts on that table:
   region boundaries. `mul_mod` at call sites `:157` and `:261` has the lowest density (64.8%,
   92.1%) because `inv_mod`'s prologue is scheduled into it.
 
-### The real kernel does not reassemble (measured 2026-08-13, re-run same day, CUDA 13.0.88, sm_120)
+### The real kernel does not reassemble — **overturned 2026-08-14, see the correction below**
+
+> **This whole section measured an empty repository, not a missing encoder.** The numbers below
+> are reproducible and were correctly obtained; the *conclusion* drawn from them is wrong.
+> cuAssembler solves for encodings from disassembly samples, and its shipped sm_120 repository had
+> never been fed any. Once it is, **1,265 failures become 24** — one instruction form, with an
+> exact one-instruction equivalent — and the kernel reassembles byte-for-byte outside a handful of
+> control-transfer instructions. "Group 1 — genuinely no encoder" is the specific claim that does
+> not survive: all 444 `IADD.64`s learned, as did `ENDCOLLECTIVE`, `R2UR`, `LDCU` and `WARPSYNC`.
+> Kept in place because the shape of the error matters and because the *reason* nobody had found
+> this is itself a finding: `CuInsFeeder.py:639` gates the learning path on
+> `smversion.getMajor() in {7,8}`, so on sm_120 the repository **could not be taught anything at
+> all**. Numbers, method and the two extra one-line fixes are in
+> [`asm/TESTKERNEL_TEMPLATE.md`](asm/TESTKERNEL_TEMPLATE.md) §9.3–§9.5.
 
 `asm/GpuCore_sm120.asm` → cubin **fails**. After `.tkinfo` is commented out to get the parser
 started, it dies at instruction #12:
@@ -772,6 +796,11 @@ dropped notice is a separate matter from the licence choice.
    tables above. Writing the `IADD.64` family into `NewOpsHandler.py` is only worth doing if the
    round-trip itself is the goal (e.g. to diff a modified kernel against the original), and it buys
    444 of 9,984 instructions, not the 584 the old table implied.
+   **Superseded 2026-08-14 — nobody has to write any encoder.** Feeding `CuInsAssemblerRepos.update`
+   the shipped kernel's own SASS learns all 444 `IADD.64`s and everything else bar one form, in
+   about five seconds. The round-trip *is* available after all, which matters because it is what
+   lets a lifted function be diffed against the original bytes. Requires
+   `CuInsFeeder.py:639` to accept sm_120 first — see `asm/TESTKERNEL_TEMPLATE.md` §9.3–§9.5.
 2. ~~**Does RCAsm work on CUDA 13.0 at all?**~~ **Settled 2026-08-13 — yes.** Kernel01 assembles
    for both sm_89 and sm_120, with three one-line fixes and no GPU required to get that far. See
    *RCAsm builds cubins on CUDA 13.0* above for the fixes, the output, and the un-injected control
@@ -887,6 +916,42 @@ Implementing `str_index@` is therefore the highest-leverage single item on this 
 one-liner like the other four, but it removes ~4,000 instructions of hand-written hash code from
 the estimate and is the difference between rewriting the 31% worth rewriting and rewriting
 everything including the part this document says not to touch.
+
+### The hash layer is a lift, not a rewrite — measured 2026-08-14
+
+The paragraph immediately above is superseded. `str_index@` is no longer the unlock, and the
+~4,000 instructions never have to be written by hand.
+
+`getHash160_33` and `getHash160_w2` **touch no memory whatsoever** — the entire opcode inventory of
+both bodies is `SHF`, `IADD3`, `LOP3`, `LEA`, `PRMT`, `UMOV`, `MOV`, `HFMA2`, `RET`, `BRA`, `NOP`.
+No `LDG`/`STG`, no `LDL`/`STL`, no `LDS`/`STS`, not even an `LDC`: `GpuHash.cu`'s
+`static constexpr uint32_t K[64]` really does fold into immediates, as its own comment claims. And
+ptxas has **already made them out-of-line functions** — `STT_FUNC` symbols at 0x171e0 and 0x1f1b0,
+each reached by 4 × `CALL.REL.NOINC`, each ending in `RET.REL.NODEC R6`. That is the shape of an
+RCAsm `call_func` target already.
+
+With the sm_120 repository taught from our own SASS, both bodies **reassemble byte-for-byte**:
+
+| region | instrs | `HFMA2`→`MOV` | unexplained byte differences |
+|---|---:|---:|---:|
+| `getHash160_33` | 2,045 | 1 | **0** |
+| `getHash160_w2` | 2,021 | 1 | **1** |
+
+The `HFMA2` is ptxas loading a small integer constant on the FP16 pipe (`MOV Rd, imm` is exact).
+The single remaining difference is `getHash160_w2`'s closing `RET.REL.NODEC` — a PC-relative
+target that `nvdisasm` prints as an absolute address, so the solver cannot tell the two `RET`s
+apart and reuses one encoding for both. **That is the one instruction the conversion deletes**:
+`call_func` ends a `FUNCTION` with the caller's `Ret=` string (``BRXU.U uCallX, 0x00``), never with
+`RET.REL.NODEC`.
+
+So the hash moves *into* the injected instruction stream instead of living outside it in a second
+`.text` section, and the one-`.text` rule stops binding. What is left is real but much smaller:
+renaming ptxas's `R0..R104` allocation into RCAsm's `Ri`/`Ro`/`Rt` scheme, one internal label in
+`_w2`, and whether ptxas's control codes still schedule correctly after RCAsm relocates the body.
+Method, tables and caveats: [`asm/TESTKERNEL_TEMPLATE.md`](asm/TESTKERNEL_TEMPLATE.md) §9.
+
+**This does not move the ~15% ceiling** — lifting the hash verbatim makes it exactly as fast as it
+is now. It removes risk and effort, not the bound, and the next section still applies.
 
 ### What it would actually take — read before committing to this
 

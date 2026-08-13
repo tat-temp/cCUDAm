@@ -29,6 +29,14 @@ Unless someone implements `str_index@` in CuAsmParser first. That single piece o
 separates "rewrite the 31% worth rewriting" from "rewrite everything including the part you were
 told not to touch."
 
+> **Superseded by §9 (2026-08-14).** The hash layer does not have to be rewritten and the encoder
+> coverage is no longer unverified. Both hash bodies are already out-of-line, register-only
+> `CALL`ed functions in the shipped cubin, and **cuAssembler reproduces all 4,066 of their
+> instructions byte-for-byte** once its sm_120 repository is taught from our own SASS — two
+> exceptions, both of which the conversion to an RCAsm `FUNCTION` removes anyway. `str_index@`
+> stops being the unlock: the hash layer moves *into* the injected stream instead of staying
+> outside it, so there is only ever one `.text` section. Read §9 before §5 and §7.
+
 ---
 
 ## 1. The template `.cu`
@@ -309,3 +317,145 @@ ends the route cheaply.
   a real kernel — they assemble, which says nothing about whether they schedule correctly.
 - `__launch_bounds__(256,2)` implies ≤128 registers/thread arithmetically; not measured. RCAsm
   accepted `regcnt=40` without complaint and would presumably accept an over-budget value.
+
+---
+
+## 9. Lift the hash, do not rewrite it — measured 2026-08-14
+
+Proposed as: *`getHash160_33` and `getHash160_w2` never touch memory, so make them RCAsm
+`FUNCTION`s and `call_func` them.* Both halves check out, and the second one demolishes §5's cost
+estimate. Everything below is measured on `asm/GpuCore_sm120.asm` and the plain (non-`-rdc`)
+sm_120 cubin it came from — `.text.TestKernel` 0x27000 = 159,744 B, so the two agree exactly.
+
+### 9.1 They really are register-only — every opcode, both bodies
+
+| | `getHash160_33` | `getHash160_w2` |
+|---|---:|---:|
+| `SHF` | 667 | 661 |
+| `IADD3` | 567 | 553 |
+| `LOP3` | 501 | 494 |
+| `LEA` | 288 | 280 |
+| `PRMT` | 18 | 18 |
+| `UMOV` / `MOV` / `HFMA2` | 1 / 1 / 1 | 1 / 1 / 1 |
+| `RET` / `BRA` / `NOP` | 1 / 0 / 0 | 1 / 1 / 10 |
+| **total** | **2,045** | **2,021** |
+
+**Zero memory instructions of any kind** — no `LDG`/`STG`, no `LDL`/`STL`, no `LDS`/`STS`, no
+`LDC`/`LDCU`, no atomics. Not even a constant-bank read: `GpuHash.cu`'s comment that
+`static constexpr uint32_t K[64]` folds into immediates rather than becoming an `LDC` is correct,
+and the SHA-256 IV literals do the same. Pure ALU, register in, register out.
+
+### 9.2 They are *already* out-of-line functions
+
+Not something to be separated — ptxas separated them. In the shipped cubin:
+
+| symbol | offset | size | calls |
+|---|---|---:|---:|
+| `$TestKernel$_Z24getHash160_33_from_limbsh4U256` | `0x171e0` | 32,720 B | 4 × `CALL.REL.NOINC` |
+| `$TestKernel$_Z24getHash160_w2_from_limbsh4U256` | `0x1f1b0` | 32,336 B | 4 × `CALL.REL.NOINC` |
+
+Contiguous, symbol-delimited, `STT_FUNC`, each ending in `RET.REL.NODEC R6`. That is the same
+shape as an RCAsm `call_func` target, which is why the substitution is a re-encoding of the
+calling sequence rather than a rewrite of the body.
+
+### 9.3 The 12.7% encoder gap was not an encoder gap
+
+DEVPLAN recorded 1,265 of 9,984 instructions (12.7%) as unassemblable, split into "508 genuinely
+no encoder" and "757 known InsKey, unlearned values". **The first group was wrong.**
+
+`"Assembling failed (NewVals): Insufficient basis, try CuAsming more instructions!"` means what it
+says: cuAssembler *solves* for encodings from samples, and the sm_120 repository it ships has not
+seen enough of that form. The samples it needs are sitting in our own cubin next to their real
+binary codes. Feeding all 9,984 instructions through `CuInsAssemblerRepos.update` — 184 new
+records, 405 → 426 InsKeys, 5 seconds:
+
+| region | instrs | encodable | fail | | after |
+|---|---:|---:|---:|---|---:|
+| `getHash160_33` | 2,045 | 1,754 → **2,044** | 291 → **1** | | 0.05% |
+| `getHash160_w2` | 2,021 | 1,738 → **2,020** | 283 → **1** | | 0.05% |
+| rest of `TestKernel` | 5,918 | 5,227 → **5,896** | 691 → **22** | | 0.37% |
+| **total** | **9,984** | 8,719 → **9,960** | 1,265 → **24** | | **0.24%** |
+
+Every one of the 444 `IADD.64`s learned. So did `LEA.HI R8, R5, R8, R5, 0x1a` — 572 of the failures
+in the hash bodies alone — and `ENDCOLLECTIVE`, and the `PRMT` and `ISETP…U64` forms.
+
+**All 24 survivors are one instruction form**, `HFMA2 Rd, -RZ, RZ, hi, lo`, which is ptxas loading
+a small integer constant on the FP16 pipe for port balance. The immediates seen are all subnormal
+halves, so the packed word is `bits(hi)<<16 | bits(lo)`, and the observed values are `0x0` ×11,
+`0x1` ×9, `0x2` ×3, `0x18` ×1. The exact equivalent is `MOV Rd, <imm>`. One per hash body.
+
+### 9.4 The bodies reassemble to the same bytes
+
+Encodability is not correctness — the solver logged verification conflicts while learning. The
+check that settles it is a byte compare of `.text.TestKernel` against the cubin the `.cuasm` was
+disassembled from, with the 24 `HFMA2` rewritten to their `MOV` equivalents:
+
+| region | instrs | `HFMA2`→`MOV` | **unexplained differences** |
+|---|---:|---:|---:|
+| `getHash160_33` | 2,045 | 1 | **0** |
+| `getHash160_w2` | 2,021 | 1 | **1** |
+| rest of `TestKernel` | 5,918 | 22 | 160 |
+
+`getHash160_33` is byte-for-byte identical over all 2,044 non-substituted instructions.
+`getHash160_w2` has exactly one, and it is this:
+
+```
+/*26f40*/ RET.REL.NODEC R6 `(TestKernel) ;
+   orig: 50 79 2c 06 90 fd ff ff ff ff c3 03 00 ec 0f 00
+   rebd: 50 79 94 06 0c fe ff ff ff ff c3 03 00 ec 0f 00
+```
+
+**That is not an encoder defect either.** `nvdisasm` prints a branch/return target as an absolute
+address while the encoding holds a PC-relative offset, so the two `RET.REL.NODEC R6` instructions —
+one ending each hash body — are indistinguishable to the solver and disagree on the code. It keeps
+the first (`0x1f1a0`'s) and reuses it, so the second assembles to the first one's offset. The
+rebuilt bytes above *are* `0x1f1a0`'s encoding, verbatim. The proper fix belongs in CuAsmParser's
+`` `(label) `` fixup path, which should overwrite the offset field after layout regardless of what
+the repository encoded.
+
+**And it is the one instruction the conversion deletes.** `call_func` appends the caller-supplied
+`Ret=` string as the body's last instruction — Kernel02 uses ``BRXU.U uCallInv, 0x00`` — so
+`RET.REL.NODEC` never appears in an RCAsm `FUNCTION`. The single wrong instruction is thrown away
+by the very transformation being proposed.
+
+Filtering `BRA`/`RET` out of the learning corpus is **not** the fix: `BRA.DIV UR4` and
+`BSSY.RECONVERGENT` get their operand forms and modifiers only from that corpus, so excluding them
+just moves the failure (measured — both were tried).
+
+### 9.5 Two more toolchain fixes
+
+| # | where | fix |
+|---|---|---|
+| 6 | `CuAsm/CuInsFeeder.py:639` | `smversion.getMajor() in {7,8}` → `>= 7`. Without it the feeder raises `No implemented state machine for arch CuSMVersion(120)` and **the repository cannot be taught anything about sm_120 at all**. |
+| 7 | `CuAsm/InsAsmRepos/DefaultInsAsmRepos.sm_120.txt` | Regenerate by feeding real sm_120 SASS. The shipped file is 1,211,212 B against sm_89's 1,210,806 B, with a `sm_89_orig.txt` beside it — it looks converted from sm_89 rather than built from Blackwell code, which is why forms ptxas actually emits are missing. |
+
+Fix 6 is why nobody had measured this: the learning path was unreachable on sm_120, so the gap
+looked like missing encoders instead of an empty corpus.
+
+### 9.6 What this changes, and what it does not
+
+**Changes:** the hash layer stops being 4,066 instructions of hand-written SHA-256/RIPEMD-160 and
+becomes a *lift* — take the bytes ptxas already produced, machine-checked against `hashlib`, and
+paste them in as two `FUNCTION`s. §5's `str_index@` blocker stops being the unlock, because the
+hash moves **into** the injected stream rather than staying outside it in a second `.text` section.
+§7's estimate loses its dominant term.
+
+**Does not change — and these are the real remaining work:**
+
+- **Register naming.** The lifted bodies use ptxas's allocation up to `R104` with a fixed
+  call ABI. RCAsm `FUNCTION`s take symbolic `Ri`/`Ro`/`Rt` bases that the call site rebinds by
+  string substitution. Either the lift keeps hard register numbers (and the kernel body must work
+  around them) or every operand gets renamed. Neither has been attempted.
+- **`getHash160_w2` contains one `BRA`**, so the lift needs one internal label. `getHash160_33`
+  has none.
+- **Control codes** come across with the instructions, but they were scheduled by ptxas for
+  *these* addresses inside *this* kernel. Whether they remain correct after RCAsm relocates the
+  body is unknown.
+- **Nothing here has run.** This is a static byte-identity result. The hash bodies have not been
+  assembled through RCAsm, injected, loaded or executed.
+- **The ~15% ceiling is unchanged.** Hashing is 69% of the dynamic instruction count and lifting it
+  verbatim makes it exactly as fast as it is now. What this removes is *risk and effort*, not the
+  bound. DEVPLAN's recommendation to do P1–P4 and measure first still stands.
+
+Reproduce with `scratchpad/learn.py` (teach the repository), `gaphash.py` (region-bucketed
+encodability sweep) and `rtfull.py` (round-trip byte compare).
