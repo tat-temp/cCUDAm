@@ -107,6 +107,28 @@ static void mulmodP(const uint64_t a[4], const uint64_t b[4], uint64_t out[4])
 	memcpy(out, lo, 4 * sizeof(uint64_t));
 }
 
+// Reduce into [0, P). One conditional subtract is enough for any 256-bit input:
+// (2^256 - 1) - P = 2^32 + 976, which is far below P.
+static void canonP(uint64_t a[4])
+{
+	while (cmp256(a, P) >= 0) { uint64_t t[4]; sub256(t, a, P); memcpy(a, t, sizeof(t)); }
+}
+
+// Canonical (a - b) mod P. Only equals what sub_mod/SubMod256 compute when a and b are
+// both already < P -- those do one subtract and one conditional add of P, which is a
+// modular subtraction only on canonical inputs. That is why the sufp mode canonicalises
+// c_Gx, c_Jx and x1 before upload: it keeps this oracle an INDEPENDENT statement of what
+// the answer should be, rather than a second copy of the implementation being tested.
+static void submodP(const uint64_t a[4], const uint64_t b[4], uint64_t out[4])
+{
+	uint64_t r[4];
+	if (sub256(r, a, b)) {                    // borrow -> a < b
+		u128 carry = 0;
+		for (int i = 0; i < 4; i++) { u128 t = (u128)r[i] + P[i] + carry; r[i] = (uint64_t)t; carry = t >> 64; }
+	}
+	memcpy(out, r, 4 * sizeof(uint64_t));
+}
+
 // 0 = exact, 1 = congruent but not reduced (canonical + k*P), 2 = wrong
 static int classify(const uint64_t got[4], const uint64_t want[4], int* kOut)
 {
@@ -156,7 +178,31 @@ static int selftest()
 			bad = 1;
 		}
 	}
-	if (!bad) printf("oracle : selftest passed (%zu cases)\n", sizeof(T) / sizeof(T[0]));
+	// submodP, which the sufp mode leans on as heavily as it leans on mulmodP. The
+	// borrow case is the whole point: a-b with a < b must come back as a-b+P.
+	struct { const char* what; uint64_t a[4], b[4], want[4]; } S[] = {
+		{"5-3",            {5,0,0,0}, {3,0,0,0}, {2,0,0,0}},
+		{"3-5 (borrow)",   {3,0,0,0}, {5,0,0,0}, {P[0]-2,P[1],P[2],P[3]}},
+		{"0-1 (borrow)",   {0,0,0,0}, {1,0,0,0}, {P[0]-1,P[1],P[2],P[3]}},
+		{"x-x",            {P[0]-1,P[1],P[2],P[3]}, {P[0]-1,P[1],P[2],P[3]}, {0,0,0,0}},
+		{"(P-1)-0",        {P[0]-1,P[1],P[2],P[3]}, {0,0,0,0}, {P[0]-1,P[1],P[2],P[3]}},
+	};
+	for (auto& t : S) {
+		uint64_t got[4];
+		submodP(t.a, t.b, got);
+		if (memcmp(got, t.want, sizeof(got))) {
+			printf("  ORACLE SELFTEST FAILED: submodP %s\n", t.what);
+			printf("    want %016llx %016llx %016llx %016llx\n",
+			       (unsigned long long)t.want[3], (unsigned long long)t.want[2],
+			       (unsigned long long)t.want[1], (unsigned long long)t.want[0]);
+			printf("    got  %016llx %016llx %016llx %016llx\n",
+			       (unsigned long long)got[3], (unsigned long long)got[2],
+			       (unsigned long long)got[1], (unsigned long long)got[0]);
+			bad = 1;
+		}
+	}
+	const size_t ncase = sizeof(T) / sizeof(T[0]) + sizeof(S) / sizeof(S[0]);
+	if (!bad) printf("oracle : selftest passed (%zu cases)\n", ncase);
 	return bad;
 }
 
@@ -193,7 +239,8 @@ int main(int argc, char** argv)
 
 	if (argc == 2 && !strcmp(argv[1], "--selftest")) return 0;
 	if (argc < 3) {
-		printf("usage: %s <cubinA> <cubinB> [threads] [iters]\n", argv[0]);
+		printf("usage: %s <cubinA> <cubinB> [threads] [iters] [mode]\n", argv[0]);
+		printf("       mode = mul (default, stage 1b) | sufp (stage 2a)\n");
 		printf("       %s --selftest        (oracle only, no GPU needed)\n", argv[0]);
 		return 1;
 	}
@@ -201,6 +248,13 @@ int main(int argc, char** argv)
 	const char* pathB = argv[2];
 	const unsigned threads = (argc > 3) ? (unsigned)strtoul(argv[3], nullptr, 0) : 256u;
 	const int iters = (argc > 4) ? atoi(argv[4]) : 1;
+	const bool sufp = (argc > 5) && !strcmp(argv[5], "sufp");
+	if (argc > 5 && !sufp && strcmp(argv[5], "mul")) {
+		printf("unknown mode '%s' -- expected mul or sufp\n", argv[5]);
+		return 1;
+	}
+	printf("mode   : %s\n", sufp ? "sufp (stage 2a -- the suffix-product ladder)"
+	                             : "mul  (stage 1b -- one MulMod256)");
 	const unsigned block = 256;
 	if (threads % block) { printf("threads must be a multiple of %u\n", block); return 1; }
 	const unsigned grid = threads / block;
@@ -250,11 +304,29 @@ int main(int argc, char** argv)
 	// Constant tables: not read at stage 1b, but uploaded anyway so the same harness
 	// works unchanged once the walk lands, and so a missing GLOBAL binding fails here
 	// rather than silently later.
-	std::vector<uint64_t> gx(512 * 4), gy(512 * 4);
+	// One definition. The kernels derive half = batch_size >> 1 and index subp[] and
+	// c_Gx[] by it, the oracle's trip count is half-1, and the tables are sized half*4 --
+	// three places that silently produce a plausible wrong answer if they disagree.
+	const unsigned BATCH = 1024;
+	const unsigned half = BATCH >> 1;
+
+	std::vector<uint64_t> gx(half * 4), gy(half * 4);
 	for (size_t i = 0; i < gx.size(); i++) { gx[i] = rnd64(); gy[i] = rnd64(); }
 	uint64_t jx[4], jy[4]; uint32_t tw[5];
 	for (int i = 0; i < 4; i++) { jx[i] = rnd64(); jy[i] = rnd64(); }
 	for (int i = 0; i < 5; i++) tw[i] = (uint32_t)rnd64();
+
+	// sufp mode canonicalises every operand the ladder consumes. sub_mod/SubMod256 do one
+	// subtract and one conditional add of P, which is a modular subtraction only when both
+	// operands are already < P -- and the real c_Gx holds curve x-coordinates, so this is
+	// the faithful input domain, not a convenience. Without it the oracle would have to
+	// model the implementation instead of stating the answer, and a harness that shares
+	// its subject's convention proves nothing (the lesson C8 taught twice).
+	if (sufp) {
+		for (size_t i = 0; i < gx.size(); i += 4) { canonP(&gx[i]); canonP(&gy[i]); }
+		canonP(jx); canonP(jy);
+		for (size_t i = 0; i < nlimb; i += 4) canonP(&hx[i]);
+	}
 
 	for (int m = 0; m < 2; m++) {
 		printf("---- %s : %s\n", M[m].name, paths[m]);
@@ -281,7 +353,7 @@ int main(int argc, char** argv)
 		CK(cuMemsetD8(M[m].fr, 0, 128), "memset fr");
 
 		unsigned long long thrTotal = threads;
-		unsigned batch = 1024, bpl = 1;
+		unsigned batch = BATCH, bpl = 1;
 		void* args[8] = {&M[m].px, &M[m].py, &M[m].sc, &M[m].ct, &M[m].fr,
 		                 &thrTotal, &batch, &bpl};
 
@@ -327,7 +399,8 @@ int main(int argc, char** argv)
 	                          : "A and B DISAGREE.");
 
 	//---- 2. each vs the oracle ------------------------------------------------------
-	printf("==== each vs canonical (a*b) mod P ====\n");
+	printf(sufp ? "==== each vs the canonical suffix product ====\n"
+	            : "==== each vs canonical (a*b) mod P ====\n");
 	int bad = 0;
 	for (int m = 0; m < 2; m++) {
 		size_t exact = 0, noncanon = 0, wrong = 0, firstWrong = (size_t)-1;
@@ -338,7 +411,23 @@ int main(int argc, char** argv)
 				a[k] = hx[t * 4 + k]; b[k] = hy[t * 4 + k];
 				got[k] = outPx[m][t * 4 + k];
 			}
-			mulmodP(a, b, want);
+			uint64_t wantPy[4];
+			if (sufp) {
+				// acc = (Jx - x1) * prod_{j=1}^{half-1} (Gx[j] - x1), and subp[half-1] is
+				// the first factor on its own -- the value stored before the loop, at the
+				// top of the frame, which is why reading it back says the ladder stored
+				// where it meant to rather than merely computing the right product.
+				submodP(jx, a, want);
+				memcpy(wantPy, want, sizeof(wantPy));
+				for (unsigned j = half - 1; j >= 1; --j) {
+					uint64_t d[4];
+					submodP(&gx[(size_t)j * 4], a, d);
+					mulmodP(want, d, want);
+				}
+			} else {
+				mulmodP(a, b, want);
+				memcpy(wantPy, b, sizeof(wantPy));      // Py is identity in mul mode
+			}
 			int kk = 0;
 			switch (classify(got, want, &kk)) {
 				case 0: exact++; break;
@@ -346,20 +435,30 @@ int main(int argc, char** argv)
 				default: wrong++; if (firstWrong == (size_t)-1) firstWrong = t; break;
 			}
 			for (int k = 0; k < 4; k++) {
-				if (outPy[m][t * 4 + k] != hy[t * 4 + k]) idPy++;
+				if (outPy[m][t * 4 + k] != wantPy[k]) idPy++;
 				if (outSc[m][t * 4 + k] != hs[t * 4 + k]) idSc++;
 				if (outCt[m][t * 4 + k] != hc[t * 4 + k]) idCt++;
 			}
 		}
 		printf("  %s:  EXACT %zu   NON-CANON %zu   WRONG %zu   (of %u)\n",
 		       M[m].name, exact, noncanon, wrong, threads);
-		printf("      identity check -- Py %s  scalars %s  counts %s\n",
+		printf("      %s -- Py %s  scalars %s  counts %s\n",
+		       sufp ? "subp[half-1] + identity" : "identity check",
 		       idPy ? "BROKEN" : "ok", idSc ? "BROKEN" : "ok", idCt ? "BROKEN" : "ok");
 		if (wrong) {
 			bad = 1;
 			uint64_t want[4], a[4], b[4];
 			for (int k = 0; k < 4; k++) { a[k] = hx[firstWrong * 4 + k]; b[k] = hy[firstWrong * 4 + k]; }
-			mulmodP(a, b, want);
+			if (sufp) {
+				submodP(jx, a, want);
+				for (unsigned j = half - 1; j >= 1; --j) {
+					uint64_t d[4];
+					submodP(&gx[(size_t)j * 4], a, d);
+					mulmodP(want, d, want);
+				}
+			} else {
+				mulmodP(a, b, want);
+			}
 			printf("      first wrong at thread %zu\n", firstWrong);
 			printf("        a    : %016llx %016llx %016llx %016llx\n",
 			       (unsigned long long)a[3], (unsigned long long)a[2],

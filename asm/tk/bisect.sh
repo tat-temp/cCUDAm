@@ -10,15 +10,20 @@ cd "$(dirname "$0")"
 : "${RCASM:?set RCASM to the RCAsm checkout}"
 V="${WORK:-/tmp/tkbuild}/variants"
 mkdir -p "$V"
-python3 variants.py main.asm "$V"
+VARIANTS="${VARIANTS:-id local call full sufp}"
+python3 variants.py main.asm "$V" $VARIANTS
 echo
-for n in id local call full; do
+for n in $VARIANTS; do
     echo "######## $n ########"
     MAIN="$V/main_$n.asm" OUTNAME="TestKernel_$n.cubin" WORK="${WORK:-/tmp/tkbuild}/b_$n" \
         ./build.sh 2>&1 | grep -E "^wrote|REG:|instruction count" -A1 | grep -vE '^--$' || true
     echo
 done
 echo "Run each against the compiled kernel; the first fault names the cause:"
-for n in id local call full; do
-    echo "  ./abtest ab_compiled.cubin ../../asm/tk/TestKernel_$n.cubin 256"
+for n in $VARIANTS; do
+    if [ "$n" = sufp ]; then
+        echo "  ./abtest ab_compiled_sufp.cubin ../../asm/tk/TestKernel_sufp.cubin 256 1 sufp"
+    else
+        echo "  ./abtest ab_compiled.cubin ../../asm/tk/TestKernel_$n.cubin 256"
+    fi
 done

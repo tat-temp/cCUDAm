@@ -16,7 +16,8 @@ RCASM=/path/to/RCAsm ./build.sh
 |---|---|---|
 | 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
 | 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
-| 2 | suffix products, `InvMod256`, the ± walk, the point jump | not written |
+| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **builds, alignment-clean** — 256 instructions, not yet run |
+| 2b–2d | `InvMod256`, the ± walk, the point jump, the outer batch loop | not written |
 
 **Stage 1b matches the compiled kernel exactly on an RTX 5090** — 253 EXACT, 3 non-canonical,
 0 wrong out of 256 threads, which is *the same verdict side A gets*. That is the first
@@ -44,6 +45,27 @@ and `rem` stay identity. That makes the two remaining unknowns falsifiable on th
 - **Register bindings resolve.** The body opens with
   `IMAD.WIDE.U32 R50, R8, R16, RZ` = `Ro0 = RFirst0 * RSecond0` with `Ro=Prod(R50)`,
   `RFirst=PntX(R8)`, `RSecond=PntY(R16)`.
+
+Stage 2a is the suffix-product ladder from `GpuCore.cu:224-233`, and it adds three
+mechanisms at once: a real backward-branch loop, a dynamically indexed constant load
+(`LDC.64 Rd, c[0x3][Rofs+imm]` — warp-uniform, so it broadcasts), and `STL` at a computed
+address rather than a constant offset off `R1`. All four new instruction forms assembled
+first try. It writes `Px = acc` and `Py = subp[half-1]`; the second is deliberately *not*
+`acc` — it is the value stored before the loop at the top of the frame, so reading it back
+after 511 stores is what says the ladder wrote where it meant to. A ladder walking off the
+end of the frame could still produce the right `acc`.
+
+**Two aliasing rules the call ABI exists to enforce**, both found by reading the routines
+rather than by testing:
+
+- **`MulMod256`'s `Ro` must not alias `RFirst` or `RSecond`.** Its first instruction writes
+  `Ro0` and its second writes `Ro2`, while `RFirst2` is not read until the fifth. The C++
+  this mirrors is `mul_mod(acc, acc, tmp)` — in-place, and recorded in DEVPLAN as safe — so
+  a direct transcription would have been silently wrong.
+- **`SubMod256` *is* alias-safe** and is used that way (`Ro=RFirst`) to save eight copies:
+  it is a straight elementwise pass in increasing index order, so instruction *k* writes
+  `Ro_k` in the same instruction that reads both inputs at *k*, and the second half touches
+  only `Ro`.
 
 **C8 applies to the check.** `MulMod256` is arithmetically correct but non-canonical — on
 hardware it returns `p+1` where `1` is correct. Compare against `EcInt::MulModP`, which

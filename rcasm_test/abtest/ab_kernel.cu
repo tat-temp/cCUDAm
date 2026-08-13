@@ -6,9 +6,15 @@
 // this is deliberately not a reduced stand-in, because the parameter ABI is one of the
 // things under test.
 //
-// Stage 1b semantics:
+// Stage 1b semantics (default):
 //     Px       = mul_mod(x1, y1)      <- the operation being compared
 //     Py       = y1                   <- identity
+//     scalars  = s1                   <- identity
+//     counts   = rem                  <- identity
+//
+// Stage 2a semantics (-DSTAGE_SUFP=1), mirroring GpuCore.cu:224-233 exactly:
+//     Px       = acc                  <- the whole suffix product
+//     Py       = subp[half-1]         <- read back out of the local frame
 //     scalars  = s1                   <- identity
 //     counts   = rem                  <- identity
 //
@@ -65,6 +71,32 @@ __global__ void TestKernel(
     // write anything at all.
     if ((rem[0] | rem[1] | rem[2] | rem[3]) == 0ull) return;
 
+#if STAGE_SUFP
+    // The suffix-product ladder, transcribed from GpuCore.cu with nothing else attached.
+    // subp lives in a local array of the same shape as the real kernel's so the frame is
+    // the same 16 KB and the two sides are comparable on cost as well as on answers.
+    const uint32_t half = batch_size >> 1;
+    uint64_t subp[MAX_BATCH_SIZE / 2][4];
+    uint64_t acc[4], tmp[4];
+
+    sub_mod(acc, c_Jx, x1);
+    #pragma unroll
+    for (int k = 0; k < 4; k++) subp[half - 1][k] = acc[k];
+
+    for (int i = (int)half - 2; i >= 0; --i) {
+        sub_mod(tmp, &c_Gx[(size_t)(i + 1) * 4], x1);
+        mul_mod(acc, acc, tmp);
+        subp[i][0] = acc[0]; subp[i][1] = acc[1]; subp[i][2] = acc[2]; subp[i][3] = acc[3];
+    }
+
+    for (int k = 0; k < 4; k++) {
+        const uint64_t idx = gid * 4 + k;
+        Px[idx]            = acc[k];
+        Py[idx]            = subp[half - 1][k];   // written before the loop, highest address
+        start_scalars[idx] = s1[k];
+        counts256[idx]     = rem[k];
+    }
+#else
     uint64_t prod[4];
     mul_mod(prod, x1, y1);
 
@@ -75,4 +107,5 @@ __global__ void TestKernel(
         start_scalars[idx] = s1[k];
         counts256[idx]     = rem[k];
     }
+#endif
 }

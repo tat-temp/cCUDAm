@@ -6,11 +6,15 @@
 #   id     identity only         -- if this faults, the fault is in the prologue/IO
 #   local  + STL/LDL             -- if only this and full fault, it is local memory
 #   call   + call_func           -- if only this and full fault, it is the call
-#   full   both
+#   full   both                  == stage 1b
+#   sufp   + the suffix-product ladder (stage 2a): a real loop, dynamically indexed
+#          constant loads, STL at a computed address. Run against its OWN compiled
+#          counterpart and its own oracle, so unlike the rungs below it a mismatch here
+#          is a real failure rather than an expected one.
 #
-# A mismatch verdict is EXPECTED for id/local/call: they compute different things from
-# the compiled kernel by construction. The only thing being read here is whether the
-# LAUNCH completes.
+# A mismatch verdict is EXPECTED for id/local: they compute different things from the
+# compiled kernel by construction. The only thing being read on those rungs is whether
+# the LAUNCH completes. call, full and sufp are held to the answers.
 #
 # ANSWERED 2026-08-14. local and full faulted, id and call did not, which named the
 # .128 local access -- Prod was bound to R50 and a .128 op needs a register that is a
@@ -23,11 +27,15 @@ cd "$(dirname "$0")"
 [ -x ./abtest ] || { echo "build first: ./build.sh"; exit 1; }
 
 fault=""
-for n in id local call full; do
+for n in id local call full sufp; do
     f="../../asm/tk/TestKernel_$n.cubin"
     printf '######## %-5s ' "$n"
     if [ ! -f "$f" ]; then echo "-- MISSING $f"; continue; fi
-    out=$(./abtest ab_compiled.cubin "$f" 256 2>&1)
+    if [ "$n" = sufp ]; then
+        out=$(./abtest ab_compiled_sufp.cubin "$f" 256 1 sufp 2>&1)
+    else
+        out=$(./abtest ab_compiled.cubin "$f" 256 1 mul 2>&1)
+    fi
     err=$(echo "$out" | grep -E 'cuCtxSynchronize \(kernel\)|cuModuleLoad|cuLaunchKernel' | head -1)
     if [ -n "$err" ]; then
         echo "########"
@@ -36,7 +44,7 @@ for n in id local call full; do
     else
         echo "########"
         echo "  launch completed"
-        echo "$out" | grep -E 'EXACT|NON-CANON|identity check' | sed 's/^/  /'
+        echo "$out" | grep -E 'EXACT|identity check|subp\[half-1\]|A and B' | sed 's/^/  /'
     fi
 done
 

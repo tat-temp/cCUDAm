@@ -58,11 +58,29 @@
 // is therefore 4-aligned, which is also why Kernel02 places jPntX at R28, TmpTmp at R84
 // and rx at R84: every one of its .128 bases is a multiple of 4. R50/R51 are left unused
 // to keep Prod aligned after the 2-register Thr; that is the price and it is worth it.
+// CALL ABI. Every field routine is reached through a fixed set of registers -- MulA and
+// MulB in, MulR out, MulT scratch -- and callers copy operands in and results out. That
+// is not bureaucracy: `call_func` emits ONE shared body per (function, binding) pair, so
+// a distinct binding at every call site would give ~14 copies of MulMod256's 112
+// instructions. A fixed binding costs at most 8 MOVs per site and keeps one body.
+//
+// **Ro MUST NOT alias RFirst or RSecond for MulMod256.** Its first instruction writes Ro0
+// and its second writes Ro2, while RFirst2 is not read until the fifth -- so the C++ this
+// mirrors, `mul_mod(acc, acc, tmp)`, CANNOT be transcribed directly even though in-place
+// aliasing is safe in the C++ version. Hence MulR separate from MulA/MulB, and the copy
+// back into MulA after each multiply.
+//
+// SubMod256 *is* alias-safe and is used that way (Ro=RFirst) to save a copy: it is a
+// straight elementwise pass in increasing index order, so instruction k writes Ro_k in
+// the same instruction that reads RFirst_k and RSecond_k, and nothing later reads either
+// input again -- the second half touches only Ro.
 KERNEL TestKernel(regcnt=255, \
-    ThrID=R2, BlockID=R3, gID=R4, TmpA=R5, TmpB=R6, \
+    ThrID=R2, BlockID=R3, gID=R4, TmpA=R5, TmpB=R6, Idx=R7, \
     PntX=R8, PntY=R16, Scal=R24, Rem=R32, \
     AddrX=R40, AddrY=R42, AddrS=R44, AddrC=R46, Thr=R48, \
-    Prod=R52, Tmp=R60, \
+    COfs=R50, SAdr=R51, \
+    MulA=R52, MulB=R60, MulR=R68, Prod=R68, Half=R76, \
+    Tmp=R84, \
     uDesc=UR4, uCallM=UR6 )
 {
 //---- frame ------------------------------------------------------------------------
@@ -160,15 +178,18 @@ KERNEL TestKernel(regcnt=255, \
 // on hardware, it returns p+1 where 1 is correct. The host side of this check must
 // compare against EcInt::MulModP, which shares the convention, or against Python
 // (a*b) % P with the same allowance. Do not "fix" it here.
-// The regions below are delimited so variants.py can cut them out and build a bisect
-// ladder -- identity / +local memory / +call / both. A fault that only appears in one
-// variant names its own cause; guessing at an ILLEGAL_INSTRUCTION from the disassembly
-// does not.
+// STAGE 1b IS COMMENTED OUT, and that is the convention for this file: **main.asm is
+// always the CURRENT stage, never a union of stages.** variants.py reconstructs the
+// earlier rungs by uncommenting these regions and cutting the later ones. Leaving both
+// active would not be a superset kernel, it would be a meaningless one -- stage 2a's
+// ladder writes subp[0] to [R1], the exact slot the round trip below uses, and its
+// MulMod256 calls overwrite MulR, which is where Prod lives. It would still assemble,
+// still load, and still produce numbers.
 //@@CALL_BEGIN
-    [B0-----:R-:W-:-:S01]    NOP
-    [B-1----:R-:W-:-:S02]    NOP
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointA
-call_func MulMod256(RFirst=PntX, RSecond=PntY, Ro=Prod, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointA
+//  [B0-----:R-:W-:-:S01]    NOP
+//  [B-1----:R-:W-:-:S02]    NOP
+//  [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointA
+//call_func MulMod256(RFirst=PntX, RSecond=PntY, Ro=Prod, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointA
 //@@CALL_END
 
 // Local-frame round trip. R1 is the frame pointer set up above. Prod MUST be 4-aligned
@@ -177,22 +198,104 @@ call_func MulMod256(RFirst=PntX, RSecond=PntY, Ro=Prod, Rt=Tmp, Pt=0, Ret="[B---
 // CUDA_ERROR_ILLEGAL_INSTRUCTION, while the identical stream minus these four
 // instructions ran clean.
 //@@LOCAL_BEGIN
-    [B------:R-:W-:-:S02]    STL.128 [R1], Prod0
-    [B------:R-:W-:-:S02]    STL.128 [R1+0x10], Prod4
-    [B------:R-:W0:-:S01]    LDL.128 Prod0, [R1]
-    [B------:R-:W0:-:S02]    LDL.128 Prod4, [R1+0x10]
-    [B0-----:R-:W-:-:S02]    NOP
+//  [B------:R-:W-:-:S02]    STL.128 [R1], Prod0
+//  [B------:R-:W-:-:S02]    STL.128 [R1+0x10], Prod4
+//  [B------:R-:W0:-:S01]    LDL.128 Prod0, [R1]
+//  [B------:R-:W0:-:S02]    LDL.128 Prod4, [R1+0x10]
+//  [B0-----:R-:W-:-:S02]    NOP
 //@@LOCAL_END
 
 //====================================================================================
-// STAGE 2 GOES HERE: the batch loop.
-//   suffix products -> STL subp[]      (SubMod256, MulMod256)
+// STAGE 2a -- the suffix-product ladder. Mirrors GpuCore.cu:224-233:
+//
+//     sub_mod(acc, c_Jx, x1);
+//     subp[half-1] = acc;
+//     for (i = half-2; i >= 0; --i) {
+//         sub_mod(tmp, &c_Gx[(i+1)*4], x1);
+//         mul_mod(acc, acc, tmp);
+//         subp[i] = acc;
+//     }
+//
+// Three mechanisms appear here for the first time, and each is the kind of thing that
+// fails silently rather than loudly:
+//   * a real loop -- backward `BRA.U` to a label, Kernel02's own idiom (main.asm:92);
+//   * a dynamically indexed constant load, `LDC.64 Rd, c[0x3][Rofs+imm]`, which is what
+//     ptxas emits for exactly this access (GpuCore_sm120.asm:1534) -- warp-uniform, so
+//     it broadcasts and does not serialise;
+//   * STL at a COMPUTED address rather than a constant offset off R1.
+//
+// The loop variable is the BYTE OFFSET, not the index. That kills three instructions per
+// iteration -- no shift to get half from B, and no IMAD to turn an index back into an
+// offset -- and it also keeps the exit test on an UNSIGNED compare against RZ. Writing
+// the C++ loop literally as `i >= 0` would need a signed `ISETP.GE`, one more instruction
+// form to be unsure of in the encoder repository, where `ISETP.NE.U32` is already used
+// above. COfs counts down j = half-1 .. 1 in units of 32 bytes; at j the constant index
+// is j and the store index is j-1, which is exactly the C++ (i+1) and i.
+//@@SUFP_BEGIN
+//---- acc = SubMod256(c_Jx, x1) ; subp[half-1] = acc ---------------------------------
+// c_Jx is at c[0x3][0x20] in the -rdc layout. Loaded into MulB and reduced in place,
+// straight into MulA, which is where the accumulator lives for the rest of the ladder.
+    [B------:R-:W0:-:S01]    LDC.64 MulB0, c[0x3][0x20]
+    [B------:R-:W0:-:S01]    LDC.64 MulB2, c[0x3][0x28]
+    [B------:R-:W0:-:S01]    LDC.64 MulB4, c[0x3][0x30]
+    [B------:R-:W0:-:S01]    LDC.64 MulB6, c[0x3][0x38]
+    [B------:R-:W1:-:S02]    LDC Half, c[0x0][0x3b0]
+    [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointA
+call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointA
+
+// COfs = half*32 = B*16 -- the multiply by 16 is where `half = B >> 1` gets absorbed, so
+// no shift instruction is needed. SAdr = R1 + COfs, putting subp[half-1] at [SAdr-0x20].
+    [B-1----:R-:W-:-:S01]    IMAD COfs, Half, 0x10, RZ
+    [B------:R-:W-:-:S01]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+    [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
+    [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
+
+//---- for (j = half-1; j >= 1; --j) --------------------------------------------------
+    [B------:R-:W-:-:S01]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
+    [B------:R-:W-:-:S01]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
+    [B------:R-:W-:Y:S04] @!P0 BRA.U `(.label_sufp_end)
+
+.label_sufp_loop:
+// c_Gx is at c[0x3][0x4040]; element j starts at 0x4040 + j*32. The store goes to
+// subp[j-1] = R1 + (j-1)*32 = (R1 + j*32) - 0x20.
+    [B------:R-:W-:-:S01]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+    [B------:R-:W0:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
+    [B------:R-:W0:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
+    [B------:R-:W0:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
+    [B------:R-:W0:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
+// MulB = c_Gx[j] - x1, in place (SubMod256 is alias-safe; see the KERNEL note).
+    [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointB
+call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointB
+// MulR = MulA * MulB. Ro is deliberately NOT MulA -- MulMod256 clobbers Ro while still
+// reading its inputs.
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointC
+call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointC
+// acc = MulR
+    [B------:R-:W-:-:S01]    IMAD MulA0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV MulA1, MulR1
+    [B------:R-:W-:-:S01]    IMAD MulA2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV MulA3, MulR3
+    [B------:R-:W-:-:S01]    IMAD MulA4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV MulA5, MulR5
+    [B------:R-:W-:-:S01]    IMAD MulA6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S02]    MOV MulA7, MulR7
+// subp[j-1] = acc
+    [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
+    [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
+
+    [B------:R-:W-:-:S01]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
+    [B------:R-:W-:-:S01]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
+    [B------:R-:W-:Y:S04] @P0 BRA.U `(.label_sufp_loop)
+.label_sufp_end:
+//@@SUFP_END
+
+//====================================================================================
+// STAGE 2b-2d GO HERE:
 //   one inversion                      (call_func InvMod256)
 //   the +/- walk    -> LDL subp[]      (SubMod256, MulMod256, SqrAddMod256,
 //                                       SubMod256_3, NegMod256)
 //   the point jump
-//   Scal += B ; Rem -= B
-// Stage 1 falls straight through to the write-back, which makes it an identity kernel.
+//   Scal += B ; Rem -= B  and the outer batch loop
 //====================================================================================
 
 //---- write back -------------------------------------------------------------------
@@ -200,10 +303,10 @@ call_func MulMod256(RFirst=PntX, RSecond=PntY, Ro=Prod, Rt=Tmp, Pt=0, Ret="[B---
 // no-call variants Prod is never written, so those store PntX instead and stay a pure
 // identity kernel.
 //@@STOREPROD_BEGIN
-    [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], Prod0
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], Prod2
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], Prod4
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], Prod6
+//  [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], Prod0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], Prod2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], Prod4
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], Prod6
 //@@STOREPROD_END
 //@@STOREPNTX_BEGIN
 //  [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], PntX0
@@ -211,10 +314,31 @@ call_func MulMod256(RFirst=PntX, RSecond=PntY, Ro=Prod, Rt=Tmp, Pt=0, Ret="[B---
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], PntX4
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], PntX6
 //@@STOREPNTX_END
-    [B-1----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], PntY0
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], PntY2
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], PntY4
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], PntY6
+// Stage 2a's write-back: Px = acc (the whole suffix product) and Py = subp[half-1] read
+// back out of the frame. Py is deliberately NOT acc -- it is the value stored BEFORE the
+// loop, at the highest address in subp[], so reading it back after 511 stores is what
+// says the ladder wrote where it meant to. If STL had been walking off the end of the
+// frame, acc could still come out right while this came out wrong.
+//@@STOREACC_BEGIN
+    [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], MulA0
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], MulA2
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], MulA4
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], MulA6
+    [B------:R-:W-:-:S01]    IMAD COfs, Half, 0x10, RZ
+    [B------:R-:W-:-:S01]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+    [B------:R-:W0:-:S01]    LDL.128 MulB0, [SAdr+-0x20]
+    [B------:R-:W0:-:S02]    LDL.128 MulB4, [SAdr+-0x10]
+    [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], MulB0
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], MulB2
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], MulB4
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], MulB6
+//@@STOREACC_END
+//@@STOREPNTY_BEGIN
+//  [B-1----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], PntY0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], PntY2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], PntY4
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], PntY6
+//@@STOREPNTY_END
     [B--2---:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64], Scal0
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x8], Scal2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x10], Scal4
