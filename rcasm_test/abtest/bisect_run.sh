@@ -23,6 +23,15 @@
 # the run also produced the first real result: `call` matched the compiled kernel EXACTLY
 # (253 EXACT / 3 non-canonical / 0 wrong, same as side A), so call_func and MulMod256 are
 # both correct on hardware.
+#
+# 2026-08-14, second run: nothing faults any more -- the S05 stall fix closed the
+# ILLEGAL_ADDRESS -- but `sufp` now answers WRONG on all 256 threads, Px and Py alike.
+# Py is the informative half: it is subp[half-1] = (Jx - x1), stored BEFORE the loop and
+# read back after it, and the loop only ever writes BELOW that slot, so a wrong Py means
+# the PRE-LOOP step is wrong and Px merely inherits it. That step is three mechanisms:
+# the constant-bank read, SubMod256, and the local round trip at the top of the frame.
+# Every one of them was checked in the disassembly and is exactly as written, which is why
+# this rung now dumps the VALUE rather than the verdict -- see explain_py() in abtest.cpp.
 cd "$(dirname "$0")"
 [ -x ./abtest ] || { echo "build first: ./build.sh"; exit 1; }
 
@@ -44,7 +53,11 @@ for n in id local call full sufp; do
     else
         echo "########"
         echo "  launch completed"
-        echo "$out" | grep -E 'EXACT|identity check|subp\[half-1\]|A and B' | sed 's/^/  /'
+        # Let the whole diagnostic block through, not just the verdict line. When a rung
+        # is held to its answer, "WRONG 256" is the least useful thing the harness knows;
+        # the value it actually computed is the thing that names the cause.
+        echo "$out" | grep -E 'EXACT|identity check|subp\[half-1\]|A and B|first wrong|^ +(x1|Jx|a|b|want|got) +:|==>' \
+                    | sed 's/^/  /'
     fi
 done
 

@@ -230,7 +230,53 @@ static int upload_const(CUmodule m, const char* sym, const void* src, size_t n)
 		return 1;
 	}
 	if (sz < n) { printf("  FAIL  %s is %zu bytes, wanted %zu\n", sym, sz, n); return 1; }
-	return chk(cuMemcpyHtoD(d, src, n), sym) ? 0 : 1;
+	if (!chk(cuMemcpyHtoD(d, src, n), sym)) return 1;
+
+	// Read it straight back through the same pointer. This does NOT prove the kernel sees
+	// it -- an sm_120 cubin carries the user constant bank twice, as .nv.constant3 and as
+	// .nv.merc.nv.constant.user, and this only checks whichever one the symbol names -- but
+	// it separates "the upload failed" from "the upload landed somewhere the kernel does
+	// not read". Those are different bugs with different fixes, and neither is visible to
+	// any check that stops at cuModuleGetGlobal returning success.
+	std::vector<unsigned char> back(n);
+	if (!chk(cuMemcpyDtoH(back.data(), d, n), sym)) return 1;
+	if (memcmp(back.data(), src, n)) {
+		printf("  FAIL  %s does not read back as uploaded\n", sym);
+		return 1;
+	}
+	return 0;
+}
+
+static void dump256(const char* tag, const uint64_t v[4])
+{
+	printf("        %-5s: %016llx %016llx %016llx %016llx\n", tag,
+	       (unsigned long long)v[3], (unsigned long long)v[2],
+	       (unsigned long long)v[1], (unsigned long long)v[0]);
+}
+
+// Py in sufp mode is subp[half-1] = (Jx - x1), the value stored BEFORE the ladder's loop.
+// It depends on three mechanisms and nothing else -- the constant-bank read, the modular
+// subtract, and the local round trip at the top of the frame -- so a wrong value here says
+// far more than a wrong count does. Each hypothesis below is a specific way one of those
+// three fails, and they produce arithmetically distinct results.
+//
+// "Jx read as zero" is the one worth naming: stage 2a is the first hand-written code in
+// this project to touch constant bank 3 at all, so "the tables never reached this module"
+// is untested rather than unlikely -- and it is invisible to every check that does not
+// launch, because the symbols resolve and the bank is the right size either way.
+static void explain_py(const uint64_t got[4], const uint64_t x1[4], const uint64_t jx[4])
+{
+	const uint64_t zero[4] = {0, 0, 0, 0};
+	struct { const char* why; uint64_t v[4]; } h[5];
+	int n = 0;
+	submodP(zero, x1, h[n].v); h[n++].why = "Jx READ AS ZERO (0 - x1) -- constant bank 3 never reached this module";
+	submodP(x1, jx, h[n].v);   h[n++].why = "operands swapped (x1 - Jx) -- SubMod256 argument order";
+	memcpy(h[n].v, jx, 32);    h[n++].why = "raw Jx -- the subtract did not happen";
+	memcpy(h[n].v, x1, 32);    h[n++].why = "raw x1 -- Ro aliased RSecond, or nothing was written";
+	memcpy(h[n].v, zero, 32);  h[n++].why = "all zero -- nothing stored, or the readback missed the slot";
+	for (int i = 0; i < n; i++)
+		if (!memcmp(got, h[i].v, 32)) { printf("        ==> %s\n", h[i].why); return; }
+	printf("        ==> matches no simple hypothesis\n");
 }
 
 int main(int argc, char** argv)
@@ -404,7 +450,7 @@ int main(int argc, char** argv)
 	int bad = 0;
 	for (int m = 0; m < 2; m++) {
 		size_t exact = 0, noncanon = 0, wrong = 0, firstWrong = (size_t)-1;
-		size_t idPy = 0, idSc = 0, idCt = 0;
+		size_t idPy = 0, idSc = 0, idCt = 0, firstPy = (size_t)-1;
 		for (size_t t = 0; t < threads; t++) {
 			uint64_t want[4], got[4], a[4], b[4];
 			for (int k = 0; k < 4; k++) {
@@ -435,7 +481,10 @@ int main(int argc, char** argv)
 				default: wrong++; if (firstWrong == (size_t)-1) firstWrong = t; break;
 			}
 			for (int k = 0; k < 4; k++) {
-				if (outPy[m][t * 4 + k] != wantPy[k]) idPy++;
+				if (outPy[m][t * 4 + k] != wantPy[k]) {
+					idPy++;
+					if (firstPy == (size_t)-1) firstPy = t;
+				}
 				if (outSc[m][t * 4 + k] != hs[t * 4 + k]) idSc++;
 				if (outCt[m][t * 4 + k] != hc[t * 4 + k]) idCt++;
 			}
@@ -474,6 +523,22 @@ int main(int argc, char** argv)
 			       (unsigned long long)outPx[m][firstWrong * 4 + 2],
 			       (unsigned long long)outPx[m][firstWrong * 4 + 1],
 			       (unsigned long long)outPx[m][firstWrong * 4 + 0]);
+		}
+		// Py is dumped even though Px already is: in sufp mode Py is the FIRST step of the
+		// ladder and Px is the last, so when both are wrong Py is the one that names the
+		// cause. Px inherits any error Py has.
+		if (idPy) {
+			uint64_t a[4], wp[4];
+			for (int k = 0; k < 4; k++) a[k] = hx[firstPy * 4 + k];
+			if (sufp) submodP(jx, a, wp);
+			else      memcpy(wp, &hy[firstPy * 4], sizeof(wp));
+			printf("      first wrong Py at thread %zu%s\n", firstPy,
+			       sufp ? "   (subp[half-1] = Jx - x1, stored before the loop)" : "");
+			dump256("x1", a);
+			if (sufp) dump256("Jx", jx);
+			dump256("want", wp);
+			dump256("got", &outPy[m][firstPy * 4]);
+			if (sufp) explain_py(&outPy[m][firstPy * 4], a, jx);
 		}
 		if (idPy || idSc || idCt) bad = 1;
 	}

@@ -16,7 +16,7 @@ RCASM=/path/to/RCAsm ./build.sh
 |---|---|---|
 | 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
 | 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
-| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **builds, alignment-clean** — 256 instructions, not yet run |
+| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **runs, answer wrong** — 256 instructions, under diagnosis |
 | 2b–2d | `InvMod256`, the ± walk, the point jump, the outer batch loop | not written |
 
 **Stage 1b matches the compiled kernel exactly on an RTX 5090** — 253 EXACT, 3 non-canonical,
@@ -45,6 +45,27 @@ and `rem` stay identity. That makes the two remaining unknowns falsifiable on th
 - **Register bindings resolve.** The body opens with
   `IMAD.WIDE.U32 R50, R8, R16, RZ` = `Ro0 = RFirst0 * RSecond0` with `Ro=Prod(R50)`,
   `RFirst=PntX(R8)`, `RSecond=PntY(R16)`.
+
+**Stage 2a launches cleanly and computes the wrong answer** (2026-08-14): all 256 threads
+WRONG, `Px` and `Py` alike. `Py` is the half that localises it — it is `subp[half-1]`,
+stored *before* the loop and read back *after* it, and the loop only ever writes below
+that slot, so the pre-loop step is what is wrong and `Px` merely inherits it. That step is
+three mechanisms: the constant-bank read, `SubMod256`, and the local round trip at the top
+of the frame. All three were read back out of the disassembly and are exactly as written —
+including all three `BRXU` call/return displacements, both branch targets, and `c_Gx`'s
+`0x4040` base, which ptxas itself materialises as `MOV R6, 0x4040`. So the next step is to
+read the *value* rather than the verdict; `abtest` now dumps the first wrong `Py` and tests
+it against named hypotheses (`explain_py`).
+
+The leading one is **the constant bank never reaching this module.** An sm_120 cubin
+carries the user constant bank twice — `.nv.constant3` and `.nv.merc.nv.constant.user`,
+with a second symbol table (`.nv.merc.symtab`) naming the latter. nvcc emits both section
+headers pointing at *the same file bytes*; cuAssembler's ELF writer gives them **two
+separate copies**. Both symbol tables carry identical values in both cubins, so every
+offline check passes, and stage 2a is the first hand-written code in this project to read
+bank 3 at all — so "the tables resolve but the kernel reads the other copy" is untested
+rather than unlikely. `upload_const` now reads each table straight back after uploading,
+which separates a failed upload from one that landed where the kernel does not look.
 
 Stage 2a is the suffix-product ladder from `GpuCore.cu:224-233`, and it adds three
 mechanisms at once: a real backward-branch loop, a dynamically indexed constant load
