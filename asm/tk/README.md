@@ -17,7 +17,8 @@ RCASM=/path/to/RCAsm ./build.sh
 | 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
 | 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
 | 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **runs on hardware, A and B agree, 256/256 EXACT** — 256 instructions |
-| 2b–2d | `InvMod256`, the ± walk, the point jump, the outer batch loop | not written |
+| 2b | the single modular inversion: `call_func InvMod256` | **assembles and checks clean** — 976 instructions, awaiting a run |
+| 2c–2d | the ± walk, the point jump, the outer batch loop | not written |
 
 **Stage 2a matches the compiled kernel on an RTX 5090** — 256 EXACT out of 256 on both the
 accumulator and the frame slot, A and B agreeing on every output limb. That covers a real
@@ -36,6 +37,31 @@ slot read back out of local memory as `Py`. That is what separated the last two 
 came back exact while `Py` was wrong, which said the arithmetic was right and the frame
 round-trip was not. A write-back that only reported the accumulator would have called that
 run a pass.
+
+**Stage 2b is written and has not run.** It is the single `InvMod256` — one inversion per B
+keys, which is the entire reason the ladder above it exists. Three things about it shaped
+the code around it, and all three are the kind that fail quietly:
+
+- **It requires all active threads in the warp** (`mod_inv.asm:189`). A data-dependent loop
+  with a warp-collective step, so a thread that reached it by a different path is a hang or
+  a wrong answer for its neighbours. This kernel's two early exits are uniform by
+  construction and that is a **precondition**, not an accident — it is H4's straddling warp
+  under another name.
+- **`Ri` is spoiled** — 9 registers in, destroyed — so `inverse` cannot be built in place
+  the way the C++ writes it. Nine, not eight, because `inv_mod` works on 288 bits; the 9th
+  word does not need zeroing here because `InvMod256` does it itself, exactly as the C++
+  writes `r[8] = 0`.
+- **70 temporaries plus a uniform.** That puts the high-water mark at R197 and is the single
+  largest allocation in the file.
+
+Expect **non-canonical** results rather than reading them as a bug: the tail loop is
+`while ((int)res[8] > 0) sub_288_P(res)`, which stops the instant word 8 is zero and can
+leave the answer anywhere in `[0, 2^256)`. That is C9, and the C++ `inv_mod` has it
+identically — so the two sides agree and the oracle allows the `+P` twin.
+
+The oracle inverts by **Fermat** (`a^(P-2)`), deliberately sharing no structure with the
+binary algorithm it judges — the same reason the C8 vectors came from Python rather than
+from `EcInt`.
 
 **Stage 1b matches the compiled kernel exactly on an RTX 5090** — 253 EXACT, 3 non-canonical,
 0 wrong out of 256 threads, which is *the same verdict side A gets*. That is the first

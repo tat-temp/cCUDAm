@@ -11,6 +11,9 @@
 #          constant loads, STL at a computed address. Run against its OWN compiled
 #          counterpart and its own oracle, so unlike the rungs below it a mismatch here
 #          is a real failure rather than an expected one.
+#   inv    + the single modular inversion (stage 2b): call_func InvMod256, 70 temporaries,
+#          a uniform of its own, and a data-dependent loop that requires all active threads
+#          in the warp. Also its own compiled counterpart and its own oracle.
 #
 # A mismatch verdict is EXPECTED for id/local: they compute different things from the
 # compiled kernel by construction. The only thing being read on those rungs is whether
@@ -36,15 +39,15 @@ cd "$(dirname "$0")"
 [ -x ./abtest ] || { echo "build first: ./build.sh"; exit 1; }
 
 fault=""
-for n in id local call full sufp; do
+for n in id local call full sufp inv; do
     f="../../asm/tk/TestKernel_$n.cubin"
     printf '######## %-5s ' "$n"
     if [ ! -f "$f" ]; then echo "-- MISSING $f"; continue; fi
-    if [ "$n" = sufp ]; then
-        out=$(./abtest ab_compiled_sufp.cubin "$f" 256 1 sufp 2>&1)
-    else
-        out=$(./abtest ab_compiled.cubin "$f" 256 1 mul 2>&1)
-    fi
+    case "$n" in
+        sufp) out=$(./abtest ab_compiled_sufp.cubin "$f" 256 1 sufp 2>&1) ;;
+        inv)  out=$(./abtest ab_compiled_inv.cubin  "$f" 256 1 inv  2>&1) ;;
+        *)    out=$(./abtest ab_compiled.cubin      "$f" 256 1 mul  2>&1) ;;
+    esac
     err=$(echo "$out" | grep -E 'cuCtxSynchronize \(kernel\)|cuModuleLoad|cuLaunchKernel' | head -1)
     if [ -n "$err" ]; then
         echo "########"

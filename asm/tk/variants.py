@@ -13,6 +13,8 @@ correct by hand before the ladder found the real problem (a .128 op on R50).
   full   both                              == stage 1b
   sufp   identity + the suffix-product ladder (stage 2a): a real loop, dynamically
          indexed constant loads, and STL at a computed address
+  inv    stage 2a + the single modular inversion (stage 2b): call_func InvMod256, which
+         needs 70 temporaries, a uniform of its own, and all active threads in the warp
 
 Regions are `//@@NAME_BEGIN` .. `//@@NAME_END`. A region named in `cut` is deleted; one
 named in `on` has its body uncommented; everything else is left as written.
@@ -22,8 +24,8 @@ are reconstructed by uncommenting rather than the latest one by cutting. That is
 stylistic choice: with stage 1b and stage 2a both active the kernel is not a superset, it
 is meaningless -- the ladder writes subp[0] to [R1], the same slot 1b's round trip uses,
 and its MulMod256 calls overwrite the register Prod aliases. It would assemble, load, and
-produce numbers. So `sufp` needs no edits at all, and the rungs below it are the ones
-that get rebuilt.
+produce numbers. So the TOP rung needs no edits at all, and the ones below
+it get rebuilt.
 
 Exactly one of the STORE* regions writes Px in each variant, and exactly one writes Py.
 
@@ -32,12 +34,14 @@ usage: variants.py <main.asm> <outdir> [name ...]
 import re, sys, os
 
 # name  -> (regions to delete, regions to uncomment)
+NOSTORE = ["STOREACC", "STOREINV"]
 VARIANTS = {
-    "id":    (["SUFP", "STOREACC"], ["STOREPNTX", "STOREPNTY"]),
-    "local": (["SUFP", "STOREACC"], ["LOCAL", "STOREPNTX", "STOREPNTY"]),
-    "call":  (["SUFP", "STOREACC", "STOREPNTX"], ["CALL", "STOREPROD", "STOREPNTY"]),
-    "full":  (["SUFP", "STOREACC", "STOREPNTX"], ["CALL", "LOCAL", "STOREPROD", "STOREPNTY"]),
-    "sufp":  ([], []),                              # == main.asm as committed
+    "id":    (["SUFP", "INV"] + NOSTORE, ["STOREPNTX", "STOREPNTY"]),
+    "local": (["SUFP", "INV"] + NOSTORE, ["LOCAL", "STOREPNTX", "STOREPNTY"]),
+    "call":  (["SUFP", "INV", "STOREPNTX"] + NOSTORE, ["CALL", "STOREPROD", "STOREPNTY"]),
+    "full":  (["SUFP", "INV", "STOREPNTX"] + NOSTORE, ["CALL", "LOCAL", "STOREPROD", "STOREPNTY"]),
+    "sufp":  (["INV", "STOREINV"], ["STOREACC"]),
+    "inv":   ([], []),                              # == main.asm as committed
 }
 
 src, outdir = sys.argv[1], sys.argv[2]

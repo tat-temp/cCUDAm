@@ -107,6 +107,25 @@ static void mulmodP(const uint64_t a[4], const uint64_t b[4], uint64_t out[4])
 	memcpy(out, lo, 4 * sizeof(uint64_t));
 }
 
+// 1/a mod P by Fermat: a^(P-2). Deliberately NOT a copy of inv_mod's binary algorithm --
+// the whole value of an oracle is that it shares no structure with the thing it judges, and
+// inv_mod is the routine with a known canonicalization defect (C9). Square-and-multiply
+// over the exponent's bits costs ~380 mulmodP, which against the ladder's 511 per thread is
+// noise. a == 0 has no inverse and is C7; it cannot arise from the harness's operands, and
+// if it ever did this would return 0 and every thread would be reported WRONG, which is the
+// right outcome for an input the kernel has no defined answer for.
+static void invmodP(const uint64_t a[4], uint64_t out[4])
+{
+	uint64_t e[4] = {P[0] - 2, P[1], P[2], P[3]};       // P[0] is 0xFFFFFFFEFFFFFC2F, no borrow
+	uint64_t r[4] = {1, 0, 0, 0}, base[4];
+	memcpy(base, a, sizeof(base));
+	for (int i = 0; i < 256; i++) {
+		if ((e[i >> 6] >> (i & 63)) & 1) mulmodP(r, base, r);
+		mulmodP(base, base, base);
+	}
+	memcpy(out, r, 4 * sizeof(uint64_t));
+}
+
 // Reduce into [0, P). One conditional subtract is enough for any 256-bit input:
 // (2^256 - 1) - P = 2^32 + 976, which is far below P.
 static void canonP(uint64_t a[4])
@@ -201,7 +220,41 @@ static int selftest()
 			bad = 1;
 		}
 	}
-	const size_t ncase = sizeof(T) / sizeof(T[0]) + sizeof(S) / sizeof(S[0]);
+	// invmodP. The round-trip case is the one that matters: a * (1/a) == 1 for an operand
+	// with no structure, which a wrong exponent or a wrong bit order would not survive.
+	struct { const char* what; uint64_t a[4], want[4]; } I[] = {
+		{"1/1",     {1,0,0,0}, {1,0,0,0}},
+		{"1/2",     {2,0,0,0}, {HALF[0],HALF[1],HALF[2],HALF[3]}},
+		{"1/(P-1)", {P[0]-1,P[1],P[2],P[3]}, {P[0]-1,P[1],P[2],P[3]}},   // (P-1)^2 == 1
+	};
+	for (auto& t : I) {
+		uint64_t got[4];
+		invmodP(t.a, got);
+		if (memcmp(got, t.want, sizeof(got))) {
+			printf("  ORACLE SELFTEST FAILED: invmodP %s\n", t.what);
+			printf("    want %016llx %016llx %016llx %016llx\n",
+			       (unsigned long long)t.want[3], (unsigned long long)t.want[2],
+			       (unsigned long long)t.want[1], (unsigned long long)t.want[0]);
+			printf("    got  %016llx %016llx %016llx %016llx\n",
+			       (unsigned long long)got[3], (unsigned long long)got[2],
+			       (unsigned long long)got[1], (unsigned long long)got[0]);
+			bad = 1;
+		}
+	}
+	{
+		const uint64_t a[4] = {0x9E3779B97F4A7C15ull, 0xBB67AE8584CAA73Bull,
+		                       0x3C6EF372FE94F82Bull, 0x510E527FADE682D1ull};
+		uint64_t inv[4], back[4];
+		invmodP(a, inv);
+		mulmodP(a, inv, back);
+		const uint64_t one[4] = {1, 0, 0, 0};
+		if (memcmp(back, one, sizeof(back))) {
+			printf("  ORACLE SELFTEST FAILED: invmodP round trip a*(1/a) != 1\n");
+			bad = 1;
+		}
+	}
+	const size_t ncase = sizeof(T) / sizeof(T[0]) + sizeof(S) / sizeof(S[0])
+	                   + sizeof(I) / sizeof(I[0]) + 1;
 	if (!bad) printf("oracle : selftest passed (%zu cases)\n", ncase);
 	return bad;
 }
@@ -264,6 +317,30 @@ static void dump256(const char* tag, const uint64_t v[4])
 // this project to touch constant bank 3 at all, so "the tables never reached this module"
 // is untested rather than unlikely -- and it is invisible to every check that does not
 // launch, because the symbols resolve and the bank is the right size either way.
+// The expected Px for the two ladder modes, in one place. It was written out twice -- once
+// for the tally and once for the failure dump -- and a mode added to one and not the other
+// is a harness that reports a mismatch against a stale expectation, which is the H14 shape:
+// a test whose answer drifted from what it is testing.
+//
+//   sufp:  acc = (Jx - x1) * prod_{j=1..half-1}(Gx[j] - x1)          <- GpuCore.cu:224-233
+//   inv:   1 / (acc * (Gx[0] - x1))                                  <- GpuCore.cu:236-239
+static void wantPx_ladder(const uint64_t jx[4], const uint64_t* gx, unsigned half,
+                          const uint64_t x1[4], bool invm, uint64_t out[4])
+{
+	submodP(jx, x1, out);
+	for (unsigned j = half - 1; j >= 1; --j) {
+		uint64_t d[4];
+		submodP(&gx[(size_t)j * 4], x1, d);
+		mulmodP(out, d, out);
+	}
+	if (invm) {
+		uint64_t d0[4];
+		submodP(&gx[0], x1, d0);
+		mulmodP(out, d0, out);
+		invmodP(out, out);
+	}
+}
+
 static void explain_py(const uint64_t got[4], const uint64_t x1[4], const uint64_t jx[4])
 {
 	const uint64_t zero[4] = {0, 0, 0, 0};
@@ -286,7 +363,7 @@ int main(int argc, char** argv)
 	if (argc == 2 && !strcmp(argv[1], "--selftest")) return 0;
 	if (argc < 3) {
 		printf("usage: %s <cubinA> <cubinB> [threads] [iters] [mode]\n", argv[0]);
-		printf("       mode = mul (default, stage 1b) | sufp (stage 2a)\n");
+		printf("       mode = mul (default, stage 1b) | sufp (stage 2a) | inv (stage 2b)\n");
 		printf("       %s --selftest        (oracle only, no GPU needed)\n", argv[0]);
 		return 1;
 	}
@@ -294,12 +371,18 @@ int main(int argc, char** argv)
 	const char* pathB = argv[2];
 	const unsigned threads = (argc > 3) ? (unsigned)strtoul(argv[3], nullptr, 0) : 256u;
 	const int iters = (argc > 4) ? atoi(argv[4]) : 1;
-	const bool sufp = (argc > 5) && !strcmp(argv[5], "sufp");
+	// `inv` is a superset of `sufp`: it runs the same ladder and then inverts, so every
+	// place that asks "is the ladder active" asks for sufp, and only the final expected
+	// value differs. Keeping them as two flags rather than one enum is what makes that
+	// relationship visible at each use.
+	const bool invm = (argc > 5) && !strcmp(argv[5], "inv");
+	const bool sufp = invm || ((argc > 5) && !strcmp(argv[5], "sufp"));
 	if (argc > 5 && !sufp && strcmp(argv[5], "mul")) {
-		printf("unknown mode '%s' -- expected mul or sufp\n", argv[5]);
+		printf("unknown mode '%s' -- expected mul, sufp or inv\n", argv[5]);
 		return 1;
 	}
-	printf("mode   : %s\n", sufp ? "sufp (stage 2a -- the suffix-product ladder)"
+	printf("mode   : %s\n", invm ? "inv  (stage 2b -- the ladder plus one InvMod256)"
+	                      : sufp ? "sufp (stage 2a -- the suffix-product ladder)"
 	                             : "mul  (stage 1b -- one MulMod256)");
 	const unsigned block = 256;
 	if (threads % block) { printf("threads must be a multiple of %u\n", block); return 1; }
@@ -445,7 +528,8 @@ int main(int argc, char** argv)
 	                          : "A and B DISAGREE.");
 
 	//---- 2. each vs the oracle ------------------------------------------------------
-	printf(sufp ? "==== each vs the canonical suffix product ====\n"
+	printf(invm ? "==== each vs the canonical inverse ====\n"
+	     : sufp ? "==== each vs the canonical suffix product ====\n"
 	            : "==== each vs canonical (a*b) mod P ====\n");
 	int bad = 0;
 	for (int m = 0; m < 2; m++) {
@@ -459,17 +543,13 @@ int main(int argc, char** argv)
 			}
 			uint64_t wantPy[4];
 			if (sufp) {
-				// acc = (Jx - x1) * prod_{j=1}^{half-1} (Gx[j] - x1), and subp[half-1] is
-				// the first factor on its own -- the value stored before the loop, at the
-				// top of the frame, which is why reading it back says the ladder stored
-				// where it meant to rather than merely computing the right product.
-				submodP(jx, a, want);
-				memcpy(wantPy, want, sizeof(wantPy));
-				for (unsigned j = half - 1; j >= 1; --j) {
-					uint64_t d[4];
-					submodP(&gx[(size_t)j * 4], a, d);
-					mulmodP(want, d, want);
-				}
+				// subp[half-1] is the ladder's first factor on its own -- the value stored
+				// before the loop, at the top of the frame, which is why reading it back
+				// says the ladder stored where it meant to rather than merely computing the
+				// right product. It is the same in both ladder modes on purpose: a stage-2b
+				// failure that is really a stage-2a regression lands on Py, not on Px.
+				submodP(jx, a, wantPy);
+				wantPx_ladder(jx, gx.data(), half, a, invm, want);
 			} else {
 				mulmodP(a, b, want);
 				memcpy(wantPy, b, sizeof(wantPy));      // Py is identity in mul mode
@@ -499,12 +579,7 @@ int main(int argc, char** argv)
 			uint64_t want[4], a[4], b[4];
 			for (int k = 0; k < 4; k++) { a[k] = hx[firstWrong * 4 + k]; b[k] = hy[firstWrong * 4 + k]; }
 			if (sufp) {
-				submodP(jx, a, want);
-				for (unsigned j = half - 1; j >= 1; --j) {
-					uint64_t d[4];
-					submodP(&gx[(size_t)j * 4], a, d);
-					mulmodP(want, d, want);
-				}
+				wantPx_ladder(jx, gx.data(), half, a, invm, want);
 			} else {
 				mulmodP(a, b, want);
 			}

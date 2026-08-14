@@ -71,6 +71,10 @@ __global__ void TestKernel(
     // write anything at all.
     if ((rem[0] | rem[1] | rem[2] | rem[3]) == 0ull) return;
 
+#if STAGE_INV
+#define STAGE_SUFP 1
+#endif
+
 #if STAGE_SUFP
     // The suffix-product ladder, transcribed from GpuCore.cu with nothing else attached.
     // subp lives in a local array of the same shape as the real kernel's so the frame is
@@ -89,9 +93,22 @@ __global__ void TestKernel(
         subp[i][0] = acc[0]; subp[i][1] = acc[1]; subp[i][2] = acc[2]; subp[i][3] = acc[3];
     }
 
+#if STAGE_INV
+    // Stage 2b, GpuCore.cu:236-239. inverse is uint64_t[5] because inv_mod works on 288
+    // bits; sub_mod fills [0..3] and inv_mod writes r[8] = 0 itself.
+    uint64_t inverse[5];
+    sub_mod((uint64_t*)inverse, &c_Gx[0], x1);
+    mul_mod(inverse, inverse, subp[0]);
+    inv_mod((uint32_t*)inverse);
+#endif
+
     for (int k = 0; k < 4; k++) {
         const uint64_t idx = gid * 4 + k;
+#if STAGE_INV
+        Px[idx]            = inverse[k];
+#else
         Px[idx]            = acc[k];
+#endif
         Py[idx]            = subp[half - 1][k];   // written before the loop, highest address
         start_scalars[idx] = s1[k];
         counts256[idx]     = rem[k];

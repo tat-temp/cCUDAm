@@ -161,7 +161,8 @@ KERNEL TestKernel(regcnt=255, \
     COfs=R50, SAdr=R51, \
     MulA=R52, MulB=R60, MulR=R68, Prod=R68, Half=R76, \
     Tmp=R84, \
-    uDesc=UR4, uCallM=UR6 )
+    Inv=R104, InvO=R116, InvT=R128, \
+    uDesc=UR4, uCallM=UR6, uCallI=UR8, uInvT=UR10 )
 {
 //---- frame ------------------------------------------------------------------------
 // The driver hands the thread's local-memory base in c[0x0][0x37c]; the kernel carves
@@ -410,8 +411,85 @@ call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
 //@@SUFP_END
 
 //====================================================================================
-// STAGE 2b-2d GO HERE:
-//   one inversion                      (call_func InvMod256)
+// STAGE 2b -- the single modular inversion. Mirrors GpuCore.cu:236-239:
+//
+//     uint64_t inverse[5];
+//     sub_mod((uint64_t*)inverse, &c_Gx[0], x1);
+//     mul_mod(inverse, inverse, subp[0]);
+//     inv_mod((uint32_t*)inverse);
+//
+// so inverse = 1 / ((Jx - x1) * prod_{j=0..half-1}(c_Gx[j] - x1)). One inversion per B
+// keys is the entire point of the ladder above it.
+//
+// Three things about InvMod256 that shape the code around it:
+//
+//   * IT REQUIRES ALL ACTIVE THREADS IN THE WARP (mod_inv.asm:189). It is a data-dependent
+//     loop with a warp-collective step, so a thread that took a different path to get here
+//     is not merely slow, it is a hang or a wrong answer for the others. This kernel's two
+//     early exits are both taken uniformly by construction -- the harness gives every
+//     thread the same rem -- and that is a PRECONDITION, not an accident. Making it safe in
+//     general is separate work, and it is H4's straddling warp under a different name.
+//   * Ri is SPOILED. The 9-register input is destroyed, so `inverse` cannot be built in
+//     place the way the C++ writes it; Inv holds the argument, InvO the result.
+//   * It costs 70 temporaries plus a uniform. Inv/InvO/InvT put the high-water mark at
+//     R197, still inside the 255 this kernel declares, but it is the single largest
+//     allocation in the file and it is why the register budget cannot come down until the
+//     hash layer's needs are known.
+//
+// Ri_cnt is 9, not 8: inv_mod works on 288 bits. The 9th word does NOT need zeroing here --
+// InvMod256 does it itself (`IMAD val8, RZ, RZ, RZ`, mod_inv.asm:203), exactly as the C++
+// inv_mod writes r[8] = 0 as its second statement.
+//
+// uCallI, not uCallM: InvMod256 takes a uniform temporary of its own, so the return address
+// gets a separate pair. Kernel02 does the same at both of its call sites.
+//
+// C9 CAVEAT, and it is the reason a non-canonical result is expected rather than a bug: the
+// tail loop is `while ((int)res[8] > 0) sub_288_P(res)`, which stops the instant word 8 is
+// zero and can leave the result anywhere in [0, 2^256) rather than [0, P). The C++ inv_mod
+// has the identical defect -- same entry in DEVPLAN -- so the two sides agree and the
+// oracle must allow the +P twin.
+//@@INV_BEGIN
+// d0 = c_Gx[0] - x1, in place into MulB. c_Gx[0] is the base of the table at 0x4040.
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x4040]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x4048]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x4050]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][0x4058]
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointD
+call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointD
+
+// subp[0] out of the frame rather than out of MulA, which still holds the same value. The
+// C++ reads subp[0], and taking it from memory is the only thing that ever reads the
+// BOTTOM of subp[] -- every check so far has read slot half-1 at the top.
+//
+// The B3 wait is load-bearing and barrier_check.py caught it the first time this block was
+// built: THIS LDL is what rewrites MulA, and the loop's last pair of STLs is still holding
+// those registers on the read barrier. Without the wait the ladder's subp[0] would be
+// overwritten by the value being loaded out of subp[0] -- the store racing its own reader.
+// Stage 2a's own drain sits further down in the write-back, which is too late.
+    [B---3--:R-:W0:-:S01]    LDL.128 MulA0, [R1]
+    [B------:R-:W0:-:S02]    LDL.128 MulA4, [R1+0x10]
+
+// MulR = d0 * subp[0]
+    [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointE
+call_func MulMod256(RFirst=MulB, RSecond=MulA, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointE
+
+// Inv = MulR. Alternating IMAD/MOV is Kernel02's copy idiom -- two different pipes, so the
+// pairs dual-issue instead of queueing behind one another.
+    [B------:R-:W-:-:S01]    IMAD Inv0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV Inv1, MulR1
+    [B------:R-:W-:-:S01]    IMAD Inv2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV Inv3, MulR3
+    [B------:R-:W-:-:S01]    IMAD Inv4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV Inv5, MulR5
+    [B------:R-:W-:-:S01]    IMAD Inv6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S05]    MOV Inv7, MulR7
+
+    [B------:R-:W-:-:S01]    UMOV uCallI0, `(.relN_end_InvMod256) //RCASM:CallPointF
+call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallI, 0x00") //RCASM:CallPointF
+//@@INV_END
+
+//====================================================================================
+// STAGE 2c-2d GO HERE:
 //   the +/- walk    -> LDL subp[]      (SubMod256, MulMod256, SqrAddMod256,
 //                                       SubMod256_3, NegMod256)
 //   the point jump
@@ -439,14 +517,36 @@ call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
 // loop, at the highest address in subp[], so reading it back after 511 stores is what
 // says the ladder wrote where it meant to. If STL had been walking off the end of the
 // frame, acc could still come out right while this came out wrong.
+// B3 as well as B0 on the first store: the loop's last pair of STLs is still outstanding on
+// the read barrier when the loop exits, and draining it here keeps "one group per barrier,
+// drained before reuse" true on every path out rather than only inside the loop.
+//
+// A REGION BODY HOLDS INSTRUCTION LINES ONLY. variants.py uncomments a region by stripping
+// the leading `//` from every line between the markers, so a prose line inside one comes
+// back as garbage the assembler is asked to parse. That is why this paragraph sits above
+// the marker and why the two blocks below are duplicated rather than sharing their tail.
 //@@STOREACC_BEGIN
-// B3 as well as B0: the loop's last pair of STLs is still outstanding on the read barrier
-// when the loop exits, and draining it here keeps "one group per barrier, drained before
-// reuse" true on every path out rather than only inside the loop.
-    [B0--3--:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], MulA0
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], MulA2
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], MulA4
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], MulA6
+//  [B0--3--:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], MulA0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], MulA2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], MulA4
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], MulA6
+//  [B------:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
+//  [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+//  [B------:R-:W0:-:S01]    LDL.128 MulB0, [SAdr+-0x20]
+//  [B------:R-:W0:-:S02]    LDL.128 MulB4, [SAdr+-0x10]
+//  [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], MulB0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], MulB2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], MulB4
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], MulB6
+//@@STOREACC_END
+// Stage 2b's write-back: Px = the inverse, Py = subp[half-1] exactly as above. Keeping Py
+// unchanged across the two stages is deliberate -- it means a stage-2b failure that is
+// really a stage-2a regression shows up on Py rather than being blamed on InvMod256.
+//@@STOREINV_BEGIN
+    [B0--3--:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], InvO0
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], InvO2
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], InvO4
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], InvO6
     [B------:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
     [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
     [B------:R-:W0:-:S01]    LDL.128 MulB0, [SAdr+-0x20]
@@ -455,7 +555,7 @@ call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], MulB2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], MulB4
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], MulB6
-//@@STOREACC_END
+//@@STOREINV_END
 //@@STOREPNTY_BEGIN
 //  [B-1----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], PntY0
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], PntY2
