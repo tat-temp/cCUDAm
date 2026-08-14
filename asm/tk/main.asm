@@ -56,16 +56,19 @@
 // When the stale value is an address, that is CUDA_ERROR_ILLEGAL_ADDRESS; when it is not,
 // it is a wrong answer.
 //
-// Minimum stall ptxas itself ever emits when the very NEXT instruction consumes a result,
-// measured over the ~4k control-coded instructions of asm/GpuCore_sm120.asm:
+// What matters is the CUMULATIVE distance from producer to consumer, not the one stall on
+// the producer: issue is in order, so the stall count is exactly how many cycles pass
+// before the next instruction issues, and the running sum is the gap. Measured minimum
+// that ptxas itself ever leaves, per opcode, over the 9,984 control-coded instructions of
+// asm/GpuCore_sm120.asm plus the two compiled kernels in rcasm_test/abtest:
 //
-//     IMAD S03    IADD3 S04    LOP3 S04    SEL S04    ISETP S05    MOV S05    SHF S05
+//     IMAD 3   IADD3 4   LOP3 4   SEL 4   SHF 4   LEA 4   PRMT 4   MOV 4   ISETP->P 5
 //
-// So: **S05 whenever the next instruction reads what this one wrote.** That covers every
-// measured case with one number, and asm/tk/stall_check.py enforces it against the built
-// cubin. Kernel02 uses S04 or more throughout for the same reason. Only ADJACENT pairs
-// need it; two instructions apart, the intervening stall counts too, which is why the
-// rem==0 test below interleaves TmpA and TmpB and can stay at S01.
+// So: **four cycles before a result is read, five for a predicate out of ISETP, three for
+// IMAD.** asm/tk/stall_check.py enforces it against the built cubin. Spreading a chain out
+// counts -- two instructions apart at S02 each is four cycles and is fine -- which is what
+// the interleaved rem==0 test below relies on, though at S01 it only reached two and was
+// wrong for that reason.
 //
 // Stage 2a's ladder was written at S01 and died with ILLEGAL_ADDRESS on its first store:
 // `IMAD COfs, Half, 0x10, RZ` followed immediately by a read of COfs, which at that point
@@ -196,11 +199,17 @@ KERNEL TestKernel(regcnt=255, \
     [B------:R-:W3:-:S02]    LDG.E.64 Rem6, desc[uDesc][AddrC.64+0x18]
 
 //---- if (rem == 0) return ---------------------------------------------------------
-    [B---3--:R-:W-:-:S01]    LOP3.LUT TmpA, Rem0, Rem2, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S01]    LOP3.LUT TmpB, Rem4, Rem6, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S01]    LOP3.LUT TmpA, TmpA, Rem1, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S01]    LOP3.LUT TmpB, TmpB, Rem3, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S01]    LOP3.LUT TmpA, TmpA, Rem5, RZ, 0xfc, !PT
+// S03, not S01. Interleaving the two chains buys each dependency TWO cycles instead of
+// one, which is the right idea and not enough: a LOP3 needs FOUR before its result can be
+// read, measured over ptxas's own output. At S03 each chain gets 3+3=6. This was wrong in
+// every variant from stage 1 onward and no test could see it -- the failure mode is a
+// garbage TmpA, which would have to come out exactly zero to make a thread wrongly exit.
+// Found by stall_check.py only once it started summing across instructions.
+    [B---3--:R-:W-:-:S03]    LOP3.LUT TmpA, Rem0, Rem2, RZ, 0xfc, !PT
+    [B------:R-:W-:-:S03]    LOP3.LUT TmpB, Rem4, Rem6, RZ, 0xfc, !PT
+    [B------:R-:W-:-:S03]    LOP3.LUT TmpA, TmpA, Rem1, RZ, 0xfc, !PT
+    [B------:R-:W-:-:S03]    LOP3.LUT TmpB, TmpB, Rem3, RZ, 0xfc, !PT
+    [B------:R-:W-:-:S03]    LOP3.LUT TmpA, TmpA, Rem5, RZ, 0xfc, !PT
     [B------:R-:W-:-:S05]    LOP3.LUT TmpB, TmpB, Rem7, RZ, 0xfc, !PT
     [B------:R-:W-:-:S05]    LOP3.LUT TmpA, TmpA, TmpB, RZ, 0xfc, !PT
     [B------:R-:W-:Y:S05]    ISETP.EQ.U32.AND P0, PT, TmpA, RZ, PT
