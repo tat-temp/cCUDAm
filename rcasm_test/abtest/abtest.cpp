@@ -325,9 +325,48 @@ static void dump256(const char* tag, const uint64_t v[4])
 //   sufp:  acc = (Jx - x1) * prod_{j=1..half-1}(Gx[j] - x1)          <- GpuCore.cu:224-233
 //   inv:   1 / (acc * (Gx[0] - x1))                                  <- GpuCore.cu:236-239
 //   walk:  prod_{i=0..half-1} dx_inv_i                               <- GpuCore.cu:240-331
-static void wantPx_ladder(const uint64_t jx[4], const uint64_t* gx, unsigned half,
-                          const uint64_t x1[4], bool invm, bool walkm, uint64_t out[4])
+//   pts:   prod over all 2*half-1 points of px3                      <- GpuCore.cu:244-378
+static void wantPx_ladder(const uint64_t jx[4], const uint64_t* gx, const uint64_t* gy,
+                          unsigned half, const uint64_t x1[4], const uint64_t y1[4],
+                          bool invm, bool walkm, bool ptsm, uint64_t out[4])
 {
+	if (ptsm) {
+		// The point arithmetic, from the group law rather than from GpuCore.cu's shape:
+		//     lam = (py_i - y1) / (px_i - x1);  px3 = lam^2 - x1 - px_i
+		// with the minus branch using -py_i, which is the whole of x(-Q) == x(Q). The
+		// accumulator is the product of every px3, so one wrong point moves it -- and a
+		// product is safe under C8 where the parity is not, because a non-canonical factor
+		// is still congruent.
+		//
+		// This inverts EACH (px_i - x1) by Fermat rather than deriving them all from one
+		// inversion. That is 512 exponentiations per thread and it is the point: deriving
+		// them cheaply means running the suffix-product ladder, which is the thing stages
+		// 2a-2c-i were verifying. The cost is why the caller hoists this out of the A/B
+		// loop -- it is computed once per thread, not once per side.
+		uint64_t acc[4] = {1, 0, 0, 0};
+		for (unsigned i = 0; i < half; ++i) {
+			uint64_t d[4], dinv[4];
+			submodP(&gx[(size_t)i * 4], x1, d);
+			invmodP(d, dinv);
+			for (int neg = 0; neg < 2; ++neg) {
+				if (i == half - 1 && neg == 0) continue;   // the tail is minus only
+				uint64_t py[4], s[4], lam[4], px3[4], t[4];
+				memcpy(py, &gy[(size_t)i * 4], sizeof(py));
+				if (neg) {
+					const uint64_t zero[4] = {0, 0, 0, 0};
+					submodP(zero, py, py);                 // -py mod P
+				}
+				submodP(py, y1, s);
+				mulmodP(s, dinv, lam);
+				mulmodP(lam, lam, px3);                    // lam^2
+				submodP(px3, x1, t);
+				submodP(t, &gx[(size_t)i * 4], px3);       // - px_i
+				mulmodP(acc, px3, acc);
+			}
+		}
+		memcpy(out, acc, 4 * sizeof(uint64_t));
+		return;
+	}
 	if (walkm) {
 		// The identity the batch inversion exists for is dx_inv_i == 1/(Gx[i] - x1) at
 		// every i, so their product is 1 / prod_i (Gx[i] - x1). That costs ONE inversion
@@ -380,7 +419,7 @@ int main(int argc, char** argv)
 	if (argc == 2 && !strcmp(argv[1], "--selftest")) return 0;
 	if (argc < 3) {
 		printf("usage: %s <cubinA> <cubinB> [threads] [iters] [mode]\n", argv[0]);
-		printf("       mode = mul (stage 1b) | sufp (2a) | inv (2b) | walk (2c-i)\n");
+		printf("       mode = mul (1b) | sufp (2a) | inv (2b) | walk (2c-i) | pts (2c-ii)\n");
 		printf("       %s --selftest        (oracle only, no GPU needed)\n", argv[0]);
 		return 1;
 	}
@@ -392,14 +431,16 @@ int main(int argc, char** argv)
 	// place that asks "is the ladder active" asks for sufp, and only the final expected
 	// value differs. Keeping them as two flags rather than one enum is what makes that
 	// relationship visible at each use.
-	const bool walkm = (argc > 5) && !strcmp(argv[5], "walk");
+	const bool ptsm = (argc > 5) && !strcmp(argv[5], "pts");
+	const bool walkm = ptsm || ((argc > 5) && !strcmp(argv[5], "walk"));
 	const bool invm = walkm || ((argc > 5) && !strcmp(argv[5], "inv"));
 	const bool sufp = invm || ((argc > 5) && !strcmp(argv[5], "sufp"));
 	if (argc > 5 && !sufp && strcmp(argv[5], "mul")) {
-		printf("unknown mode '%s' -- expected mul, sufp, inv or walk\n", argv[5]);
+		printf("unknown mode '%s' -- expected mul, sufp, inv, walk or pts\n", argv[5]);
 		return 1;
 	}
-	printf("mode   : %s\n", walkm ? "walk (stage 2c-i -- the inverse chain over every subp[i])"
+	printf("mode   : %s\n", ptsm ? "pts  (stage 2c-ii -- the +/- point arithmetic)"
+	                      : walkm ? "walk (stage 2c-i -- the inverse chain over every subp[i])"
 	                       : invm ? "inv  (stage 2b -- the ladder plus one InvMod256)"
 	                       : sufp ? "sufp (stage 2a -- the suffix-product ladder)"
 	                              : "mul  (stage 1b -- one MulMod256)");
@@ -547,33 +588,44 @@ int main(int argc, char** argv)
 	                          : "A and B DISAGREE.");
 
 	//---- 2. each vs the oracle ------------------------------------------------------
-	printf(walkm ? "==== each vs the canonical product of 1/(Gx[i]-x1) ====\n"
+	printf(ptsm ? "==== each vs the canonical product of every px3 ====\n"
+	     : walkm ? "==== each vs the canonical product of 1/(Gx[i]-x1) ====\n"
 	     : invm ? "==== each vs the canonical inverse ====\n"
 	     : sufp ? "==== each vs the canonical suffix product ====\n"
 	            : "==== each vs canonical (a*b) mod P ====\n");
+
+	// Computed ONCE per thread rather than once per side. It used to sit inside the m loop,
+	// which was free when the expectation was a few hundred multiplies; pts mode inverts
+	// every (Gx[i] - x1) by Fermat, and paying that twice for an identical answer is the
+	// kind of waste that turns a check people run into one they skip.
+	std::vector<uint64_t> wantPxAll(nlimb), wantPyAll(nlimb);
+	for (size_t t = 0; t < threads; t++) {
+		uint64_t a[4], b[4];
+		for (int k = 0; k < 4; k++) { a[k] = hx[t * 4 + k]; b[k] = hy[t * 4 + k]; }
+		if (sufp) {
+			// subp[half-1] is the ladder's first factor on its own -- the value stored
+			// before the loop, at the top of the frame, so reading it back says the ladder
+			// stored where it meant to rather than merely computing the right product. It
+			// is the same in every ladder mode on purpose: a failure in the newest stage
+			// that is really a stage-2a regression lands on Py, not on Px.
+			submodP(jx, a, &wantPyAll[t * 4]);
+			wantPx_ladder(jx, gx.data(), gy.data(), half, a, b, invm, walkm, ptsm,
+			              &wantPxAll[t * 4]);
+		} else {
+			mulmodP(a, b, &wantPxAll[t * 4]);
+			memcpy(&wantPyAll[t * 4], b, 4 * sizeof(uint64_t));   // Py is identity in mul mode
+		}
+	}
+
 	int bad = 0;
 	for (int m = 0; m < 2; m++) {
 		size_t exact = 0, noncanon = 0, wrong = 0, firstWrong = (size_t)-1;
 		size_t idPy = 0, idSc = 0, idCt = 0, firstPy = (size_t)-1;
 		for (size_t t = 0; t < threads; t++) {
-			uint64_t want[4], got[4], a[4], b[4];
-			for (int k = 0; k < 4; k++) {
-				a[k] = hx[t * 4 + k]; b[k] = hy[t * 4 + k];
-				got[k] = outPx[m][t * 4 + k];
-			}
-			uint64_t wantPy[4];
-			if (sufp) {
-				// subp[half-1] is the ladder's first factor on its own -- the value stored
-				// before the loop, at the top of the frame, which is why reading it back
-				// says the ladder stored where it meant to rather than merely computing the
-				// right product. It is the same in both ladder modes on purpose: a stage-2b
-				// failure that is really a stage-2a regression lands on Py, not on Px.
-				submodP(jx, a, wantPy);
-				wantPx_ladder(jx, gx.data(), half, a, invm, walkm, want);
-			} else {
-				mulmodP(a, b, want);
-				memcpy(wantPy, b, sizeof(wantPy));      // Py is identity in mul mode
-			}
+			uint64_t want[4], got[4], wantPy[4];
+			for (int k = 0; k < 4; k++) got[k] = outPx[m][t * 4 + k];
+			memcpy(want, &wantPxAll[t * 4], sizeof(want));
+			memcpy(wantPy, &wantPyAll[t * 4], sizeof(wantPy));
 			int kk = 0;
 			switch (classify(got, want, &kk)) {
 				case 0: exact++; break;
@@ -598,11 +650,7 @@ int main(int argc, char** argv)
 			bad = 1;
 			uint64_t want[4], a[4], b[4];
 			for (int k = 0; k < 4; k++) { a[k] = hx[firstWrong * 4 + k]; b[k] = hy[firstWrong * 4 + k]; }
-			if (sufp) {
-				wantPx_ladder(jx, gx.data(), half, a, invm, walkm, want);
-			} else {
-				mulmodP(a, b, want);
-			}
+			memcpy(want, &wantPxAll[firstWrong * 4], sizeof(want));
 			printf("      first wrong at thread %zu\n", firstWrong);
 			printf("        a    : %016llx %016llx %016llx %016llx\n",
 			       (unsigned long long)a[3], (unsigned long long)a[2],

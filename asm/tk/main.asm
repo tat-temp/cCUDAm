@@ -162,6 +162,7 @@ KERNEL TestKernel(regcnt=255, \
     MulA=R52, MulB=R60, MulR=R68, Prod=R68, Half=R76, \
     Tmp=R84, \
     Inv=R104, InvO=R116, InvT=R128, \
+    Lam=R128, PxN=R136, Sqr=R144, SqrT=R152, Pt3T=R178, \
     Rinv=R200, Acc=R208, Dxi=R216, \
     uDesc=UR4, uCallM=UR6, uCallI=UR8, uInvT=UR10 )
 {
@@ -567,9 +568,84 @@ call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:
 // Dxi = subp[i] * inverse  == 1/(c_Gx[i] - x1)
     [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointG
 call_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointG
-// Acc *= Dxi
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointH
-call_func MulMod256(RFirst=Acc, RSecond=Dxi, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointH
+// Stage 2c-i accumulated dx_inv_i itself. Stage 2c-ii accumulates px3 instead, which
+// depends on dx_inv_i through lam, so the coverage carries and this becomes the earlier
+// rung's contribution rather than a second one.
+//@@WACC_BEGIN
+//  [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointH
+//call_func MulMod256(RFirst=Acc, RSecond=Dxi, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointH
+//  [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
+//  [B------:R-:W-:-:S01]    MOV Acc1, MulR1
+//  [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
+//  [B------:R-:W-:-:S01]    MOV Acc3, MulR3
+//  [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
+//  [B------:R-:W-:-:S01]    MOV Acc5, MulR5
+//  [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
+//  [B------:R-:W-:-:S01]    MOV Acc7, MulR7
+//@@WACC_END
+
+//====================================================================================
+// STAGE 2c-ii -- the +/- point arithmetic, GpuCore.cu:244-327. Both branches, and the
+// tail below is the minus branch on its own, exactly as the C++ has it:
+//
+//     px_i = c_Gx[i]; py_i = c_Gy[i];        (minus branch: neg_mod(py_i) first)
+//     sub_mod(s, py_i, y1);
+//     mul_mod(lam, s, dx_inv_i);
+//     sqr_mod(px3, lam);
+//     sub_mod3(px3, px3, x1, px_i);          // lam^2 - x1 - px_i, one reduction
+//     sub_mod(s, x1, px3);
+//     mul_mod(s, s, lam);
+//     sub_mod_is_odd(&odd, s, y1);
+//
+// The two branches are written out twice but share every call BINDING, so RCAsm emits one
+// body per routine and both call points jump to it. That is the whole reason the register
+// names are reused rather than duplicated -- a distinct binding would mean a second copy of
+// SqrMod256's 125 instructions for no gain.
+//
+// Lam/PxN/Sqr/SqrT/Pt3T deliberately OVERLAY InvT. InvMod256 has returned by the time any
+// of this runs and its 70 temporaries are dead; the alternative was to find 60 more
+// registers above R216, which do not exist under a 255 budget.
+//
+// THE PARITY IS COMPUTED AND NOT CHECKED, and the reason is C8 rather than laziness.
+// `odd` is the low bit of (s - y1), and s comes out of MulMod256, which is non-canonical --
+// it can be the true value plus P. P is ODD, so a non-canonical s has the OPPOSITE low bit,
+// and the parity is therefore not a well-defined function of the inputs until C8 is fixed.
+// Any oracle for it would be comparing against a coin flip. It is computed anyway so the
+// instruction mix matches the C++ reference for the eventual speed comparison, and it is
+// what selects the 0x02/0x03 compressed-pubkey prefix once the hash layer returns -- which
+// is exactly why DEVPLAN lists C8 as a silently-missed-key defect and not a cosmetic one.
+//
+// What IS checked is the product of every px3. That is safe under C8 in a way the parity is
+// not: a non-canonical factor is congruent, (a+P)*b == a*b (mod P), so the product is right
+// and may itself land in [P, 2^256), which the oracle allows as NON-CANON.
+//@@PLUS_BEGIN
+//---- the + branch ------------------------------------------------------------------
+// c_Gy is at c[0x3][0x40]; element i starts at 0x40 + i*32, and COfs is already i*32.
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x40]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x48]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x50]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x58]
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointM
+call_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointM
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointN
+call_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointN
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SqrMod256) //RCASM:CallPointO
+call_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointO
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256_3) //RCASM:CallPointP
+call_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointP
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointQ
+call_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointQ
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointR
+call_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointR
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointS
+call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointS
+    [B------:R-:W-:-:S05]    LOP3.LUT TmpA, MulA0, 0x1, RZ, 0xc0, !PT
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointT
+call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointT
     [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
     [B------:R-:W-:-:S01]    MOV Acc1, MulR1
     [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
@@ -578,6 +654,45 @@ call_func MulMod256(RFirst=Acc, RSecond=Dxi, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B-----
     [B------:R-:W-:-:S01]    MOV Acc5, MulR5
     [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
     [B------:R-:W-:-:S01]    MOV Acc7, MulR7
+
+//---- the - branch: identical, on -c_Gy[i]. x(-Q) == x(Q), so dx_inv_i is reused --------
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x40]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x48]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x50]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x58]
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_NegMod256) //RCASM:CallPointU
+call_func NegMod256(Rio=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointU
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointV
+call_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointV
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointW
+call_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointW
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SqrMod256) //RCASM:CallPointX
+call_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointX
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256_3) //RCASM:CallPointY
+call_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointY
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointZ
+call_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointZ
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAA
+call_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAA
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAB
+call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAB
+    [B------:R-:W-:-:S05]    LOP3.LUT TmpA, MulA0, 0x1, RZ, 0xc0, !PT
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAC
+call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAC
+    [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV Acc1, MulR1
+    [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV Acc3, MulR3
+    [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV Acc5, MulR5
+    [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S01]    MOV Acc7, MulR7
+//@@PLUS_END
+
 // gxmi = c_Gx[i] - x1, in place into MulB
     [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
@@ -608,8 +723,49 @@ call_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
     [B------:R-:W0:-:S02]    LDL.128 MulA4, [SAdr+0x10]
     [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointK
 call_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointK
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointL
-call_func MulMod256(RFirst=Acc, RSecond=Dxi, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointL
+//@@WACCT_BEGIN
+//  [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointL
+//call_func MulMod256(RFirst=Acc, RSecond=Dxi, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointL
+//  [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
+//  [B------:R-:W-:-:S01]    MOV Acc1, MulR1
+//  [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
+//  [B------:R-:W-:-:S01]    MOV Acc3, MulR3
+//  [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
+//  [B------:R-:W-:-:S01]    MOV Acc5, MulR5
+//  [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
+//  [B------:R-:W-:-:S05]    MOV Acc7, MulR7
+//@@WACCT_END
+// The tail is the MINUS branch alone -- GpuCore.cu:333-378. Offsets `s1 - half` rather than
+// `s1 + half`, which is what makes consecutive batches abut with no gap and no duplicate.
+// Every call binding here is one the loop above already used, so this costs no new bodies.
+//@@PLUST_BEGIN
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x40]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x48]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x50]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x58]
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_NegMod256) //RCASM:CallPointAD
+call_func NegMod256(Rio=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAD
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAE
+call_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAE
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAF
+call_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAF
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SqrMod256) //RCASM:CallPointAG
+call_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAG
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256_3) //RCASM:CallPointAH
+call_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAH
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAI
+call_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAI
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAJ
+call_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAJ
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAK
+call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAK
+    [B------:R-:W-:-:S05]    LOP3.LUT TmpA, MulA0, 0x1, RZ, 0xc0, !PT
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAL
+call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAL
     [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
     [B------:R-:W-:-:S01]    MOV Acc1, MulR1
     [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
@@ -618,6 +774,7 @@ call_func MulMod256(RFirst=Acc, RSecond=Dxi, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B-----
     [B------:R-:W-:-:S01]    MOV Acc5, MulR5
     [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
     [B------:R-:W-:-:S05]    MOV Acc7, MulR7
+//@@PLUST_END
 //@@WALK_END
 
 //====================================================================================

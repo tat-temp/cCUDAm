@@ -19,7 +19,8 @@ RCASM=/path/to/RCAsm ./build.sh
 | 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **runs on hardware, A and B agree, 256/256 EXACT** — 256 instructions |
 | 2b | the single modular inversion: `call_func InvMod256` | **runs on hardware, A and B agree, 256/256 EXACT** — 976 instructions |
 | 2c-i | the inverse chain: an upward loop over every `subp[i]` | **runs on hardware, A and B agree, 256/256 EXACT** — 1,384 instructions |
-| 2c-ii, 2d | the point arithmetic inside the walk, the point jump, the outer batch loop | not written |
+| 2c-ii | the ± point arithmetic: `SqrMod256`, `SubMod256_3`, `NegMod256` | **assembles and checks clean** — 1,896 instructions, awaiting a run |
+| 2d | the point jump, `Scal += B` / `Rem -= B`, the outer batch loop | not written |
 
 **Stage 2a matches the compiled kernel on an RTX 5090** — 256 EXACT out of 256 on both the
 accumulator and the frame slot, A and B agreeing on every output limb. That covers a real
@@ -94,6 +95,36 @@ forms with 512 multiplies, and never reproduces the suffix-product trick it is j
 Recomputing each `1/(Gx[i]-x1)` directly would have been 512 exponentiations per thread, and
 getting them cheaply would have meant running the same algorithm as the kernel — the H14
 shape again.
+
+**Stage 2c-ii is written and has not run.** It is the ± point arithmetic — both branches and
+the minus-only tail — and it brings the last three vendored routines: `SqrMod256` (125
+instructions, 26 temporaries), `SubMod256_3` and `NegMod256`.
+
+The two branches are written out twice but **share every call binding**, so RCAsm emits one
+body per routine and both call points jump to it. That is the whole reason the register
+names are reused rather than duplicated: a distinct binding would mean a second copy of
+`SqrMod256` for no gain. `Lam`/`PxN`/`Sqr`/`SqrT`/`Pt3T` deliberately **overlay** `InvT` —
+`InvMod256` has returned and its 70 temporaries are dead, and the alternative was finding 60
+more registers that do not exist under a 255 budget.
+
+**The parity is computed and not checked, and the reason is C8.** `odd` is the low bit of
+`s − y1`, and `s` comes out of `MulMod256`, which is non-canonical — it can be the true value
+plus `P`. **`P` is odd**, so a non-canonical `s` has the *opposite* low bit. The parity is
+therefore not a well-defined function of the inputs until C8 is fixed, and any oracle for it
+would be comparing against a coin flip. It is computed anyway so the instruction mix matches
+the reference, and it is what selects the 0x02/0x03 compressed-pubkey prefix once the hash
+layer returns — which is precisely why DEVPLAN files C8 as a silently-missed-key defect
+rather than a cosmetic one.
+
+What *is* checked is the product of every `px3`, and that is safe under C8 in a way the
+parity is not: a non-canonical factor is still congruent, `(a+P)·b ≡ a·b (mod P)`, so the
+product is right and may itself land in `[P, 2^256)`, which the oracle allows.
+
+The oracle inverts **each** `Gx[i] − x1` by Fermat rather than deriving them all from one
+inversion — 512 exponentiations per thread, and that is the point: deriving them cheaply
+means running the suffix-product ladder, which is the thing stages 2a–2c-i were verifying.
+The expectation is now computed **once per thread instead of once per side**, which is what
+keeps that affordable.
 
 Two costs worth naming rather than discovering later: each `MulMod256` **binding** gets its
 own copy of the 112-instruction body, and there are five of them now (976 → 1,384

@@ -17,6 +17,8 @@ correct by hand before the ladder found the real problem (a .128 op on R50).
          needs 70 temporaries, a uniform of its own, and all active threads in the warp
   walk   stage 2b + the inverse chain (stage 2c-i): an UPWARD loop that reads every slot
          of subp[] and advances the inverse, with the point arithmetic still absent
+  pts    stage 2c-i + the +/- point arithmetic (stage 2c-ii): SqrMod256, SubMod256_3 and
+         NegMod256, both branches and the minus-only tail
 
 Regions are `//@@NAME_BEGIN` .. `//@@NAME_END`. A region named in `cut` is deleted; one
 named in `on` has its body uncommented; everything else is left as written.
@@ -44,7 +46,11 @@ VARIANTS = {
     "full":  (["SUFP", "INV", "WALK", "STOREPNTX"] + NOSTORE, ["CALL", "LOCAL", "STOREPROD", "STOREPNTY"]),
     "sufp":  (["INV", "WALK", "STOREINV", "STOREWALK"], ["STOREACC"]),
     "inv":   (["WALK", "STOREWALK"], ["STOREINV"]),
-    "walk":  ([], []),                              # == main.asm as committed
+    # PLUS/PLUST and WACC/WACCT are nested INSIDE the WALK region, so the rungs above that
+    # cut WALK must not name them -- the marker is already gone by the time they are looked
+    # up, and region() exits rather than shrugging.
+    "walk":  (["PLUS", "PLUST"], ["WACC", "WACCT"]),
+    "pts":   ([], []),                              # == main.asm as committed
 }
 
 src, outdir = sys.argv[1], sys.argv[2]
@@ -84,5 +90,5 @@ for name in want:
     cut, on = VARIANTS[name]
     p = os.path.join(outdir, "main_%s.asm" % name)
     open(p, "w").write(build(cut, on))
-    n = sum(1 for ln in open(p) if re.match(r"\s*\[B", ln) or ln.startswith("call_func"))
+    n = sum(1 for ln in open(p) if re.match(r"\s*\[B", ln) or ln.strip().startswith("call_func"))
     print("%-6s -> %s   (%d instruction lines)" % (name, p, n))

@@ -39,7 +39,7 @@ cd "$(dirname "$0")"
 [ -x ./abtest ] || { echo "build first: ./build.sh"; exit 1; }
 
 fault=""
-for n in id local call full sufp inv walk; do
+for n in id local call full sufp inv walk pts; do
     f="../../asm/tk/TestKernel_$n.cubin"
     printf '######## %-5s ' "$n"
     if [ ! -f "$f" ]; then echo "-- MISSING $f"; continue; fi
@@ -47,6 +47,7 @@ for n in id local call full sufp inv walk; do
         sufp) out=$(./abtest ab_compiled_sufp.cubin "$f" 256 1 sufp 2>&1) ;;
         inv)  out=$(./abtest ab_compiled_inv.cubin  "$f" 256 1 inv  2>&1) ;;
         walk) out=$(./abtest ab_compiled_walk.cubin "$f" 256 1 walk 2>&1) ;;
+        pts)  out=$(./abtest ab_compiled_pts.cubin  "$f" 256 1 pts  2>&1) ;;
         *)    out=$(./abtest ab_compiled.cubin      "$f" 256 1 mul  2>&1) ;;
     esac
     err=$(echo "$out" | grep -E 'cuCtxSynchronize \(kernel\)|cuModuleLoad|cuLaunchKernel' | head -1)
