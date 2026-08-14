@@ -18,7 +18,7 @@ RCASM=/path/to/RCAsm ./build.sh
 | 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
 | 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **runs on hardware, A and B agree, 256/256 EXACT** — 256 instructions |
 | 2b | the single modular inversion: `call_func InvMod256` | **runs on hardware, A and B agree, 256/256 EXACT** — 976 instructions |
-| 2c-i | the inverse chain: an upward loop over every `subp[i]` | **assembles and checks clean** — 1,384 instructions, awaiting a run |
+| 2c-i | the inverse chain: an upward loop over every `subp[i]` | **runs on hardware, A and B agree, 256/256 EXACT** — 1,384 instructions |
 | 2c-ii, 2d | the point arithmetic inside the walk, the point jump, the outer batch loop | not written |
 
 **Stage 2a matches the compiled kernel on an RTX 5090** — 256 EXACT out of 256 on both the
@@ -70,7 +70,12 @@ The oracle inverts by **Fermat** (`a^(P-2)`), deliberately sharing no structure 
 binary algorithm it judges — the same reason the C8 vectors came from Python rather than
 from `EcInt`.
 
-**Stage 2c-i is written and has not run.** It is the inverse chain — the loop the point
+**Stage 2c-i matched on the first run** — the only rung here that has, and worth saying
+because the four rules above are why. Nothing new was learned from it, which is the point:
+the loop, the frame reads and the call sequence were all built out of mechanisms that had
+already been forced to be right by the earlier failures.
+
+It is the inverse chain — the loop the point
 arithmetic will live inside — with the point work still absent. On its own it is the last
 piece of pure ladder machinery: an *upward* loop where every other one here counts down, a
 read of **every** slot of `subp[]` rather than just the two ends, and a second consumer of
