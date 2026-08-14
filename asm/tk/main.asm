@@ -621,7 +621,16 @@ call_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0, Ret="[B----
 //@@PLUS_BEGIN
 //---- the + branch ------------------------------------------------------------------
 // c_Gy is at c[0x3][0x40]; element i starts at 0x40 + i*32, and COfs is already i*32.
-    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x40]
+//
+// B1 IS NOT DECORATION. This is the first thing in the whole kernel that READS y1: every
+// rung before this one either wrote it straight back through STOREPNTY, which waits barrier
+// 1, or never touched it at all. The prologue's four PntY loads arm barrier 1 and nothing
+// else has ever drained it. barrier_check.py did flag this -- and reported it as a note
+// about the vendored bodies, because the READ happens inside SubMod256 while the load that
+// needs waiting is ours. That split was wrong and is fixed; a finding belongs to whoever
+// issued the load, not to whoever consumes it. Waiting once per iteration on an
+// already-empty barrier costs nothing.
+    [B-1----:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x40]
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x48]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x50]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x58]
@@ -844,20 +853,41 @@ call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B-----
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], MulB4
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], MulB6
 //@@STOREINV_END
-// Stage 2c-i: Px = the product of every dx_inv_i.
-//@@STOREWALK_BEGIN
-    [B0--3--:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], Acc0
+// Stage 2c-ii: Px = the product of every px3, Py = the LAST px3 on its own -- the tail's
+// point, i = half-1, minus branch.
+//
+// Py stops being subp[half-1] here, and that is the whole point of this build. The product
+// came back wrong with every structural hypothesis eliminated offline: it is not a missing
+// branch, a missing tail, an off-by-one index or a sign, because none of those reproduce
+// the value, and got/want is not a single field element either, so more than one point
+// differs. A product of 1023 points cannot say WHICH. One point can: if this comes back
+// right, the point arithmetic is correct and the accumulation is not; if it comes back
+// wrong, every intermediate behind it -- lam, s, the square, the three-way subtract -- is
+// computable offline for that one i and the wrong one names itself.
+//@@STOREPTS_BEGIN
+    [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], Acc0
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], Acc2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], Acc4
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], Acc6
-    [B------:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
-    [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
-    [B------:R-:W0:-:S01]    LDL.128 MulB0, [SAdr+-0x20]
-    [B------:R-:W0:-:S02]    LDL.128 MulB4, [SAdr+-0x10]
-    [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], MulB0
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], MulB2
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], MulB4
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], MulB6
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], PxN0
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], PxN2
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], PxN4
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], PxN6
+//@@STOREPTS_END
+// Stage 2c-i: Px = the product of every dx_inv_i.
+//@@STOREWALK_BEGIN
+//  [B0--3--:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], Acc0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], Acc2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], Acc4
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], Acc6
+//  [B------:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
+//  [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+//  [B------:R-:W0:-:S01]    LDL.128 MulB0, [SAdr+-0x20]
+//  [B------:R-:W0:-:S02]    LDL.128 MulB4, [SAdr+-0x10]
+//  [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], MulB0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], MulB2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], MulB4
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], MulB6
 //@@STOREWALK_END
 //@@STOREPNTY_BEGIN
 //  [B-1----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], PntY0

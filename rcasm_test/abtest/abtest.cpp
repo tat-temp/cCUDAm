@@ -328,7 +328,8 @@ static void dump256(const char* tag, const uint64_t v[4])
 //   pts:   prod over all 2*half-1 points of px3                      <- GpuCore.cu:244-378
 static void wantPx_ladder(const uint64_t jx[4], const uint64_t* gx, const uint64_t* gy,
                           unsigned half, const uint64_t x1[4], const uint64_t y1[4],
-                          bool invm, bool walkm, bool ptsm, uint64_t out[4])
+                          bool invm, bool walkm, bool ptsm, uint64_t out[4],
+                          uint64_t last[4] = nullptr)
 {
 	if (ptsm) {
 		// The point arithmetic, from the group law rather than from GpuCore.cu's shape:
@@ -362,6 +363,7 @@ static void wantPx_ladder(const uint64_t jx[4], const uint64_t* gx, const uint64
 				submodP(px3, x1, t);
 				submodP(t, &gx[(size_t)i * 4], px3);       // - px_i
 				mulmodP(acc, px3, acc);
+				if (last) memcpy(last, px3, 4 * sizeof(uint64_t));
 			}
 		}
 		memcpy(out, acc, 4 * sizeof(uint64_t));
@@ -609,8 +611,10 @@ int main(int argc, char** argv)
 			// is the same in every ladder mode on purpose: a failure in the newest stage
 			// that is really a stage-2a regression lands on Py, not on Px.
 			submodP(jx, a, &wantPyAll[t * 4]);
+			// In pts mode Py is the tail's px3, not subp[half-1] -- the value that says
+			// WHICH point is wrong rather than only that the product is.
 			wantPx_ladder(jx, gx.data(), gy.data(), half, a, b, invm, walkm, ptsm,
-			              &wantPxAll[t * 4]);
+			              &wantPxAll[t * 4], ptsm ? &wantPyAll[t * 4] : nullptr);
 		} else {
 			mulmodP(a, b, &wantPxAll[t * 4]);
 			memcpy(&wantPyAll[t * 4], b, 4 * sizeof(uint64_t));   // Py is identity in mul mode
@@ -644,7 +648,7 @@ int main(int argc, char** argv)
 		printf("  %s:  EXACT %zu   NON-CANON %zu   WRONG %zu   (of %u)\n",
 		       M[m].name, exact, noncanon, wrong, threads);
 		printf("      %s -- Py %s  scalars %s  counts %s\n",
-		       sufp ? "subp[half-1] + identity" : "identity check",
+		       ptsm ? "last px3 + identity" : sufp ? "subp[half-1] + identity" : "identity check",
 		       idPy ? "BROKEN" : "ok", idSc ? "BROKEN" : "ok", idCt ? "BROKEN" : "ok");
 		if (wrong) {
 			bad = 1;
@@ -676,7 +680,8 @@ int main(int argc, char** argv)
 			if (sufp) submodP(jx, a, wp);
 			else      memcpy(wp, &hy[firstPy * 4], sizeof(wp));
 			printf("      first wrong Py at thread %zu%s\n", firstPy,
-			       sufp ? "   (subp[half-1] = Jx - x1, stored before the loop)" : "");
+			       ptsm ? "   (px3 of the tail point: i = half-1, minus branch)"
+			       : sufp ? "   (subp[half-1] = Jx - x1, stored before the loop)" : "");
 			dump256("x1", a);
 			if (sufp) dump256("Jx", jx);
 			dump256("want", wp);

@@ -38,18 +38,18 @@ usage: variants.py <main.asm> <outdir> [name ...]
 import re, sys, os
 
 # name  -> (regions to delete, regions to uncomment)
-NOSTORE = ["STOREACC", "STOREINV", "STOREWALK"]
+NOSTORE = ["STOREACC", "STOREINV", "STOREWALK", "STOREPTS"]
 VARIANTS = {
     "id":    (["SUFP", "INV", "WALK"] + NOSTORE, ["STOREPNTX", "STOREPNTY"]),
     "local": (["SUFP", "INV", "WALK"] + NOSTORE, ["LOCAL", "STOREPNTX", "STOREPNTY"]),
     "call":  (["SUFP", "INV", "WALK", "STOREPNTX"] + NOSTORE, ["CALL", "STOREPROD", "STOREPNTY"]),
     "full":  (["SUFP", "INV", "WALK", "STOREPNTX"] + NOSTORE, ["CALL", "LOCAL", "STOREPROD", "STOREPNTY"]),
-    "sufp":  (["INV", "WALK", "STOREINV", "STOREWALK"], ["STOREACC"]),
-    "inv":   (["WALK", "STOREWALK"], ["STOREINV"]),
+    "sufp":  (["INV", "WALK", "STOREINV", "STOREWALK", "STOREPTS"], ["STOREACC"]),
+    "inv":   (["WALK", "STOREWALK", "STOREPTS"], ["STOREINV"]),
     # PLUS/PLUST and WACC/WACCT are nested INSIDE the WALK region, so the rungs above that
     # cut WALK must not name them -- the marker is already gone by the time they are looked
     # up, and region() exits rather than shrugging.
-    "walk":  (["PLUS", "PLUST"], ["WACC", "WACCT"]),
+    "walk":  (["PLUS", "PLUST", "STOREPTS"], ["WACC", "WACCT", "STOREWALK"]),
     "pts":   ([], []),                              # == main.asm as committed
 }
 

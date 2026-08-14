@@ -10,7 +10,11 @@ neither is visible to align_check.sh or stall_check.py because the instruction s
 perfectly correct in each case:
 
   1. USE BEFORE WAIT -- a register produced by a barrier-carrying load is read without the
-     barrier ever being waited. The read gets whatever was in the register before.
+     barrier ever being waited. The read gets whatever was in the register before. Reported
+     against the instruction that ISSUED THE LOAD rather than the one that reads it: the
+     missing wait belongs to the caller, and a load of ours consumed inside a vendored body
+     is still ours. Getting that backwards is how stage 2c-ii's unwaited y1 was dismissed as
+     "8 in the vendored FUNCTION bodies -- expected".
 
   2. A STORE WHOSE DATA REGISTERS ARE REWRITTEN LATER, with no READ barrier. A store does
      not read its data at issue: the LSU reads it later, and `R-` means nothing says when.
@@ -225,16 +229,22 @@ def check(path):
         for b in range(6):
             if wait & (1 << b):
                 live[b] = []
-                for key, (bb, _, _) in list(pending.items()):
+                for key, (bb, _, _, _) in list(pending.items()):
                     if bb == b:
                         del pending[key]
 
         for pfx, num in reads(text):
             hit = pending.get((pfx, num))
             if hit:
-                flag(k, "        /*%s*/ reads %s%d before barrier %d is waited\n"
-                        "            produced by /*%s*/ %s\n"
-                        "            %s" % (addr, pfx, num, hit[0], hit[1], hit[2], text))
+                # Attributed to the PRODUCER, not the consumer. A load issued by the kernel
+                # and consumed inside a vendored body is the kernel's bug -- the missing
+                # wait is at the call site -- and reporting it as a note about someone
+                # else's code is how it gets dismissed. It was: stage 2c-ii is the first
+                # rung that reads y1 at all, its four prologue loads were never waited, and
+                # this printed as "8 in the vendored FUNCTION bodies -- expected".
+                flag(hit[3], "        /*%s*/ reads %s%d before barrier %d is waited\n"
+                             "            produced by /*%s*/ %s\n"
+                             "            %s" % (addr, pfx, num, hit[0], hit[1], hit[2], text))
                 del pending[(pfx, num)]
 
         if wbar != 7:
@@ -248,7 +258,7 @@ def check(path):
             if d:
                 pfx, base, n = d
                 for j in range(n):
-                    pending[(pfx, base + j)] = (wbar, addr, text)
+                    pending[(pfx, base + j)] = (wbar, addr, text, k)
 
     tail = "   (%d in the vendored FUNCTION bodies -- expected)" % len(note) if note else ""
     if not bad:

@@ -135,7 +135,9 @@ __global__ void TestKernel(
             mul_mod(s, s, lam);                                                        \
             uint8_t odd; sub_mod_is_odd(&odd, s, y1); (void)odd;                       \
             mul_mod(wacc, wacc, px3);                                                  \
+            for (int k = 0; k < 4; k++) lastpx3[k] = px3[k];                           \
         } while (0)
+    uint64_t lastpx3[4] = {0, 0, 0, 0};
 #endif
 
     for (int i = 0; i < (int)half - 1; ++i) {
@@ -171,7 +173,13 @@ __global__ void TestKernel(
 #else
         Px[idx]            = acc[k];
 #endif
+#if STAGE_PTS
+        // The tail's point on its own -- i = half-1, minus branch. A product of 1023 points
+        // cannot say which one is wrong; one point can.
+        Py[idx]            = lastpx3[k];
+#else
         Py[idx]            = subp[half - 1][k];   // written before the loop, highest address
+#endif
         start_scalars[idx] = s1[k];
         counts256[idx]     = rem[k];
     }
