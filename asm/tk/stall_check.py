@@ -63,6 +63,19 @@ import re, subprocess, sys, os
 # ships, which is the fastest way to make a checker worthless.
 MIN_CYCLES = {"IMAD": 3, "ISETP": 5}
 MIN_DEFAULT = 4
+
+# A BRANCH reads its guard predicate far earlier in the pipeline than an ALU instruction
+# reads an operand, and the gap it needs is much larger. Measured over the same corpus:
+# across 41 predicate-producer -> guarded-branch pairs, ptxas NEVER leaves fewer than 13
+# cycles, for any producer opcode (ISETP, LOP3, R2UR, VOTE all bottom out at exactly 13).
+# It is the single largest requirement in this file and the easiest to miss, because the
+# same ISETP feeding an ALU consumer needs only 5.
+MIN_PRED_BRANCH = 13
+BRANCHY = ("BRA", "BRX", "EXIT", "RET", "JMP", "CALL")
+
+# At or above this stall the yield bit must be set. Every stall >= 13 in ptxas's output
+# has it; without it RCAsm produces an instruction cuobjdump refuses to decode.
+MIN_YIELD_STALL = 13
 FIXED = ("IADD3", "IMAD", "ISETP", "LOP3", "MOV", "SEL", "SHF", "PRMT", "LEA")
 CUDA = os.environ.get("CUDA", "/usr/local/cuda")
 
@@ -78,7 +91,10 @@ WORD2 = re.compile(r"^\s*/\* (0x[0-9a-f]+) \*/\s*$")
 
 
 def ctrl(w):
-    return {"stall": (w >> 41) & 0xF, "wbar": (w >> 46) & 7,
+    # Bit 45 is the yield field, and it reads INVERTED from RCAsm's `Y`: the dialect's
+    # `Y` produces bit45 = 0. Confirmed both ways -- against this kernel's own control
+    # codes and against ptxas, whose stall-14 ISETP carries the same encoding.
+    return {"stall": (w >> 41) & 0xF, "noyield": (w >> 45) & 1, "wbar": (w >> 46) & 7,
             "rbar": (w >> 49) & 7, "wait": (w >> 52) & 0x3F}
 
 
@@ -138,8 +154,19 @@ def check(path):
         w = WORD2.match(ln)
         if w and pend:
             c = ctrl(int(w.group(1), 16))
-            rows.append((c["stall"], c["wbar"] != 7, pend[0], pend[1], c["wait"]))
+            rows.append((c["stall"], c["wbar"] != 7, pend[0], pend[1], c["wait"],
+                         c["noyield"]))
             pend = None
+
+    # No instructions means cuobjdump could not read the cubin, which is a FAILURE and not
+    # a clean run. It cost a confused build to learn that: `[B------:R-:W-:-:S13]` on an
+    # ISETP assembles happily and produces an instruction the disassembler rejects outright
+    # ("undefined value 0x1d for table TABLES_opex_8"), and both checkers then reported
+    # "OK (0 instructions)" on a cubin that could not possibly run.
+    if not rows:
+        print("BAD   %s   cuobjdump produced NO instructions -- the cubin does not "
+              "disassemble" % path)
+        return 1
 
     # The kernel body ends at the last EXIT; everything after it is an appended FUNCTION
     # body, each of which ends with BRXU.U rather than EXIT.
@@ -147,8 +174,17 @@ def check(path):
                default=len(rows) - 1)
 
     bad, note = [], []
+
+    # A large stall needs the yield bit set. Without it RCAsm emits an instruction that
+    # nothing can decode, and the only thing that objects is the disassembler.
+    for k, (stall, _, addr, t, _, noyield) in enumerate(rows):
+        if stall >= MIN_YIELD_STALL and noyield:
+            (bad if k <= kend else note).append(
+                (addr, stall, MIN_YIELD_STALL, "the yield bit", t,
+                 "write this as [B...:R-:W-:Y:S%02d] -- RCAsm's Y clears bit 45" % stall))
+
     for k in range(len(rows) - 1):
-        stall, haswrite, addr, t, _ = rows[k]
+        stall, haswrite, addr, t, _, _ = rows[k]
         if haswrite:                     # variable latency: a write barrier covers it
             continue
         op = t.split()[0].split(".")[0].lstrip("@!")
@@ -167,7 +203,7 @@ def check(path):
         need = MIN_CYCLES.get(op, MIN_DEFAULT)
         cyc = stall
         for j in range(k + 1, len(rows)):
-            sj, _, _, tj, wj = rows[j]
+            sj, _, _, tj, wj, _ = rows[j]
             hit = ds & srcs(tj)
             if hit:
                 if cyc < need:
@@ -183,6 +219,28 @@ def check(path):
                 break
             cyc += sj
             if cyc >= need:
+                break
+
+    # Predicate -> guarded branch, which has its own much larger requirement.
+    for k in range(len(rows) - 1):
+        stall, _, addr, t, _, _ = rows[k]
+        ps = {p for p in dst(t) if p.startswith("P")}
+        if not ps:
+            continue
+        cyc = stall
+        for j in range(k + 1, len(rows)):
+            sj, _, _, tj, _, _ = rows[j]
+            g = re.match(r"^@(!?)(P\d)\s+", tj)
+            body = re.sub(r"^@!?\w+\s+", "", tj)
+            if g and g.group(2) in ps and body.split()[0].startswith(BRANCHY):
+                if cyc < MIN_PRED_BRANCH:
+                    (bad if k < kend else note).append(
+                        (addr, cyc, MIN_PRED_BRANCH, g.group(2), t, tj))
+                break
+            if ps & dst(tj):
+                break
+            cyc += sj
+            if cyc >= MIN_PRED_BRANCH:
                 break
 
     def show(rs):

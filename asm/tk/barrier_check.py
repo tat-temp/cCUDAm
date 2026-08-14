@@ -105,6 +105,13 @@ def rows_of(path):
 
 def check(path):
     rows = rows_of(path)
+    # No instructions means cuobjdump could not read the cubin. That is a failure, not a
+    # clean run -- an undecodable instruction once slipped through both checkers reporting
+    # "OK (0 instructions)".
+    if not rows:
+        print("BAD   %s   cuobjdump produced NO instructions -- the cubin does not "
+              "disassemble" % path)
+        return 1
     kend = max((i for i, r in enumerate(rows) if r[1].split()[0].lstrip("@!") == "EXIT"),
                default=len(rows) - 1)
 

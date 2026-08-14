@@ -16,7 +16,7 @@ RCASM=/path/to/RCAsm ./build.sh
 |---|---|---|
 | 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
 | 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
-| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **barrier bug found and fixed** — 256 instructions, awaiting a rerun |
+| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **two bugs found and fixed** — 256 instructions, awaiting a rerun |
 | 2b–2d | `InvMod256`, the ± walk, the point jump, the outer batch loop | not written |
 
 **Stage 1b matches the compiled kernel exactly on an RTX 5090** — 253 EXACT, 3 non-canonical,
@@ -70,6 +70,27 @@ Fixed by giving the constant loads their own barrier (4) and `batch_size` anothe
 `barrier_check.py` now enforces it, and the same run exposed a second defect of the class:
 `uDesc` was read at the first `LDG` without barrier 2 ever being waited — correct only
 because the `LDCU` was fifteen instructions back.
+
+**That fix was correct and the answer was still wrong, for a second reason: the ladder ran
+exactly one iteration.** Which is not a guess — with the inputs reproduced offline, `Px`
+came out *equal to `subp[510]`*, the accumulator after a single multiply by `Gx[511]`. So
+the barrier fix had worked: `SubMod256`, `MulMod256` and the constant reads were all
+correct, and the loop was leaving after one pass.
+
+The cause is the largest number in this file. **A guarded branch reads its predicate about
+thirteen cycles after the producer writes it**, not five: over 41 predicate-producer →
+guarded-branch pairs in the shipped kernel, ptxas never once goes below 13, whatever the
+producer. The loop's `ISETP.NE` → `@P0 BRA.U` was written at S05, so the back-edge tested a
+`P0` that `MulMod256` had left behind — it clobbers `P0..P4` earlier in the same iteration
+— rather than the loop counter. The same ISETP feeding another *ISETP* needs only 5, which
+is what makes this easy to get wrong.
+
+Fixing it turned up one more trap worth knowing: **`S13` requires the yield bit.**
+`[B------:R-:W-:-:S13]` assembles without complaint and yields an instruction nothing can
+decode (`undefined value 0x1d for table TABLES_opex_8`), while `[B------:R-:W-:Y:S13]` is
+fine — and ptxas sets `Y` on every one of its own S13 instructions. Worse, both checkers
+reported `OK (0 instructions)` on that unreadable cubin, so they now fail when `cuobjdump`
+returns nothing.
 
 Stage 2a is the suffix-product ladder from `GpuCore.cu:224-233`, and it adds three
 mechanisms at once: a real backward-branch loop, a dynamically indexed constant load
@@ -130,8 +151,17 @@ Fix 4 is needed because the device linker rewrites `.nv.reservedSmem.offset0`'s 
 CUDA-specific value the validation table does not know. It is safe: that table is
 validation-only, and `__updateSymtab` copies `st_info` verbatim from the source cubin.
 
-## Six things that cost time here
+## Seven things that cost time here
 
+- **A guarded branch needs THIRTEEN cycles after its predicate is written.** Not the five
+  an ALU consumer needs — a branch reads its guard far earlier in the pipeline. Measured,
+  and about as clean as evidence gets here: across 41 predicate-producer → guarded-branch
+  pairs in the shipped kernel, ptxas never goes below 13, and `ISETP`, `LOP3`, `R2UR` and
+  `VOTE` all bottom out at exactly 13. Stage 2a's loop was written at S05 and ran a
+  **single iteration**, because the back-edge tested a `P0` that `MulMod256` had left
+  behind. Two corollaries: `@P0 EXIT` is a guarded branch and wants the same 13, and a
+  stall that large **requires the yield bit** — `[B...:R-:W-:-:S13]` produces an
+  instruction that will not decode, `[B...:R-:W-:Y:S13]` is correct.
 - **One group per barrier, and drain it before reusing it.** A write barrier is a counter,
   not a flag: every instruction naming it increments it and the wait blocks until it hits
   zero. That invites piling unrelated loads onto one barrier and waiting once, which is
@@ -207,7 +237,8 @@ Each was checked against a known-broken build rather than only against a passing
 `align_check.sh` flags the pre-fix cubins (`R50, R54`) and clears the shipped ptxas kernel,
 whose own `subp[]` traffic — `STL.128 [R9], R4`, `LDL.128 R32, [R1]` — is 4-aligned
 throughout. `stall_check.py` named all eleven under-stalled pairs in the faulting stage-2a
-cubin, including the two on the loop-exit test. `barrier_check.py` was run against the
+cubin, including the two on the loop-exit test, and later named all four predicate-to-branch
+violations in the cubin whose ladder ran one iteration. `barrier_check.py` was run against the
 wrong-answer cubin before anything was changed, and named barrier 0 climbing 5→6→7→8 with
 the two over-limit arms being exactly `c[0x3][0x30]` and `c[0x3][0x38]` — the two loads the
 hardware had returned stale — while staying clean on both compiled ptxas kernels.

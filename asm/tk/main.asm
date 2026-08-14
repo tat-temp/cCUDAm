@@ -70,6 +70,22 @@
 // the interleaved rem==0 test below relies on, though at S01 it only reached two and was
 // wrong for that reason.
 //
+// A BRANCH IS DIFFERENT, AND IT IS THE BIGGEST NUMBER HERE: a guarded branch reads its
+// predicate far earlier in the pipeline than an ALU instruction reads an operand, and
+// wants **THIRTEEN** cycles. Measured, and about as unambiguous as this project gets: over
+// 41 predicate-producer -> guarded-branch pairs in the shipped kernel, ptxas never once
+// goes below 13, whatever the producer (ISETP, LOP3, R2UR and VOTE all bottom out at
+// exactly 13). The same ISETP feeding another ISETP needs 5, which is what makes this easy
+// to get wrong -- the loop below was written at S05 and ran a SINGLE iteration, because
+// the back-edge tested a P0 that MulMod256 had left behind rather than the loop counter.
+//
+// **A stall that large needs the YIELD bit set.** `[B------:R-:W-:-:S13]` assembles without
+// complaint and produces an instruction cuobjdump cannot decode at all ("undefined value
+// 0x1d for table TABLES_opex_8"); `[B------:R-:W-:Y:S13]` is fine. ptxas sets Y on every
+// one of its own S13 instructions. This is the one failure in this file that is loud
+// rather than silent, and only because the disassembler happens to reject it -- nothing in
+// the assembler path objects.
+//
 // Stage 2a's ladder was written at S01 and died with ILLEGAL_ADDRESS on its first store:
 // `IMAD COfs, Half, 0x10, RZ` followed immediately by a read of COfs, which at that point
 // had never been written at all.
@@ -165,8 +181,12 @@ KERNEL TestKernel(regcnt=255, \
 // threadsTotal is 64-bit and gid is < 2^32 by construction, so: exit iff the high word
 // is zero AND gid >= the low word. A non-zero high word means threadsTotal > 2^32 > gid,
 // i.e. always in range.
+// S13 on the ISETP, not S05: a branch reads its guard predicate far earlier in the
+// pipeline than an ALU instruction reads an operand. See the note on predicates at the
+// top of this file -- five cycles is right for an ISETP feeding another ISETP and badly
+// wrong for one feeding a branch.
     [B---3--:R-:W-:-:S05]    ISETP.GE.U32.AND P0, PT, gID, Thr0, PT
-    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P0, PT, Thr1, RZ, P0
+    [B------:R-:W-:Y:S13]    ISETP.EQ.U32.AND P0, PT, Thr1, RZ, P0
     [B------:R-:W-:Y:S05] @P0 EXIT
 
 //---- per-thread addresses: base + gid*32 (four u64 per array) ---------------------
@@ -212,7 +232,7 @@ KERNEL TestKernel(regcnt=255, \
     [B------:R-:W-:-:S03]    LOP3.LUT TmpA, TmpA, Rem5, RZ, 0xfc, !PT
     [B------:R-:W-:-:S05]    LOP3.LUT TmpB, TmpB, Rem7, RZ, 0xfc, !PT
     [B------:R-:W-:-:S05]    LOP3.LUT TmpA, TmpA, TmpB, RZ, 0xfc, !PT
-    [B------:R-:W-:Y:S05]    ISETP.EQ.U32.AND P0, PT, TmpA, RZ, PT
+    [B------:R-:W-:Y:S13]    ISETP.EQ.U32.AND P0, PT, TmpA, RZ, PT
     [B------:R-:W-:-:S05] @P0 EXIT
 
 //====================================================================================
@@ -316,7 +336,7 @@ call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0, Ret="[B------:R-:W
 
 //---- for (j = half-1; j >= 1; --j) --------------------------------------------------
     [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
-    [B------:R-:W-:-:S05]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
+    [B------:R-:W-:Y:S13]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
     [B------:R-:W-:Y:S05] @!P0 BRA.U `(.label_sufp_end)
 
 .label_sufp_loop:
@@ -350,7 +370,10 @@ call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
     [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
 
     [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
-    [B------:R-:W-:-:S05]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
+// This one is why the ladder ran a SINGLE iteration and stopped. At S05 the back-edge
+// read a stale P0 -- and MulMod256 clobbers P0..P4 earlier in the same iteration, so the
+// stale value was whatever its carry chain happened to leave, not the loop test.
+    [B------:R-:W-:Y:S13]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
     [B------:R-:W-:Y:S05] @P0 BRA.U `(.label_sufp_loop)
 .label_sufp_end:
 //@@SUFP_END
