@@ -16,15 +16,26 @@ RCASM=/path/to/RCAsm ./build.sh
 |---|---|---|
 | 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
 | 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
-| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **arithmetic confirmed right on hardware**, the frame round-trip fixed — 256 instructions, awaiting a rerun |
+| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **runs on hardware, A and B agree, 256/256 EXACT** — 256 instructions |
 | 2b–2d | `InvMod256`, the ± walk, the point jump, the outer batch loop | not written |
 
-**Stage 2a's ladder arithmetic is confirmed correct on hardware**: `Px` — the accumulator
-after all 511 multiplies — came back EXACT on all 256 threads. So the loop, the indexed
-constant loads, `SubMod256` and `MulMod256` under a real back edge are all right. `Py` is
-the frame round-trip and it is what is still being fixed; `Px` never leaves registers and
-proves nothing about `STL`/`LDL`, which is precisely why the write-back reads a slot back
-out of local memory instead of just reporting the accumulator.
+**Stage 2a matches the compiled kernel on an RTX 5090** — 256 EXACT out of 256 on both the
+accumulator and the frame slot, A and B agreeing on every output limb. That covers a real
+back edge, 511 iterations of it, dynamically indexed constant loads out of bank 3, `STL`
+and `LDL` at a computed address across the whole 16 KB frame, and `SubMod256`/`MulMod256`
+called 1,022 times.
+
+It took four bugs to get there, and every one of them produced a cubin that loaded, ran and
+returned an answer: an over-subscribed barrier, a two-cycle stall chain, a branch guarded on
+a stale predicate, and a store with no read barrier. Each is now a rule in this file and a
+check in `barrier_check.py` or `stall_check.py`, and each check was validated against the
+broken build before the fix landed.
+
+The write-back deliberately reports two different things — the accumulator `Px` **and** a
+slot read back out of local memory as `Py`. That is what separated the last two bugs: `Px`
+came back exact while `Py` was wrong, which said the arithmetic was right and the frame
+round-trip was not. A write-back that only reported the accumulator would have called that
+run a pass.
 
 **Stage 1b matches the compiled kernel exactly on an RTX 5090** — 253 EXACT, 3 non-canonical,
 0 wrong out of 256 threads, which is *the same verdict side A gets*. That is the first
