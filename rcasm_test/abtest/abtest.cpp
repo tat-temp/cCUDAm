@@ -677,16 +677,31 @@ int main(int argc, char** argv)
 		if (idPy) {
 			uint64_t a[4], wp[4];
 			for (int k = 0; k < 4; k++) a[k] = hx[firstPy * 4 + k];
-			if (sufp) submodP(jx, a, wp);
-			else      memcpy(wp, &hy[firstPy * 4], sizeof(wp));
+			// Print the value that was actually COMPARED. This used to recompute
+			// Jx - x1 whenever sufp was set -- which pts mode implies -- so in pts mode
+			// it printed the stage-2a expectation next to a stage-2c value. The two are
+			// unrelated, explain_py() then reported "matches no simple hypothesis" about
+			// a hypothesis nobody had made, and the dump read as a deep mystery when the
+			// only thing wrong with it was the line that produced it.
+			memcpy(wp, &wantPyAll[firstPy * 4], sizeof(wp));
 			printf("      first wrong Py at thread %zu%s\n", firstPy,
 			       ptsm ? "   (px3 of the tail point: i = half-1, minus branch)"
 			       : sufp ? "   (subp[half-1] = Jx - x1, stored before the loop)" : "");
 			dump256("x1", a);
-			if (sufp) dump256("Jx", jx);
+			if (sufp && !ptsm) dump256("Jx", jx);
 			dump256("want", wp);
 			dump256("got", &outPy[m][firstPy * 4]);
-			if (sufp) explain_py(&outPy[m][firstPy * 4], a, jx);
+			{
+				uint64_t d[4]; bool bw = false;
+				for (int k = 0; k < 4; k++) {
+					uint64_t g = outPy[m][firstPy * 4 + k];
+					uint64_t t = g - wp[k] - (bw ? 1 : 0);
+					bw = bw ? (g <= wp[k]) : (g < wp[k]);
+					d[k] = t;
+				}
+				dump256("got-want", d);
+			}
+			if (sufp && !ptsm) explain_py(&outPy[m][firstPy * 4], a, jx);
 		}
 		if (idPy || idSc || idCt) bad = 1;
 	}

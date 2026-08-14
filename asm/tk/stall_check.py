@@ -118,7 +118,18 @@ def dst(t):
     if not m:
         return set()                      # stores have no register destination
     r = m.group(2)
-    return {r} if (r.startswith("P") or r == "RZ") else span(r, dwidth(m.group(1)))
+    out = {r} if (r.startswith("P") or r == "RZ") else span(r, dwidth(m.group(1)))
+    # IADD3 and IMAD name their carry-OUT predicates immediately after the destination
+    # register, and those are WRITTEN, not read. Taking "everything after the destination"
+    # as sources filed them as reads instead, so no predicate produced by a carry-out was
+    # ever scanned as a producer -- which is every carry chain in MulMod256, SqrMod256 and
+    # SubMod256_3. The check silently did not cover them.
+    for o in [o.strip() for o in t.split(",")[1:]]:
+        if re.match(r"^P\d$", o):
+            out.add(o)
+        elif o != "PT":
+            break
+    return out
 
 
 def srcs(t):
@@ -130,7 +141,13 @@ def srcs(t):
     op = t.split()[0]
     # A store names its address first and its data last, so nothing is "after the
     # destination" to split on -- take the whole operand list.
-    body = t if re.match(r"ST[LGS]", op) else (t.split(",", 1) + [""])[1]
+    if re.match(r"ST[LGS]", op):
+        body = t
+    else:
+        ops = [o.strip() for o in t.split(",")[1:]]
+        while ops and re.match(r"^P\d$|^PT$", ops[0]):
+            ops.pop(0)          # leading predicates are carry-OUTS -- see dst()
+        body = ",".join(ops)
     out |= set(re.findall(r"\b[RP]\d+\b", body))
     # `[R40.64]` addresses cover a pair; a store's data operand covers the access width.
     for m in re.finditer(r"\bR(\d+)\.64\b", body):
