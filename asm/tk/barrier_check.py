@@ -12,7 +12,25 @@ perfectly correct in each case:
   1. USE BEFORE WAIT -- a register produced by a barrier-carrying load is read without the
      barrier ever being waited. The read gets whatever was in the register before.
 
-  2. OVER-SUBSCRIPTION -- too many operations outstanding on one barrier at once. This is
+  2. A STORE WHOSE DATA REGISTERS ARE REWRITTEN LATER, with no READ barrier. A store does
+     not read its data at issue: the LSU reads it later, and `R-` means nothing says when.
+     Overwrite the register before that read happens and the store writes the NEW value.
+     This is a WAR hazard, and the read barrier is the only thing that closes it -- `R3` on
+     the store arms it, and a wait on 3 before the overwrite is what makes the read done.
+
+     This is what made the stage-2a ladder's subp[half-1] wrong AFTER the loop was fixed.
+     Px was exact, because the accumulator never leaves registers -- but Py, which is the
+     one value round-tripped through the frame, came back as subp[0].hi ++ subp[511].lo.
+     subp[0] is the accumulator's LAST value, 511 iterations after that store issued: the
+     high half of the store read its data at the end of the loop rather than at the top.
+     The low half read on time. Nothing in the control code said either had to.
+
+     THE RULE IS MEASURED. ptxas's own suffix-product loop (rcasm_test/abtest, compiled)
+     puts a read barrier on every one of its four ladder STLs and waits it at the head of
+     the next iteration; over both compiled kernels there is not one store whose source is
+     rewritten later and which carries no read barrier. Ours had four.
+
+  3. OVER-SUBSCRIPTION -- too many operations outstanding on one barrier at once. This is
      what made the stage-2a ladder wrong. The prologue arms barrier 0 with four PntX loads
      and, in the sufp variant, never drains them -- the drain lived in stage 1b's
      write-back, which that variant comments out -- so the ladder's four constant loads
@@ -55,16 +73,38 @@ INSN = re.compile(r"/\*([0-9a-f]{4,})\*/\s+(.*?);\s*/\* (0x[0-9a-f]+) \*/")
 WORD2 = re.compile(r"^\s*/\* (0x[0-9a-f]+) \*/\s*$")
 
 
+STORES = ("STL", "STG", "STS", "ST", "RED", "ATOM", "ATOMG", "ATOMS")
+
+
 def ctrl(w):
-    return (w >> 46) & 7, (w >> 52) & 0x3F      # write barrier, wait mask
+    # write barrier, read barrier, wait mask
+    return (w >> 46) & 7, (w >> 49) & 7, (w >> 52) & 0x3F
 
 
 def width(text):
     """How many consecutive registers the destination covers."""
     op = text.split()[0]
     if ".128" in op: return 4
-    if ".64" in op:  return 2
+    if ".64" in op or ".WIDE" in op: return 2
     return 1
+
+
+def opcode(text):
+    """The mnemonic, with any predicate guard removed. `@P0 BRA.U 0x3b0` -> `BRA.U`; a
+    plain .split()[0] returns the GUARD there, which silently hid every guarded branch."""
+    return re.sub(r"^@!?\w+\s+", "", text).split()[0]
+
+
+def store_data(text):
+    """A store's DATA operand -- the last register named -- widened by the access size."""
+    t = re.sub(r"^@!?\w+\s+", "", text)
+    if opcode(t).split(".")[0] not in STORES:
+        return set()
+    nums = re.findall(r"\bR(\d+)\b", t)
+    if not nums or int(nums[-1]) == 255:
+        return set()
+    k = int(nums[-1])
+    return {("R", k + i) for i in range(width(t))}
 
 
 def dst(text):
@@ -97,10 +137,19 @@ def rows_of(path):
             continue
         w = WORD2.match(ln)
         if w and pend:
-            wbar, wait = ctrl(int(w.group(1), 16))
-            out.append((pend[0], pend[1], wbar, wait))
+            wbar, rbar, wait = ctrl(int(w.group(1), 16))
+            out.append((pend[0], pend[1], wbar, rbar, wait))
             pend = None
     return out
+
+
+def defined(text):
+    """Registers this instruction writes, as (prefix, number) pairs."""
+    d = dst(text)
+    if not d:
+        return set()
+    pfx, base, n = d
+    return {(pfx, base + i) for i in range(n)}
 
 
 def check(path):
@@ -112,7 +161,7 @@ def check(path):
         print("BAD   %s   cuobjdump produced NO instructions -- the cubin does not "
               "disassemble" % path)
         return 1
-    kend = max((i for i, r in enumerate(rows) if r[1].split()[0].lstrip("@!") == "EXIT"),
+    kend = max((i for i, r in enumerate(rows) if opcode(r[1]) == "EXIT"),
                default=len(rows) - 1)
 
     live = {b: [] for b in range(6)}     # barrier -> outstanding arming instructions
@@ -122,7 +171,57 @@ def check(path):
     def flag(k, msg):
         (bad if k <= kend else note).append(msg)
 
-    for k, (addr, text, wbar, wait) in enumerate(rows):
+    # Backward branches, so the loop-carried case is visible. Without this the check sees
+    # only the store that sits ABOVE its overwrite in program order -- a loop whose stores
+    # are all below the copy block would pass while being wrong on every iteration but the
+    # first. BRXU is excluded: its operand is a return offset, not a label.
+    at = {int(r[0], 16): i for i, r in enumerate(rows)}
+    backedges = []
+    for i, r in enumerate(rows[:kend + 1]):
+        if not opcode(r[1]).startswith("BRA"):
+            continue
+        m = re.search(r"0x([0-9a-f]+)\s*$", r[1])
+        if m and int(m.group(1), 16) < int(r[0], 16) and int(m.group(1), 16) in at:
+            backedges.append((i, at[int(m.group(1), 16)]))
+
+    # Pass 1 -- stores whose data registers are rewritten later (see item 2 in the
+    # docstring). Only the kernel body is walked; the vendored FUNCTION bodies below the
+    # last EXIT reuse the same numbers and would produce nothing but false positives.
+    for k, (addr, text, wbar, rbar, wait) in enumerate(rows[:kend + 1]):
+        data = store_data(text)
+        if not data:
+            continue
+        window = list(range(k + 1, kend + 1))
+        hit = next((j for j in window if defined(rows[j][1]) & data), None)
+        if hit is None:
+            # Nothing below it -- but the back edge may carry execution to something above.
+            for bi, ti in backedges:
+                if ti <= k <= bi:
+                    w2 = list(range(k + 1, bi + 1)) + list(range(ti, k))
+                    h2 = next((j for j in w2 if defined(rows[j][1]) & data), None)
+                    if h2 is not None:
+                        window, hit = w2, h2
+                        break
+        if hit is None:
+            continue
+        window = window[:window.index(hit) + 1]
+        j_text, j_addr = rows[hit][1], rows[hit][0]
+        if rbar == 7:
+            flag(k, "        /*%s*/ stores %s with NO read barrier, and /*%s*/ rewrites it\n"
+                    "            %s\n"
+                    "            rewritten by: %s" % (
+                        addr, ",".join("%s%d" % r for r in sorted(data, key=lambda x: x[1])),
+                        j_addr, text, j_text))
+            continue
+        if not any(rows[i][4] & (1 << rbar) for i in window):
+            flag(k, "        /*%s*/ arms read barrier %d but nothing waits it before\n"
+                    "            /*%s*/ rewrites the data register\n"
+                    "            %s\n"
+                    "            rewritten by: %s"
+                    % (addr, rbar, j_addr, text, j_text))
+
+    # Pass 2 -- use before wait, and barrier over-subscription.
+    for k, (addr, text, wbar, rbar, wait) in enumerate(rows):
         for b in range(6):
             if wait & (1 << b):
                 live[b] = []

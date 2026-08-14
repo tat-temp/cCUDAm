@@ -105,6 +105,23 @@
 // landed were the two issued FIRST, i.e. the ones with the most natural latency behind
 // them once the wait stopped blocking.
 //
+// A STORE NEEDS A READ BARRIER IF ITS DATA REGISTERS ARE REWRITTEN LATER. This is the other
+// half of the same rule and it is the one that is easy to miss, because a store looks like
+// it has no result to wait for. It does not read its data at issue: the LSU reads it later,
+// and `R-` means nothing in the control code says when. Rewrite the register first and the
+// store writes the NEW value. `R3` on the store arms read barrier 3; a wait on 3 before the
+// overwrite is what makes the read have happened.
+//
+// This is what made the ladder wrong after the loop was fixed. Px was EXACT -- the
+// accumulator never leaves registers -- while Py, the one value round-tripped through the
+// frame, came back as subp[0].hi ++ subp[511].lo. subp[0] is the accumulator's value 511
+// iterations LATER: the high half of a store issued before the loop read its data after the
+// loop had finished. The low half read on time. Nothing said either had to.
+//
+// ptxas puts a read barrier on every one of the four STLs in its own suffix-product loop and
+// waits it at the head of the next iteration; across both compiled kernels there is not one
+// store whose source is rewritten later and which carries no read barrier.
+//
 // The ceiling is measured, not guessed: over the compiled kernels ptxas never leaves more
 // than SIX outstanding on one barrier, and the prologue's groups of five are correct on
 // hardware, so the limit is six or seven. It is not about spacing -- ptxas puts a wait as
@@ -275,10 +292,15 @@ KERNEL TestKernel(regcnt=255, \
 // with Prod at R50 the kernel loaded, reported its 16 KB frame, launched, and died with
 // CUDA_ERROR_ILLEGAL_INSTRUCTION, while the identical stream minus these four
 // instructions ran clean.
+// R3 on the two stores is the read barrier, and it is not optional here even though this
+// variant has always passed: the LDLs rewrite the very registers the STLs are storing, so
+// without it the load can land before the store has read them and the round trip returns
+// its own destination. It works today by latency alone. See the store-read-barrier note at
+// the top of this file -- the same omission in the stage-2a ladder produced a wrong answer.
 //@@LOCAL_BEGIN
-//  [B------:R-:W-:-:S02]    STL.128 [R1], Prod0
-//  [B------:R-:W-:-:S02]    STL.128 [R1+0x10], Prod4
-//  [B------:R-:W0:-:S01]    LDL.128 Prod0, [R1]
+//  [B------:R3:W-:-:S02]    STL.128 [R1], Prod0
+//  [B------:R3:W-:-:S02]    STL.128 [R1+0x10], Prod4
+//  [B---3--:R-:W0:-:S01]    LDL.128 Prod0, [R1]
 //  [B------:R-:W0:-:S02]    LDL.128 Prod4, [R1+0x10]
 //  [B0-----:R-:W-:-:S02]    NOP
 //@@LOCAL_END
@@ -331,8 +353,14 @@ call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0, Ret="[B------:R-:W
 // no shift instruction is needed. SAdr = R1 + COfs, putting subp[half-1] at [SAdr-0x20].
     [B-----5:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
     [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
-    [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
-    [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
+// R3, and this is the bug that made subp[half-1] wrong while the accumulator was exact. A
+// store does not read its data registers at issue -- the LSU reads them later, and with no
+// read barrier nothing says when. MulA is rewritten by the copy block inside the loop, and
+// the high half of THIS store read its data after the loop had finished: Py came back as
+// subp[0].hi ++ subp[511].lo, subp[0] being the accumulator 511 iterations later. Barrier 3
+// is free from here on -- the Rem loads that used it are drained by the rem==0 test.
+    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
+    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
 
 //---- for (j = half-1; j >= 1; --j) --------------------------------------------------
     [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
@@ -342,7 +370,10 @@ call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0, Ret="[B------:R-:W
 .label_sufp_loop:
 // c_Gx is at c[0x3][0x4040]; element j starts at 0x4040 + j*32. The store goes to
 // subp[j-1] = R1 + (j-1)*32 = (R1 + j*32) - 0x20.
-    [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+// The B3 wait is the other half of the store read barrier: it drains the PREVIOUS
+// iteration's two STLs before the copy block below rewrites MulA. ptxas puts its own wait
+// in exactly this position -- at the loop head, not next to the overwrite.
+    [B---3--:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
     [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
@@ -365,9 +396,9 @@ call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
     [B------:R-:W-:-:S01]    MOV MulA5, MulR5
     [B------:R-:W-:-:S01]    IMAD MulA6, RZ, RZ, MulR6
     [B------:R-:W-:-:S02]    MOV MulA7, MulR7
-// subp[j-1] = acc
-    [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
-    [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
+// subp[j-1] = acc -- read barrier 3, waited at the loop head above.
+    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
+    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
 
     [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
 // This one is why the ladder ran a SINGLE iteration and stopped. At S05 the back-edge
@@ -409,7 +440,10 @@ call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
 // says the ladder wrote where it meant to. If STL had been walking off the end of the
 // frame, acc could still come out right while this came out wrong.
 //@@STOREACC_BEGIN
-    [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], MulA0
+// B3 as well as B0: the loop's last pair of STLs is still outstanding on the read barrier
+// when the loop exits, and draining it here keeps "one group per barrier, drained before
+// reuse" true on every path out rather than only inside the loop.
+    [B0--3--:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], MulA0
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], MulA2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], MulA4
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], MulA6

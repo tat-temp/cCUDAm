@@ -16,8 +16,15 @@ RCASM=/path/to/RCAsm ./build.sh
 |---|---|---|
 | 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
 | 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
-| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **two bugs found and fixed** — 256 instructions, awaiting a rerun |
+| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **arithmetic confirmed right on hardware**, the frame round-trip fixed — 256 instructions, awaiting a rerun |
 | 2b–2d | `InvMod256`, the ± walk, the point jump, the outer batch loop | not written |
+
+**Stage 2a's ladder arithmetic is confirmed correct on hardware**: `Px` — the accumulator
+after all 511 multiplies — came back EXACT on all 256 threads. So the loop, the indexed
+constant loads, `SubMod256` and `MulMod256` under a real back edge are all right. `Py` is
+the frame round-trip and it is what is still being fixed; `Px` never leaves registers and
+proves nothing about `STL`/`LDL`, which is precisely why the write-back reads a slot back
+out of local memory instead of just reporting the accumulator.
 
 **Stage 1b matches the compiled kernel exactly on an RTX 5090** — 253 EXACT, 3 non-canonical,
 0 wrong out of 256 threads, which is *the same verdict side A gets*. That is the first
@@ -151,8 +158,22 @@ Fix 4 is needed because the device linker rewrites `.nv.reservedSmem.offset0`'s 
 CUDA-specific value the validation table does not know. It is safe: that table is
 validation-only, and `__updateSymtab` copies `st_info` verbatim from the source cubin.
 
-## Seven things that cost time here
+## Eight things that cost time here
 
+- **A store needs a READ barrier if its data registers are rewritten later.** A store does
+  not read its data at issue — the LSU reads it later, and `R-` says nothing about when.
+  Rewrite the register first and the store writes the *new* value. This is the one that
+  broke the ladder after the loop was fixed, and the shape of the failure is worth keeping:
+  `Px` was **exact** while `Py` was wrong, because the accumulator never leaves registers
+  and `Py` is the only value round-tripped through the frame. It came back as
+  `subp[0].hi ++ subp[511].lo` — `subp[0]` being the accumulator **511 iterations later**,
+  so the high half of a store issued *before* the loop read its data *after* the loop
+  finished. The low half read on time; nothing said either had to. ptxas puts a read
+  barrier on all four `STL`s of its own suffix-product loop and waits it at the head of the
+  next iteration, and across both compiled kernels there is not one store whose source is
+  rewritten later and which carries none. Enforced by `./barrier_check.py`, which also
+  found the same omission in the **passing** `local` variant, where the `LDL` pair rewrites
+  the registers the `STL` pair is storing.
 - **A guarded branch needs THIRTEEN cycles after its predicate is written.** Not the five
   an ALU consumer needs — a branch reads its guard far earlier in the pipeline. Measured,
   and about as clean as evidence gets here: across 41 predicate-producer → guarded-branch
@@ -225,7 +246,7 @@ cuobjdump -res-usage TestKernel.cubin   # expect REG:255 STACK:16384 CONSTANT[0]
 cuobjdump -sass TestKernel.cubin
 ./align_check.sh TestKernel.cubin       # register alignment; exits 1 on a violation
 ./stall_check.py TestKernel.cubin       # fixed-latency stalls; exits 1 on a violation
-./barrier_check.py TestKernel.cubin     # scoreboard barriers; exits 1 on a violation
+./barrier_check.py TestKernel.cubin     # scoreboard + store read barriers; exits 1
 ```
 
 Both run automatically at the end of `build.sh`. They are the cheap ones, and between them
