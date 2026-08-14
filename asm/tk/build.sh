@@ -109,6 +109,11 @@ echo "--- scoreboard barriers ---"
 CUDA="$CUDA" python3 "$OUT/barrier_check.py" "$OUT/$OUTNAME" || {
     echo "  ^^ over-subscribed or unwaited barrier: the load may not have LANDED."
 }
+
+echo "--- branch and return targets ---"
+CUDA="$CUDA" python3 "$OUT/pc_check.py" "$OUT/$OUTNAME" || {
+    echo "  ^^ CUDA_ERROR_INVALID_PC at launch. Nothing else in this build will say so."
+}
 echo
 echo "wrote $OUT/$OUTNAME"
 echo "NOTE: use cuobjdump, not nvdisasm -- nvdisasm refuses any kernel containing BRXU,"

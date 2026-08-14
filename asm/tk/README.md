@@ -17,7 +17,7 @@ RCASM=/path/to/RCAsm ./build.sh
 | 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
 | 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
 | 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **runs on hardware, A and B agree, 256/256 EXACT** — 256 instructions |
-| 2b | the single modular inversion: `call_func InvMod256` | **assembles and checks clean** — 976 instructions, awaiting a run |
+| 2b | the single modular inversion: `call_func InvMod256` | **one INVALID_PC found and fixed** — 976 instructions, awaiting a rerun |
 | 2c–2d | the ± walk, the point jump, the outer batch loop | not written |
 
 **Stage 2a matches the compiled kernel on an RTX 5090** — 256 EXACT out of 256 on both the
@@ -195,8 +195,17 @@ Fix 4 is needed because the device linker rewrites `.nv.reservedSmem.offset0`'s 
 CUDA-specific value the validation table does not know. It is safe: that table is
 validation-only, and `__updateSymtab` copies `st_info` verbatim from the source cubin.
 
-## Eight things that cost time here
+## Nine things that cost time here
 
+- **A `BRXU` return address is a uniform PAIR, and `call_func` patches only the low word.**
+  The high word is the caller's, `0xFFFFFFFF` for the backward jump from an appended body
+  back into the kernel, set once in the prologue — and **one line covers one pair**. Stage
+  2b added a second pair so `InvMod256`'s temporaries could not collide with the return
+  address, gave it a low word from `call_func` and no high word from anywhere, and died at
+  launch with `CUDA_ERROR_INVALID_PC`. Nothing had anything to say about it: the assembler
+  was happy, `cuobjdump` disassembled it cleanly, and alignment, stalls and barriers all
+  passed. Every instruction was right; a register was uninitialised. `./pc_check.py` is
+  that rule.
 - **A store needs a READ barrier if its data registers are rewritten later.** A store does
   not read its data at issue — the LSU reads it later, and `R-` says nothing about when.
   Rewrite the register first and the store writes the *new* value. This is the one that
@@ -284,6 +293,7 @@ cuobjdump -sass TestKernel.cubin
 ./align_check.sh TestKernel.cubin       # register alignment; exits 1 on a violation
 ./stall_check.py TestKernel.cubin       # fixed-latency stalls; exits 1 on a violation
 ./barrier_check.py TestKernel.cubin     # scoreboard + store read barriers; exits 1
+./pc_check.py TestKernel.cubin          # branch and return targets; exits 1
 ```
 
 Both run automatically at the end of `build.sh`. They are the cheap ones, and between them

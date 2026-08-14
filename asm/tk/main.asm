@@ -178,7 +178,15 @@ KERNEL TestKernel(regcnt=255, \
 // next_PC + UR + imm with the UR pair sign-extended, so the high half is all-ones and
 // is set once here; the call site only ever writes the low word. Straight from
 // Kernel02's prologue (main.asm: UMOV uCallInv1, 0xFFFFFFFF).
+//
+// ONE PER RETURN-ADDRESS PAIR. A second pair is not a second copy of the same thing that
+// can be skipped -- uCallI got its low word patched by call_func and no high word at all,
+// and stage 2b died at launch with CUDA_ERROR_INVALID_PC. Nothing in the assembler,
+// disassembler or any of the three checkers had anything to say about it: the branch
+// itself is correct and its target register is simply uninitialised. asm/tk/pc_check.py
+// exists for exactly this.
     [B------:R-:W-:-:S01]    UMOV uCallM1, 0xFFFFFFFF
+    [B------:R-:W-:-:S01]    UMOV uCallI1, 0xFFFFFFFF
     [B------:R-:W2:-:S01]    LDCU.64 uDesc, c[0x0][0x358]
     [B------:R-:W3:-:S01]    LDC.64 AddrX, c[0x0][0x380]
     [B------:R-:W3:-:S01]    LDC.64 AddrY, c[0x0][0x388]
