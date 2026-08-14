@@ -16,7 +16,7 @@ RCASM=/path/to/RCAsm ./build.sh
 |---|---|---|
 | 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
 | 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
-| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **runs, answer wrong** — 256 instructions, under diagnosis |
+| 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **barrier bug found and fixed** — 256 instructions, awaiting a rerun |
 | 2b–2d | `InvMod256`, the ± walk, the point jump, the outer batch loop | not written |
 
 **Stage 1b matches the compiled kernel exactly on an RTX 5090** — 253 EXACT, 3 non-canonical,
@@ -46,26 +46,30 @@ and `rem` stay identity. That makes the two remaining unknowns falsifiable on th
   `IMAD.WIDE.U32 R50, R8, R16, RZ` = `Ro0 = RFirst0 * RSecond0` with `Ro=Prod(R50)`,
   `RFirst=PntX(R8)`, `RSecond=PntY(R16)`.
 
-**Stage 2a launches cleanly and computes the wrong answer** (2026-08-14): all 256 threads
-WRONG, `Px` and `Py` alike. `Py` is the half that localises it — it is `subp[half-1]`,
-stored *before* the loop and read back *after* it, and the loop only ever writes below
-that slot, so the pre-loop step is what is wrong and `Px` merely inherits it. That step is
-three mechanisms: the constant-bank read, `SubMod256`, and the local round trip at the top
-of the frame. All three were read back out of the disassembly and are exactly as written —
-including all three `BRXU` call/return displacements, both branch targets, and `c_Gx`'s
-`0x4040` base, which ptxas itself materialises as `MOV R6, 0x4040`. So the next step is to
-read the *value* rather than the verdict; `abtest` now dumps the first wrong `Py` and tests
-it against named hypotheses (`explain_py`).
+**Stage 2a launched cleanly and computed the wrong answer** (2026-08-14) — all 256 threads,
+`Px` and `Py` alike — and the cause was an **over-subscribed scoreboard barrier**. It is
+worth reading the diagnosis, because none of the three checkers that existed could see it
+and the instruction stream was correct throughout.
 
-The leading one is **the constant bank never reaching this module.** An sm_120 cubin
-carries the user constant bank twice — `.nv.constant3` and `.nv.merc.nv.constant.user`,
-with a second symbol table (`.nv.merc.symtab`) naming the latter. nvcc emits both section
-headers pointing at *the same file bytes*; cuAssembler's ELF writer gives them **two
-separate copies**. Both symbol tables carry identical values in both cubins, so every
-offline check passes, and stage 2a is the first hand-written code in this project to read
-bank 3 at all — so "the tables resolve but the kernel reads the other copy" is untested
-rather than unlikely. `upload_const` now reads each table straight back after uploading,
-which separates a failed upload from one that landed where the kernel does not look.
+`Py` localised it. It is `subp[half-1] = Jx - x1`, stored *before* the loop and read back
+*after* it, and the loop only ever writes below that slot — so the pre-loop step was wrong
+and `Px` merely inherited it. Then the arithmetic named the exact registers: thread 0's
+`x1` is `P-1`, whose words 2..7 are all `0xFFFFFFFF`, so `SubMod256` passes those words
+through unchanged. The low 128 bits came back exact and the high 128 bits did not, which
+made `got` limbs 2-3 *literally* the bytes `LDC.64 c[0x3][0x30]` and `[0x38]` returned.
+
+Rebuilding the harness's deterministic input set offline showed those bytes were **not
+anywhere in the 32 KB constant image** — so the loads had not read the wrong address, they
+had not landed at all. The prologue arms barrier 0 with four `PntX` loads and never drains
+them in this variant (the drain lived in stage 1b's write-back, which `sufp` comments out),
+so the ladder's four constant loads brought barrier 0 to **eight** outstanding operations.
+The single wait then let execution through with the last two still in flight. The two that
+survived were the two issued *first* — the ones with the most natural latency behind them.
+
+Fixed by giving the constant loads their own barrier (4) and `batch_size` another (5).
+`barrier_check.py` now enforces it, and the same run exposed a second defect of the class:
+`uDesc` was read at the first `LDG` without barrier 2 ever being waited — correct only
+because the `LDCU` was fifteen instructions back.
 
 Stage 2a is the suffix-product ladder from `GpuCore.cu:224-233`, and it adds three
 mechanisms at once: a real backward-branch loop, a dynamically indexed constant load
@@ -126,8 +130,19 @@ Fix 4 is needed because the device linker rewrites `.nv.reservedSmem.offset0`'s 
 CUDA-specific value the validation table does not know. It is safe: that table is
 validation-only, and `__updateSymtab` copies `st_info` verbatim from the source cubin.
 
-## Five things that cost time here
+## Six things that cost time here
 
+- **One group per barrier, and drain it before reusing it.** A write barrier is a counter,
+  not a flag: every instruction naming it increments it and the wait blocks until it hits
+  zero. That invites piling unrelated loads onto one barrier and waiting once, which is
+  what made stage 2a wrong — eight operations outstanding on barrier 0, and the wait let
+  execution through with the last two still in flight. The ceiling is **measured**: over
+  the compiled kernels ptxas never leaves more than **six** outstanding on one barrier, and
+  this kernel's groups of five are correct on hardware, so the limit is six or seven. It is
+  not about spacing — ptxas puts a wait as little as **two** cycles after the arm it covers.
+  Enforced by `./barrier_check.py`, whose first version used a threshold of 4 and flagged
+  three groups that demonstrably work; the number has to come from measurement or the
+  checker gets ignored.
 - **The stall count is a correctness field, not a performance knob.** `IADD3`, `IMAD`,
   `ISETP`, `LOP3`, `MOV`, `SEL` and `SHF` are fixed-latency: they set no scoreboard
   barrier, so `Snn` is the only thing that makes the next instruction see their result.
@@ -180,6 +195,7 @@ cuobjdump -res-usage TestKernel.cubin   # expect REG:255 STACK:16384 CONSTANT[0]
 cuobjdump -sass TestKernel.cubin
 ./align_check.sh TestKernel.cubin       # register alignment; exits 1 on a violation
 ./stall_check.py TestKernel.cubin       # fixed-latency stalls; exits 1 on a violation
+./barrier_check.py TestKernel.cubin     # scoreboard barriers; exits 1 on a violation
 ```
 
 Both run automatically at the end of `build.sh`. They are the cheap ones, and between them
@@ -191,7 +207,10 @@ Each was checked against a known-broken build rather than only against a passing
 `align_check.sh` flags the pre-fix cubins (`R50, R54`) and clears the shipped ptxas kernel,
 whose own `subp[]` traffic — `STL.128 [R9], R4`, `LDL.128 R32, [R1]` — is 4-aligned
 throughout. `stall_check.py` named all eleven under-stalled pairs in the faulting stage-2a
-cubin, including the two on the loop-exit test.
+cubin, including the two on the loop-exit test. `barrier_check.py` was run against the
+wrong-answer cubin before anything was changed, and named barrier 0 climbing 5→6→7→8 with
+the two over-limit arms being exactly `c[0x3][0x30]` and `c[0x3][0x38]` — the two loads the
+hardware had returned stale — while staying clean on both compiled ptxas kernels.
 
 `STACK:16384` is the one to watch. The frame comes from the *template*, not from the
 injected code, so a template without it yields a kernel whose `IADD3 R1, R1, -0x4000`

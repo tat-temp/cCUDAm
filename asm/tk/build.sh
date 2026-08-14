@@ -105,6 +105,10 @@ echo "--- stall counts ---"
 CUDA="$CUDA" python3 "$OUT/stall_check.py" "$OUT/$OUTNAME" || {
     echo "  ^^ under-stalled dependencies: the consumer may read a STALE value."
 }
+echo "--- scoreboard barriers ---"
+CUDA="$CUDA" python3 "$OUT/barrier_check.py" "$OUT/$OUTNAME" || {
+    echo "  ^^ over-subscribed or unwaited barrier: the load may not have LANDED."
+}
 echo
 echo "wrote $OUT/$OUTNAME"
 echo "NOTE: use cuobjdump, not nvdisasm -- nvdisasm refuses any kernel containing BRXU,"

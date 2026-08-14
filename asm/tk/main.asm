@@ -71,6 +71,28 @@
 // `IMAD COfs, Half, 0x10, RZ` followed immediately by a read of COfs, which at that point
 // had never been written at all.
 
+// BARRIER HYGIENE: ONE GROUP PER BARRIER, AND DRAIN IT BEFORE REUSING IT.
+// A write barrier is not a flag, it is a counter -- every instruction naming it increments
+// it and the wait blocks until it reaches zero. That makes it tempting to pile unrelated
+// loads onto one barrier and wait once. Do not: stage 2a did exactly that and read stale
+// registers. The prologue arms barrier 0 with four PntX loads and, in this variant, never
+// drains them (the drain lived in stage 1b's write-back, which is commented out here), so
+// the ladder's four constant loads made EIGHT operations outstanding on barrier 0. The
+// single wait then let execution through with the last two still in flight, and MulB4..7
+// were read stale -- silently, since the constant read itself was perfectly correct.
+//
+// The give-away in the failing run was that the low 128 bits of the result were exact and
+// the high 128 bits were foreign to the whole 32 KB constant image: the two loads that
+// landed were the two issued FIRST, i.e. the ones with the most natural latency behind
+// them once the wait stopped blocking.
+//
+// The ceiling is measured, not guessed: over the compiled kernels ptxas never leaves more
+// than SIX outstanding on one barrier, and the prologue's groups of five are correct on
+// hardware, so the limit is six or seven. It is not about spacing -- ptxas puts a wait as
+// little as two cycles after the arm it covers. Six barriers exist (0..5) and this kernel
+// uses five; there is no reason to economise.
+// asm/tk/barrier_check.py enforces it against the built cubin.
+
 // REGISTER ALIGNMENT IS A HARDWARE RULE, not a style preference, and getting it wrong
 // costs a CUDA_ERROR_ILLEGAL_INSTRUCTION at run time with nothing wrong in the listing:
 //   * a .64 access needs its register operand EVEN;
@@ -151,7 +173,12 @@ KERNEL TestKernel(regcnt=255, \
     [B------:R-:W-:-:S02]    IMAD.WIDE.U32 AddrC, gID, 0x20, AddrC
 
 //---- load PntX, PntY, Scal, Rem ---------------------------------------------------
-    [B------:R-:W0:-:S01]    LDG.E.64 PntX0, desc[uDesc][AddrX.64]
+// One barrier per group of four, and the B2 wait below is not decoration: uDesc is loaded
+// on barrier 2 and read HERE, so without it this reads the descriptor before the LDCU has
+// landed. It happens to work -- the LDCU is fifteen instructions back -- which is exactly
+// what makes it worth writing down rather than leaving to luck. Barrier 2 is re-armed by
+// the Scal loads immediately below and drained again at the Scal write-back.
+    [B--2---:R-:W0:-:S01]    LDG.E.64 PntX0, desc[uDesc][AddrX.64]
     [B------:R-:W0:-:S01]    LDG.E.64 PntX2, desc[uDesc][AddrX.64+0x8]
     [B------:R-:W0:-:S01]    LDG.E.64 PntX4, desc[uDesc][AddrX.64+0x10]
     [B------:R-:W0:-:S01]    LDG.E.64 PntX6, desc[uDesc][AddrX.64+0x18]
@@ -257,17 +284,23 @@ KERNEL TestKernel(regcnt=255, \
 //---- acc = SubMod256(c_Jx, x1) ; subp[half-1] = acc ---------------------------------
 // c_Jx is at c[0x3][0x20] in the -rdc layout. Loaded into MulB and reduced in place,
 // straight into MulA, which is where the accumulator lives for the rest of the ladder.
-    [B------:R-:W0:-:S01]    LDC.64 MulB0, c[0x3][0x20]
-    [B------:R-:W0:-:S01]    LDC.64 MulB2, c[0x3][0x28]
-    [B------:R-:W0:-:S01]    LDC.64 MulB4, c[0x3][0x30]
-    [B------:R-:W0:-:S01]    LDC.64 MulB6, c[0x3][0x38]
-    [B------:R-:W1:-:S02]    LDC Half, c[0x0][0x3b0]
-    [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointA
+// Barriers 4 and 5, NOT 0 and 1. Barrier 0 already carries the four PntX loads from the
+// prologue and is not drained until this point, so arming it four more times here put
+// EIGHT operations on one barrier -- and the wait below then cleared with the last two
+// still in flight, so MulB4..MulB7 were read stale. That is what made the ladder wrong:
+// see the note on barrier hygiene at the top of this file. The wait covers both groups,
+// because the call reads MulB (barrier 4) and PntX (barrier 0).
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x20]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x28]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x30]
+    [B------:R-:W4:-:S01]    LDC.64 MulB6, c[0x3][0x38]
+    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3b0]
+    [B0---4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointA
 call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointA
 
 // COfs = half*32 = B*16 -- the multiply by 16 is where `half = B >> 1` gets absorbed, so
 // no shift instruction is needed. SAdr = R1 + COfs, putting subp[half-1] at [SAdr-0x20].
-    [B-1----:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
+    [B-----5:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
     [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
     [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
     [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
@@ -281,12 +314,14 @@ call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0, Ret="[B------:R-:W
 // c_Gx is at c[0x3][0x4040]; element j starts at 0x4040 + j*32. The store goes to
 // subp[j-1] = R1 + (j-1)*32 = (R1 + j*32) - 0x20.
     [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
-    [B------:R-:W0:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
-    [B------:R-:W0:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
-    [B------:R-:W0:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
-    [B------:R-:W0:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
 // MulB = c_Gx[j] - x1, in place (SubMod256 is alias-safe; see the KERNEL note).
-    [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointB
+// Barrier 4 again, and it is drained on every iteration by the wait below, so the loop
+// never accumulates. PntX is already resolved by the pre-loop wait and stays live.
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointB
 call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointB
 // MulR = MulA * MulB. Ro is deliberately NOT MulA -- MulMod256 clobbers Ro while still
 // reading its inputs.
