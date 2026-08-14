@@ -324,9 +324,26 @@ static void dump256(const char* tag, const uint64_t v[4])
 //
 //   sufp:  acc = (Jx - x1) * prod_{j=1..half-1}(Gx[j] - x1)          <- GpuCore.cu:224-233
 //   inv:   1 / (acc * (Gx[0] - x1))                                  <- GpuCore.cu:236-239
+//   walk:  prod_{i=0..half-1} dx_inv_i                               <- GpuCore.cu:240-331
 static void wantPx_ladder(const uint64_t jx[4], const uint64_t* gx, unsigned half,
-                          const uint64_t x1[4], bool invm, uint64_t out[4])
+                          const uint64_t x1[4], bool invm, bool walkm, uint64_t out[4])
 {
+	if (walkm) {
+		// The identity the batch inversion exists for is dx_inv_i == 1/(Gx[i] - x1) at
+		// every i, so their product is 1 / prod_i (Gx[i] - x1). That costs ONE inversion
+		// and 512 multiplies here and -- the point -- involves no suffix products at all:
+		// the oracle never runs the algorithm it is judging. Recomputing each inverse
+		// separately would be 512 Fermat exponentiations per thread, and getting them
+		// cheaply would mean reimplementing the ladder, which is the H14 shape.
+		uint64_t prod[4] = {1, 0, 0, 0};
+		for (unsigned i = 0; i < half; ++i) {
+			uint64_t d[4];
+			submodP(&gx[(size_t)i * 4], x1, d);
+			mulmodP(prod, d, prod);
+		}
+		invmodP(prod, out);
+		return;
+	}
 	submodP(jx, x1, out);
 	for (unsigned j = half - 1; j >= 1; --j) {
 		uint64_t d[4];
@@ -363,7 +380,7 @@ int main(int argc, char** argv)
 	if (argc == 2 && !strcmp(argv[1], "--selftest")) return 0;
 	if (argc < 3) {
 		printf("usage: %s <cubinA> <cubinB> [threads] [iters] [mode]\n", argv[0]);
-		printf("       mode = mul (default, stage 1b) | sufp (stage 2a) | inv (stage 2b)\n");
+		printf("       mode = mul (stage 1b) | sufp (2a) | inv (2b) | walk (2c-i)\n");
 		printf("       %s --selftest        (oracle only, no GPU needed)\n", argv[0]);
 		return 1;
 	}
@@ -375,15 +392,17 @@ int main(int argc, char** argv)
 	// place that asks "is the ladder active" asks for sufp, and only the final expected
 	// value differs. Keeping them as two flags rather than one enum is what makes that
 	// relationship visible at each use.
-	const bool invm = (argc > 5) && !strcmp(argv[5], "inv");
+	const bool walkm = (argc > 5) && !strcmp(argv[5], "walk");
+	const bool invm = walkm || ((argc > 5) && !strcmp(argv[5], "inv"));
 	const bool sufp = invm || ((argc > 5) && !strcmp(argv[5], "sufp"));
 	if (argc > 5 && !sufp && strcmp(argv[5], "mul")) {
-		printf("unknown mode '%s' -- expected mul, sufp or inv\n", argv[5]);
+		printf("unknown mode '%s' -- expected mul, sufp, inv or walk\n", argv[5]);
 		return 1;
 	}
-	printf("mode   : %s\n", invm ? "inv  (stage 2b -- the ladder plus one InvMod256)"
-	                      : sufp ? "sufp (stage 2a -- the suffix-product ladder)"
-	                             : "mul  (stage 1b -- one MulMod256)");
+	printf("mode   : %s\n", walkm ? "walk (stage 2c-i -- the inverse chain over every subp[i])"
+	                       : invm ? "inv  (stage 2b -- the ladder plus one InvMod256)"
+	                       : sufp ? "sufp (stage 2a -- the suffix-product ladder)"
+	                              : "mul  (stage 1b -- one MulMod256)");
 	const unsigned block = 256;
 	if (threads % block) { printf("threads must be a multiple of %u\n", block); return 1; }
 	const unsigned grid = threads / block;
@@ -528,7 +547,8 @@ int main(int argc, char** argv)
 	                          : "A and B DISAGREE.");
 
 	//---- 2. each vs the oracle ------------------------------------------------------
-	printf(invm ? "==== each vs the canonical inverse ====\n"
+	printf(walkm ? "==== each vs the canonical product of 1/(Gx[i]-x1) ====\n"
+	     : invm ? "==== each vs the canonical inverse ====\n"
 	     : sufp ? "==== each vs the canonical suffix product ====\n"
 	            : "==== each vs canonical (a*b) mod P ====\n");
 	int bad = 0;
@@ -549,7 +569,7 @@ int main(int argc, char** argv)
 				// right product. It is the same in both ladder modes on purpose: a stage-2b
 				// failure that is really a stage-2a regression lands on Py, not on Px.
 				submodP(jx, a, wantPy);
-				wantPx_ladder(jx, gx.data(), half, a, invm, want);
+				wantPx_ladder(jx, gx.data(), half, a, invm, walkm, want);
 			} else {
 				mulmodP(a, b, want);
 				memcpy(wantPy, b, sizeof(wantPy));      // Py is identity in mul mode
@@ -579,7 +599,7 @@ int main(int argc, char** argv)
 			uint64_t want[4], a[4], b[4];
 			for (int k = 0; k < 4; k++) { a[k] = hx[firstWrong * 4 + k]; b[k] = hy[firstWrong * 4 + k]; }
 			if (sufp) {
-				wantPx_ladder(jx, gx.data(), half, a, invm, want);
+				wantPx_ladder(jx, gx.data(), half, a, invm, walkm, want);
 			} else {
 				mulmodP(a, b, want);
 			}

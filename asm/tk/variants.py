@@ -15,6 +15,8 @@ correct by hand before the ladder found the real problem (a .128 op on R50).
          indexed constant loads, and STL at a computed address
   inv    stage 2a + the single modular inversion (stage 2b): call_func InvMod256, which
          needs 70 temporaries, a uniform of its own, and all active threads in the warp
+  walk   stage 2b + the inverse chain (stage 2c-i): an UPWARD loop that reads every slot
+         of subp[] and advances the inverse, with the point arithmetic still absent
 
 Regions are `//@@NAME_BEGIN` .. `//@@NAME_END`. A region named in `cut` is deleted; one
 named in `on` has its body uncommented; everything else is left as written.
@@ -34,14 +36,15 @@ usage: variants.py <main.asm> <outdir> [name ...]
 import re, sys, os
 
 # name  -> (regions to delete, regions to uncomment)
-NOSTORE = ["STOREACC", "STOREINV"]
+NOSTORE = ["STOREACC", "STOREINV", "STOREWALK"]
 VARIANTS = {
-    "id":    (["SUFP", "INV"] + NOSTORE, ["STOREPNTX", "STOREPNTY"]),
-    "local": (["SUFP", "INV"] + NOSTORE, ["LOCAL", "STOREPNTX", "STOREPNTY"]),
-    "call":  (["SUFP", "INV", "STOREPNTX"] + NOSTORE, ["CALL", "STOREPROD", "STOREPNTY"]),
-    "full":  (["SUFP", "INV", "STOREPNTX"] + NOSTORE, ["CALL", "LOCAL", "STOREPROD", "STOREPNTY"]),
-    "sufp":  (["INV", "STOREINV"], ["STOREACC"]),
-    "inv":   ([], []),                              # == main.asm as committed
+    "id":    (["SUFP", "INV", "WALK"] + NOSTORE, ["STOREPNTX", "STOREPNTY"]),
+    "local": (["SUFP", "INV", "WALK"] + NOSTORE, ["LOCAL", "STOREPNTX", "STOREPNTY"]),
+    "call":  (["SUFP", "INV", "WALK", "STOREPNTX"] + NOSTORE, ["CALL", "STOREPROD", "STOREPNTY"]),
+    "full":  (["SUFP", "INV", "WALK", "STOREPNTX"] + NOSTORE, ["CALL", "LOCAL", "STOREPROD", "STOREPNTY"]),
+    "sufp":  (["INV", "WALK", "STOREINV", "STOREWALK"], ["STOREACC"]),
+    "inv":   (["WALK", "STOREWALK"], ["STOREINV"]),
+    "walk":  ([], []),                              # == main.asm as committed
 }
 
 src, outdir = sys.argv[1], sys.argv[2]

@@ -18,7 +18,8 @@ RCASM=/path/to/RCAsm ./build.sh
 | 1b | `call_func MulMod256` + a local-frame round trip | **runs, and the arithmetic is right** — 184 instructions |
 | 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **runs on hardware, A and B agree, 256/256 EXACT** — 256 instructions |
 | 2b | the single modular inversion: `call_func InvMod256` | **runs on hardware, A and B agree, 256/256 EXACT** — 976 instructions |
-| 2c–2d | the ± walk, the point jump, the outer batch loop | not written |
+| 2c-i | the inverse chain: an upward loop over every `subp[i]` | **assembles and checks clean** — 1,384 instructions, awaiting a run |
+| 2c-ii, 2d | the point arithmetic inside the walk, the point jump, the outer batch loop | not written |
 
 **Stage 2a matches the compiled kernel on an RTX 5090** — 256 EXACT out of 256 on both the
 accumulator and the frame slot, A and B agreeing on every output limb. That covers a real
@@ -68,6 +69,33 @@ identically — so the two sides agree and the oracle allows the `+P` twin.
 The oracle inverts by **Fermat** (`a^(P-2)`), deliberately sharing no structure with the
 binary algorithm it judges — the same reason the C8 vectors came from Python rather than
 from `EcInt`.
+
+**Stage 2c-i is written and has not run.** It is the inverse chain — the loop the point
+arithmetic will live inside — with the point work still absent. On its own it is the last
+piece of pure ladder machinery: an *upward* loop where every other one here counts down, a
+read of **every** slot of `subp[]` rather than just the two ends, and a second consumer of
+the inversion. It gets its own rung because stage 2c-ii brings four vendored routines that
+have never been through the encoder (`SqrMod256`, `SubMod256_3`, `NegMod256`, the parity
+test), and debugging those on top of an unproven loop is what this ladder exists to avoid.
+
+What it writes back is a **product**, not the last value, and that is the whole design of
+the check. The identity the batch inversion exists for is `dx_inv_i == 1/(c_Gx[i] - x1)` at
+*every* `i` — that is what lets one inversion serve B keys. Reporting only the last
+`dx_inv_i` would leave 511 of the 512 `subp[]` reads untested, so the accumulator takes the
+product of all of them, which is `1 / prod_i (c_Gx[i] - x1)`. One wrong slot moves it.
+
+That also keeps the oracle honest: the host needs **one** Fermat inversion of a product it
+forms with 512 multiplies, and never reproduces the suffix-product trick it is judging.
+Recomputing each `1/(Gx[i]-x1)` directly would have been 512 exponentiations per thread, and
+getting them cheaply would have meant running the same algorithm as the kernel — the H14
+shape again.
+
+Two costs worth naming rather than discovering later: each `MulMod256` **binding** gets its
+own copy of the 112-instruction body, and there are five of them now (976 → 1,384
+instructions); and the loop spends 16 register copies an iteration moving `MulR` into the
+accumulator and the running inverse, because a call point's `Ro` is fixed and cannot
+ping-pong. Both are size and speed, not correctness, and both are cheaper to fix once the
+walk is known to be right.
 
 **Stage 1b matches the compiled kernel exactly on an RTX 5090** — 253 EXACT, 3 non-canonical,
 0 wrong out of 256 threads, which is *the same verdict side A gets*. That is the first

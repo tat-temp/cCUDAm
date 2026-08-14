@@ -162,6 +162,7 @@ KERNEL TestKernel(regcnt=255, \
     MulA=R52, MulB=R60, MulR=R68, Prod=R68, Half=R76, \
     Tmp=R84, \
     Inv=R104, InvO=R116, InvT=R128, \
+    Rinv=R200, Acc=R208, Dxi=R216, \
     uDesc=UR4, uCallM=UR6, uCallI=UR8, uInvT=UR10 )
 {
 //---- frame ------------------------------------------------------------------------
@@ -497,9 +498,131 @@ call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:
 //@@INV_END
 
 //====================================================================================
-// STAGE 2c-2d GO HERE:
-//   the +/- walk    -> LDL subp[]      (SubMod256, MulMod256, SqrAddMod256,
-//                                       SubMod256_3, NegMod256)
+// STAGE 2c-i -- the inverse chain. GpuCore.cu:240-331 with the point arithmetic left out:
+//
+//     for (i = 0; i < half-1; ++i) {
+//         mul_mod(dx_inv_i, subp[i], inverse);      <- the per-key inverse
+//         ... the +/- point work, stage 2c-ii ...
+//         sub_mod(gxmi, &c_Gx[i*4], x1);
+//         mul_mod(inverse, inverse, gxmi);          <- advance the chain
+//     }
+//     { i = half-1; mul_mod(dx_inv_i, subp[i], inverse); ... }
+//
+// This is the loop the point arithmetic will live inside, and on its own it is the last
+// piece of pure ladder machinery: an UPWARD loop (every other one here counts down), a read
+// of EVERY slot of subp[] rather than just the two ends, and a second consumer of the
+// inversion. Splitting it out is worth a rung because stage 2c-ii brings four vendored
+// routines this file has never assembled -- SqrMod256, SubMod256_3, NegMod256 and the
+// parity test -- and debugging those on top of an unproven loop is the thing this ladder
+// exists to avoid.
+//
+// WHAT IS WRITTEN BACK, and why it is a product rather than the last value. The identity
+// the whole batch-inversion scheme rests on is dx_inv_i == 1/(c_Gx[i] - x1) at EVERY i --
+// that is what makes one inversion serve B keys. Reporting only the last dx_inv_i would
+// leave 511 of the 512 subp[] reads untested, so Acc accumulates the PRODUCT of all of
+// them, which is 1 / prod_i (c_Gx[i] - x1). One wrong slot moves it.
+//
+// That also keeps the oracle independent, which the XOR alternative did not: the host needs
+// ONE Fermat inversion of a product it can form with 512 multiplies, and never has to
+// reproduce the suffix-product trick it is judging. Recomputing each 1/(Gx[i]-x1) directly
+// would have been 512 inversions per thread, and doing it the cheap way would have meant
+// the oracle running the same algorithm as the kernel -- the H14 shape.
+//
+// C8 NOTE: Acc is 512 MulMod256 results deep, so any of them may be non-canonical and the
+// product carries that. Congruent is still congruent -- (a+P)*b == a*b (mod P) and the fold
+// reduces below 2^256 either way -- so the answer is right and may land in [P, 2^256). The
+// oracle allows the twin. SubMod256 is the one that needs canonical inputs, and both of
+// its operands here are: the harness canonicalises c_Gx, and x1 comes from it.
+//@@WALK_BEGIN
+// Rinv = the running inverse, seeded from InvMod256's output. A separate copy because the
+// chain rewrites it every iteration and MulMod256 cannot write its own input.
+    [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, InvO0
+    [B------:R-:W-:-:S01]    MOV Rinv1, InvO1
+    [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, InvO2
+    [B------:R-:W-:-:S01]    MOV Rinv3, InvO3
+    [B------:R-:W-:-:S01]    IMAD Rinv4, RZ, RZ, InvO4
+    [B------:R-:W-:-:S01]    MOV Rinv5, InvO5
+    [B------:R-:W-:-:S01]    IMAD Rinv6, RZ, RZ, InvO6
+    [B------:R-:W-:-:S01]    MOV Rinv7, InvO7
+// Acc = 1
+    [B------:R-:W-:-:S01]    MOV Acc0, 0x1
+    [B------:R-:W-:-:S01]    IMAD Acc1, RZ, RZ, RZ
+    [B------:R-:W-:-:S01]    MOV Acc2, RZ
+    [B------:R-:W-:-:S01]    IMAD Acc3, RZ, RZ, RZ
+    [B------:R-:W-:-:S01]    MOV Acc4, RZ
+    [B------:R-:W-:-:S01]    IMAD Acc5, RZ, RZ, RZ
+    [B------:R-:W-:-:S01]    MOV Acc6, RZ
+    [B------:R-:W-:-:S01]    IMAD Acc7, RZ, RZ, RZ
+// COfs walks UP in byte offsets, 0 .. (half-1)*32, and Idx holds the limit. Same trick as
+// the ladder: the loop variable is the byte offset, so it indexes subp[] and c_Gx[] with no
+// shift and no multiply, and the test stays an unsigned compare.
+    [B------:R-:W-:-:S01]    MOV COfs, RZ
+    [B------:R-:W-:-:S05]    IMAD Idx, Half, 0x10, RZ
+    [B------:R-:W-:-:S05]    IADD3 Idx, PT, PT, Idx, -0x20, RZ
+
+.label_walk_loop:
+    [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+    [B------:R-:W0:-:S01]    LDL.128 MulA0, [SAdr]
+    [B------:R-:W0:-:S02]    LDL.128 MulA4, [SAdr+0x10]
+// Dxi = subp[i] * inverse  == 1/(c_Gx[i] - x1)
+    [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointG
+call_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointG
+// Acc *= Dxi
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointH
+call_func MulMod256(RFirst=Acc, RSecond=Dxi, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointH
+    [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV Acc1, MulR1
+    [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV Acc3, MulR3
+    [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV Acc5, MulR5
+    [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S01]    MOV Acc7, MulR7
+// gxmi = c_Gx[i] - x1, in place into MulB
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointI
+call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointI
+// inverse *= gxmi
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointJ
+call_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointJ
+    [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV Rinv1, MulR1
+    [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV Rinv3, MulR3
+    [B------:R-:W-:-:S01]    IMAD Rinv4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV Rinv5, MulR5
+    [B------:R-:W-:-:S01]    IMAD Rinv6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S02]    MOV Rinv7, MulR7
+
+    [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, 0x20, RZ
+    [B------:R-:W-:Y:S13]    ISETP.NE.U32.AND P0, PT, COfs, Idx, PT
+    [B------:R-:W-:Y:S05] @P0 BRA.U `(.label_walk_loop)
+
+// Tail, i = half-1: the last dx_inv_i, with no chain update after it. COfs is already
+// (half-1)*32 -- the loop leaves it at the limit, which is exactly the tail's index.
+    [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+    [B------:R-:W0:-:S01]    LDL.128 MulA0, [SAdr]
+    [B------:R-:W0:-:S02]    LDL.128 MulA4, [SAdr+0x10]
+    [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointK
+call_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointK
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointL
+call_func MulMod256(RFirst=Acc, RSecond=Dxi, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointL
+    [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV Acc1, MulR1
+    [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV Acc3, MulR3
+    [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV Acc5, MulR5
+    [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S05]    MOV Acc7, MulR7
+//@@WALK_END
+
+//====================================================================================
+// STAGE 2c-ii AND 2d GO HERE:
+//   the point arithmetic inside the walk   (SqrMod256, SubMod256_3, NegMod256, parity)
 //   the point jump
 //   Scal += B ; Rem -= B  and the outer batch loop
 //====================================================================================
@@ -548,13 +671,28 @@ call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], MulB6
 //@@STOREACC_END
 // Stage 2b's write-back: Px = the inverse, Py = subp[half-1] exactly as above. Keeping Py
-// unchanged across the two stages is deliberate -- it means a stage-2b failure that is
-// really a stage-2a regression shows up on Py rather than being blamed on InvMod256.
+// unchanged across the stages is deliberate -- it means a later failure that is really a
+// stage-2a regression shows up on Py rather than being blamed on the newest thing added.
 //@@STOREINV_BEGIN
-    [B0--3--:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], InvO0
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], InvO2
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], InvO4
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], InvO6
+//  [B0--3--:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], InvO0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], InvO2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], InvO4
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], InvO6
+//  [B------:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
+//  [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+//  [B------:R-:W0:-:S01]    LDL.128 MulB0, [SAdr+-0x20]
+//  [B------:R-:W0:-:S02]    LDL.128 MulB4, [SAdr+-0x10]
+//  [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], MulB0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], MulB2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], MulB4
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], MulB6
+//@@STOREINV_END
+// Stage 2c-i: Px = the product of every dx_inv_i.
+//@@STOREWALK_BEGIN
+    [B0--3--:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], Acc0
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], Acc2
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], Acc4
+    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], Acc6
     [B------:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
     [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
     [B------:R-:W0:-:S01]    LDL.128 MulB0, [SAdr+-0x20]
@@ -563,7 +701,7 @@ call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], MulB2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], MulB4
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], MulB6
-//@@STOREINV_END
+//@@STOREWALK_END
 //@@STOREPNTY_BEGIN
 //  [B-1----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], PntY0
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], PntY2

@@ -22,6 +22,7 @@ echo "--- compiled kernels ---"
 build_one ab_compiled.cubin                      # stage 1b: one mul_mod
 build_one ab_compiled_sufp.cubin -DSTAGE_SUFP=1  # stage 2a: the suffix-product ladder
 build_one ab_compiled_inv.cubin  -DSTAGE_INV=1   # stage 2b: the ladder plus one inv_mod
+build_one ab_compiled_walk.cubin -DSTAGE_WALK=1  # stage 2c-i: the inverse chain
 
 g++ -O2 -std=c++17 -I"$CUDA/include" -o abtest abtest.cpp \
     -L"$CUDA/lib64" -L"$CUDA/lib64/stubs" -lcuda
@@ -39,8 +40,9 @@ if ! ./abtest --selftest 2>/dev/null; then
 fi
 
 echo
-echo "built: ab_compiled.cubin, ab_compiled_sufp.cubin, ab_compiled_inv.cubin, abtest"
+echo "built: ab_compiled{,_sufp,_inv,_walk}.cubin, abtest"
 echo
 echo "run:  ./abtest ab_compiled.cubin      ../../asm/tk/TestKernel.cubin      256 1 mul"
 echo "      ./abtest ab_compiled_sufp.cubin ../../asm/tk/TestKernel_sufp.cubin 256 1 sufp"
 echo "      ./abtest ab_compiled_inv.cubin  ../../asm/tk/TestKernel_inv.cubin  256 1 inv"
+echo "      ./abtest ab_compiled_walk.cubin ../../asm/tk/TestKernel_walk.cubin 256 1 walk"

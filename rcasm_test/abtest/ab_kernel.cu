@@ -71,6 +71,9 @@ __global__ void TestKernel(
     // write anything at all.
     if ((rem[0] | rem[1] | rem[2] | rem[3]) == 0ull) return;
 
+#if STAGE_WALK
+#define STAGE_INV 1
+#endif
 #if STAGE_INV
 #define STAGE_SUFP 1
 #endif
@@ -102,9 +105,30 @@ __global__ void TestKernel(
     inv_mod((uint32_t*)inverse);
 #endif
 
+#if STAGE_WALK
+    // Stage 2c-i, GpuCore.cu:240-331 with the point arithmetic left out. Acc is the product
+    // of every dx_inv_i, so one wrong subp[] slot moves it -- reporting only the last one
+    // would leave 511 of the 512 reads untested.
+    uint64_t wacc[4] = {1, 0, 0, 0};
+    for (int i = 0; i < (int)half - 1; ++i) {
+        uint64_t dx_inv_i[4], gxmi[4];
+        mul_mod(dx_inv_i, subp[i], inverse);
+        mul_mod(wacc, wacc, dx_inv_i);
+        sub_mod(gxmi, &c_Gx[(size_t)i * 4], x1);
+        mul_mod(inverse, inverse, gxmi);
+    }
+    {
+        uint64_t dx_inv_i[4];
+        mul_mod(dx_inv_i, subp[half - 1], inverse);
+        mul_mod(wacc, wacc, dx_inv_i);
+    }
+#endif
+
     for (int k = 0; k < 4; k++) {
         const uint64_t idx = gid * 4 + k;
-#if STAGE_INV
+#if STAGE_WALK
+        Px[idx]            = wacc[k];
+#elif STAGE_INV
         Px[idx]            = inverse[k];
 #else
         Px[idx]            = acc[k];
