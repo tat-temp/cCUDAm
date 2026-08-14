@@ -105,8 +105,29 @@ Fix 4 is needed because the device linker rewrites `.nv.reservedSmem.offset0`'s 
 CUDA-specific value the validation table does not know. It is safe: that table is
 validation-only, and `__updateSymtab` copies `st_info` verbatim from the source cubin.
 
-## Four things that cost time here
+## Five things that cost time here
 
+- **The stall count is a correctness field, not a performance knob.** `IADD3`, `IMAD`,
+  `ISETP`, `LOP3`, `MOV`, `SEL` and `SHF` are fixed-latency: they set no scoreboard
+  barrier, so `Snn` is the only thing that makes the next instruction see their result.
+  Too short and it reads the *previous* value — silently, with no diagnostic anywhere in
+  the build. When the stale value is an address that is `CUDA_ERROR_ILLEGAL_ADDRESS`;
+  when it is not, it is a wrong answer. Stage 2a was written at S01 and died on its first
+  store, because `IMAD COfs, Half, 0x10, RZ` was followed immediately by a read of `COfs`,
+  which at that point had never been written at all. **Rule: S05 whenever the next
+  instruction reads what this one wrote**, enforced by `./stall_check.py`. The threshold
+  is measured, not assumed — the minimum ptxas itself ever emits over the ~4k
+  control-coded instructions of `asm/GpuCore_sm120.asm`:
+
+  | | IMAD | IADD3 | LOP3 | SEL | ISETP | MOV | SHF |
+  |---|---|---|---|---|---|---|---|
+  | min stall | S03 | S04 | S04 | S04 | S05 | S05 | S05 |
+
+  S05 covers all of them with one number. It is what ptxas *chooses*, though, not where
+  the hardware breaks: RCAsm's own `MulMod256` chains back-to-back `IMAD.WIDE.U32` into
+  one accumulator at S01 and is correct on this card, so a same-pipe dependent pair
+  evidently forwards faster than a cross-pipe one. `stall_check.py` therefore fails only
+  on the kernel body and reports the vendored `FUNCTION` bodies as a note.
 - **Register alignment is a hardware rule and nothing in this path checks it.** A `.128`
   access needs its *data* register operand to be a multiple of 4; a `.64` access needs it
   even. The dialect, cuAssembler and the ELF writer all encode whatever number is written,
@@ -137,12 +158,19 @@ call/loop idiom.
 cuobjdump -res-usage TestKernel.cubin   # expect REG:255 STACK:16384 CONSTANT[0]:952
 cuobjdump -sass TestKernel.cubin
 ./align_check.sh TestKernel.cubin       # register alignment; exits 1 on a violation
+./stall_check.py TestKernel.cubin       # fixed-latency stalls; exits 1 on a violation
 ```
 
-`align_check.sh` is the cheap one and the one that catches a whole class of launch faults
-before a GPU is involved. Verified to discriminate rather than merely pass: it flags the
-pre-fix cubins (`R50, R54`) and clears the shipped ptxas kernel, whose own `subp[]`
-traffic — `STL.128 [R9], R4`, `LDL.128 R32, [R1]` — is 4-aligned throughout.
+Both run automatically at the end of `build.sh`. They are the cheap ones, and between them
+they cover the two failure modes that produce a *loadable, clean-looking* cubin that dies
+or lies at run time — which is the whole class that reading the disassembly cannot find,
+because in both cases the listing is correct.
+
+Each was checked against a known-broken build rather than only against a passing one.
+`align_check.sh` flags the pre-fix cubins (`R50, R54`) and clears the shipped ptxas kernel,
+whose own `subp[]` traffic — `STL.128 [R9], R4`, `LDL.128 R32, [R1]` — is 4-aligned
+throughout. `stall_check.py` named all eleven under-stalled pairs in the faulting stage-2a
+cubin, including the two on the loop-exit test.
 
 `STACK:16384` is the one to watch. The frame comes from the *template*, not from the
 injected code, so a template without it yields a kernel whose `IADD3 R1, R1, -0x4000`

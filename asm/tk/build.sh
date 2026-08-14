@@ -97,6 +97,14 @@ echo "--- register alignment ---"
 CUDA="$CUDA" "$OUT/align_check.sh" "$OUT/$OUTNAME" || {
     echo "  ^^ THIS WILL FAULT AT LAUNCH. See asm/tk/README.md."
 }
+
+# 7. Stall counts. Fixed-latency instructions set no scoreboard barrier, so an
+#    under-stalled dependency reads the PREVIOUS value -- an illegal address if it is an
+#    address, a wrong answer if it is not. Neither is diagnosable from the listing.
+echo "--- stall counts ---"
+CUDA="$CUDA" python3 "$OUT/stall_check.py" "$OUT/$OUTNAME" || {
+    echo "  ^^ under-stalled dependencies: the consumer may read a STALE value."
+}
 echo
 echo "wrote $OUT/$OUTNAME"
 echo "NOTE: use cuobjdump, not nvdisasm -- nvdisasm refuses any kernel containing BRXU,"

@@ -48,6 +48,28 @@
 // barrier, yield, stall count. In the mask, barrier N occupies SLOT N -- waiting on
 // barrier 1 is `B-1----`, not `B1-----`, which is rejected as "Illegal control code
 // text". Every one of these is written by hand; there is no scheduler.
+//
+// THE STALL COUNT IS A CORRECTNESS FIELD, not a performance knob. IADD3, IMAD, ISETP,
+// LOP3, MOV, SEL and SHF are FIXED LATENCY: they set no scoreboard barrier, so `Snn` is
+// the only thing that makes the next instruction see their result. Too few cycles and it
+// reads the previous value -- silently, and with no diagnostic anywhere in the build.
+// When the stale value is an address, that is CUDA_ERROR_ILLEGAL_ADDRESS; when it is not,
+// it is a wrong answer.
+//
+// Minimum stall ptxas itself ever emits when the very NEXT instruction consumes a result,
+// measured over the ~4k control-coded instructions of asm/GpuCore_sm120.asm:
+//
+//     IMAD S03    IADD3 S04    LOP3 S04    SEL S04    ISETP S05    MOV S05    SHF S05
+//
+// So: **S05 whenever the next instruction reads what this one wrote.** That covers every
+// measured case with one number, and asm/tk/stall_check.py enforces it against the built
+// cubin. Kernel02 uses S04 or more throughout for the same reason. Only ADJACENT pairs
+// need it; two instructions apart, the intervening stall counts too, which is why the
+// rem==0 test below interleaves TmpA and TmpB and can stay at S01.
+//
+// Stage 2a's ladder was written at S01 and died with ILLEGAL_ADDRESS on its first store:
+// `IMAD COfs, Half, 0x10, RZ` followed immediately by a read of COfs, which at that point
+// had never been written at all.
 
 // REGISTER ALIGNMENT IS A HARDWARE RULE, not a style preference, and getting it wrong
 // costs a CUDA_ERROR_ILLEGAL_INSTRUCTION at run time with nothing wrong in the listing:
@@ -112,15 +134,15 @@ KERNEL TestKernel(regcnt=255, \
 // can also return 32 or prop.maxThreadsPerBlock (GpuPuzzle.cpp:283-288), so a kernel
 // that must survive those has to read ntid.x from c[0x0][0x0] instead of hardcoding
 // 0x100. Stage 1 hardcodes it; the harness launches 256-wide.
-    [B-1----:R-:W-:-:S02]    IMAD gID, BlockID, 0x100, ThrID
+    [B-1----:R-:W-:-:S05]    IMAD gID, BlockID, 0x100, ThrID
 
 //---- if (gid >= threadsTotal) return ----------------------------------------------
 // threadsTotal is 64-bit and gid is < 2^32 by construction, so: exit iff the high word
 // is zero AND gid >= the low word. A non-zero high word means threadsTotal > 2^32 > gid,
 // i.e. always in range.
-    [B---3--:R-:W-:-:S01]    ISETP.GE.U32.AND P0, PT, gID, Thr0, PT
-    [B------:R-:W-:-:S01]    ISETP.EQ.U32.AND P0, PT, Thr1, RZ, P0
-    [B------:R-:W-:Y:S04] @P0 EXIT
+    [B---3--:R-:W-:-:S05]    ISETP.GE.U32.AND P0, PT, gID, Thr0, PT
+    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P0, PT, Thr1, RZ, P0
+    [B------:R-:W-:Y:S05] @P0 EXIT
 
 //---- per-thread addresses: base + gid*32 (four u64 per array) ---------------------
     [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrX, gID, 0x20, AddrX
@@ -152,10 +174,10 @@ KERNEL TestKernel(regcnt=255, \
     [B------:R-:W-:-:S01]    LOP3.LUT TmpA, TmpA, Rem1, RZ, 0xfc, !PT
     [B------:R-:W-:-:S01]    LOP3.LUT TmpB, TmpB, Rem3, RZ, 0xfc, !PT
     [B------:R-:W-:-:S01]    LOP3.LUT TmpA, TmpA, Rem5, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S01]    LOP3.LUT TmpB, TmpB, Rem7, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S01]    LOP3.LUT TmpA, TmpA, TmpB, RZ, 0xfc, !PT
-    [B------:R-:W-:Y:S04]    ISETP.EQ.U32.AND P0, PT, TmpA, RZ, PT
-    [B------:R-:W-:-:S04] @P0 EXIT
+    [B------:R-:W-:-:S05]    LOP3.LUT TmpB, TmpB, Rem7, RZ, 0xfc, !PT
+    [B------:R-:W-:-:S05]    LOP3.LUT TmpA, TmpA, TmpB, RZ, 0xfc, !PT
+    [B------:R-:W-:Y:S05]    ISETP.EQ.U32.AND P0, PT, TmpA, RZ, PT
+    [B------:R-:W-:-:S05] @P0 EXIT
 
 //====================================================================================
 // STAGE 1b -- prove the last two pieces of the carrier with ONE real field operation.
@@ -245,20 +267,20 @@ call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0, Ret="[B------:R-:W
 
 // COfs = half*32 = B*16 -- the multiply by 16 is where `half = B >> 1` gets absorbed, so
 // no shift instruction is needed. SAdr = R1 + COfs, putting subp[half-1] at [SAdr-0x20].
-    [B-1----:R-:W-:-:S01]    IMAD COfs, Half, 0x10, RZ
-    [B------:R-:W-:-:S01]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+    [B-1----:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
+    [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
     [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
     [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
 
 //---- for (j = half-1; j >= 1; --j) --------------------------------------------------
-    [B------:R-:W-:-:S01]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
-    [B------:R-:W-:-:S01]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
-    [B------:R-:W-:Y:S04] @!P0 BRA.U `(.label_sufp_end)
+    [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
+    [B------:R-:W-:-:S05]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
+    [B------:R-:W-:Y:S05] @!P0 BRA.U `(.label_sufp_end)
 
 .label_sufp_loop:
 // c_Gx is at c[0x3][0x4040]; element j starts at 0x4040 + j*32. The store goes to
 // subp[j-1] = R1 + (j-1)*32 = (R1 + j*32) - 0x20.
-    [B------:R-:W-:-:S01]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+    [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
     [B------:R-:W0:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
     [B------:R-:W0:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
     [B------:R-:W0:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
@@ -283,9 +305,9 @@ call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
     [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
     [B------:R-:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
 
-    [B------:R-:W-:-:S01]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
-    [B------:R-:W-:-:S01]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
-    [B------:R-:W-:Y:S04] @P0 BRA.U `(.label_sufp_loop)
+    [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
+    [B------:R-:W-:-:S05]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
+    [B------:R-:W-:Y:S05] @P0 BRA.U `(.label_sufp_loop)
 .label_sufp_end:
 //@@SUFP_END
 
@@ -324,8 +346,8 @@ call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], MulA2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], MulA4
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], MulA6
-    [B------:R-:W-:-:S01]    IMAD COfs, Half, 0x10, RZ
-    [B------:R-:W-:-:S01]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+    [B------:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
+    [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
     [B------:R-:W0:-:S01]    LDL.128 MulB0, [SAdr+-0x20]
     [B------:R-:W0:-:S02]    LDL.128 MulB4, [SAdr+-0x10]
     [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], MulB0
