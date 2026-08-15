@@ -1009,7 +1009,25 @@ error or a swapped subtract before anything was read. Fixed at the head of the `
 hand-written side and under `#if STAGE_JUMP` on the reference, so the eight rungs already verified
 on hardware keep their exact cubins — checked byte-identical after the rebuild. The reference grew
 by exactly 240 instructions (one `sub_mod` + one `mul_mod`) and the SASS by exactly 16, reusing two
-existing call bindings so no function body was duplicated. **Awaiting a re-run.**
+existing call bindings so no function body was duplicated. **The re-run passes: `jump` and `loop`
+are both 256 EXACT / 0 NON-CANON / 0 WRONG on both sides, with `y1 ok  s1 ok  rem ok` and four
+batches.**
+
+**That completes the points-only kernel.** Every rung of the ladder is now green on an RTX 5090 —
+prologue, both early exits, the suffix-product ladder, `InvMod256`, the ± walk over 1,023 points,
+the minus-only tail, the point jump, the two 256-bit bookkeeping chains and the outer batch loop —
+hand-written SASS matching the compiled kernel limb for limb, and both matching an oracle that
+shares no structure with either. `loop` is the rung that closes it: four batches means batches 2-4
+start from a point the kernel itself produced, so the jump's output is proven good enough to be its
+own next input.
+
+**What it is not evidence for.** 256 threads, one block, one launch, and a configuration where every
+thread takes the same batch count — so `InvMod256`'s all-active-threads requirement holds by
+construction and the ragged warp (H4's shape, and the precondition written at the head of
+`main.asm`) remains untested. C8 is untouched: nothing here consumes a parity, and it has to be
+fixed before the hash layer returns. And no timing claim can be made from this kernel as it stands
+— it still carries the `Acc` accumulator, which is bisect scaffolding costing two extra `MulMod256`
+per point against the six the walk actually needs.
 
 Two lessons, both of which this document already contains under other names. **A correct comment is
 not a permanent one**: the tail carried "no chain update after it", which was true on every rung up
