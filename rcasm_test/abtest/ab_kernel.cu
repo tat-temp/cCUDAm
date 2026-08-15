@@ -37,6 +37,10 @@ struct TFindResult {
 };
 
 #include "../../Math.cuh"
+// ge256_u64 / add256_u64 / sub256_u64 -- the batch loop's guard and its bookkeeping, taken
+// from the real kernel's header rather than retyped, so `rem >= B` means here what it means
+// there.
+#include "../../GpuCore.cuh"
 
 __device__ __constant__ uint32_t c_target_words[5];
 __device__ __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
@@ -71,6 +75,12 @@ __global__ void TestKernel(
     // write anything at all.
     if ((rem[0] | rem[1] | rem[2] | rem[3]) == 0ull) return;
 
+#if STAGE_LOOP
+#define STAGE_JUMP 1
+#endif
+#if STAGE_JUMP
+#define STAGE_PTS 1
+#endif
 #if STAGE_PTS
 #define STAGE_WALK 1
 #endif
@@ -88,6 +98,28 @@ __global__ void TestKernel(
     const uint32_t half = batch_size >> 1;
     uint64_t subp[MAX_BATCH_SIZE / 2][4];
     uint64_t acc[4], tmp[4];
+
+#if STAGE_JUMP
+    // The NO_HASH trap, and it bit here exactly as GpuCore.cu:70-82 warns. On the pts rung
+    // the per-point px3/lam/lam^2 are written out, so the walk survives; on jump and loop
+    // nothing consumes them and nvcc deletes the entire +/- walk -- MEASURED, 4392 SASS
+    // instructions at pts against 2496 at jump before this sink existed. The answers would
+    // still have been right (x1 after the jump depends on `inverse`, not on any px3), and
+    // that is what makes it dangerous: A and B would agree, the rung would pass, and the
+    // compiled side would not have run the code the hand-written side is being compared to.
+    // Same escape as the real kernel's: one comparison, outside the loop, against a value
+    // the arithmetic cannot be shown not to produce.
+    uint64_t sink = 0ull;
+#endif
+
+#if STAGE_LOOP
+    // Stage 2d part 2, GpuCore.cu:199-202 and :404-410. The guard is the real kernel's
+    // `live` minus the ballot: this build's threads all take the same number of batches by
+    // construction, and a ragged warp would break InvMod256 on both sides identically rather
+    // than making them disagree, so the ballot is not what is under test here.
+    uint32_t batches_done = 0;
+    while (batches_done < batches_per_launch && ge256_u64(rem, (uint64_t)batch_size)) {
+#endif
 
     sub_mod(acc, c_Jx, x1);
     #pragma unroll
@@ -119,6 +151,14 @@ __global__ void TestKernel(
     // folded into one loop because they differ only by neg_mod. The parity is computed and
     // NOT accumulated -- see the note in asm/tk/main.asm: a non-canonical s flips it, so it
     // is not a well-defined function of the inputs until C8 is fixed.
+    // Only jump and loop need it -- the pts rung keeps the walk alive by writing its
+    // intermediates out. Costs five XORs per point where the mul_mod feeding them is ~222
+    // instructions.
+#if STAGE_JUMP
+    #define SINK_CONSUME(X, ODD) sink ^= (X)[0] ^ (X)[1] ^ (X)[2] ^ (X)[3] ^ (uint64_t)(ODD)
+#else
+    #define SINK_CONSUME(X, ODD) do { } while (0)
+#endif
     #define PTS_BRANCH(NEG)                                                            \
         do {                                                                           \
             uint64_t px3[4], s[4], lam[4], px_i[4], py_i[4];                           \
@@ -139,6 +179,7 @@ __global__ void TestKernel(
             for (int k = 0; k < 4; k++) {                                              \
                 lastpx3[k] = px3[k]; lastlam[k] = lam[k]; lastsqr[k] = sq[k];          \
             }                                                                          \
+            SINK_CONSUME(px3, odd);                                                    \
         } while (0)
     // The tail point's chain, one link per output array: Px = the product, Py = px3,
     // start_scalars = lam, counts256 = lam^2. Four arrays, four links, so a single launch
@@ -172,8 +213,54 @@ __global__ void TestKernel(
     }
 #endif
 
+#if STAGE_JUMP
+    // Stage 2d part 1, GpuCore.cu:383-402. The batch's centre advances by J = half*G, and
+    // this is the only consumer of `inverse` itself -- every other use multiplies it into a
+    // subp[] slot first. A walk that accumulates 1023 correct dx_inv_i can still hand a wrong
+    // value to exactly this, which is why it is its own rung.
+    {
+        uint64_t lam[4], s[4], x3[4], y3[4], Jy_minus_y1[4];
+        sub_mod(Jy_minus_y1, c_Jy, y1);
+        mul_mod(lam, Jy_minus_y1, inverse);
+        sqr_mod(x3, lam);
+        uint64_t Jx_local[4];
+        for (int k = 0; k < 4; k++) Jx_local[k] = c_Jx[k];
+        sub_mod3(x3, x3, x1, Jx_local);
+        sub_mod(s, x1, x3);
+        mul_mod(y3, s, lam);
+        sub_mod(y3, y3, y1);
+        for (int k = 0; k < 4; k++) { x1[k] = x3[k]; y1[k] = y3[k]; }
+    }
+#endif
+
+#if STAGE_LOOP
+        add256_u64(s1, (uint64_t)batch_size);
+        sub256_u64(rem, (uint64_t)batch_size);
+        batches_done++;
+    }
+#endif
+
+#if STAGE_JUMP
+    // The sink's one escape. It will not fire -- 2^-64 per thread -- and this build cannot
+    // report a key anyway; what it does is make ~2000 instructions per batch un-deletable.
+    if (sink == 0xD1CEB0EDFACADE01ull) find_result->scalar[0] = sink;
+#endif
+
+    // STAGE_JUMP has to come FIRST in this chain, not just before STAGE_WALK: under
+    // STAGE_LOOP the walk's wacc/lastpx3 are declared inside the batch loop and are not in
+    // scope out here at all, so an #elif that mentions them would not merely report the wrong
+    // value, it would fail to compile -- which is the preferable of the two.
     for (int k = 0; k < 4; k++) {
         const uint64_t idx = gid * 4 + k;
+#if STAGE_JUMP
+        // Stage 2d writes what the real kernel writes: the advanced point and the advanced
+        // bookkeeping. Four arrays, four independent values, and no intermediate spent on
+        // diagnostics -- the rungs below this one are where a divergence gets localised.
+        Px[idx]            = x1[k];
+        Py[idx]            = y1[k];
+        start_scalars[idx] = s1[k];
+        counts256[idx]     = rem[k];
+#else
 #if STAGE_WALK
         Px[idx]            = wacc[k];
 #elif STAGE_INV
@@ -194,6 +281,7 @@ __global__ void TestKernel(
 #else
         start_scalars[idx] = s1[k];
         counts256[idx]     = rem[k];
+#endif
 #endif
     }
 #else

@@ -425,6 +425,62 @@ static void wantPx_ladder(const uint64_t jx[4], const uint64_t* gx, const uint64
 	}
 }
 
+// Stage 2d's oracle, and the thing to notice about it is how little it has to compute.
+//
+// After the walk's last chain update the kernel's `inverse` is 1/(Jx - x1) -- every factor
+// the ladder multiplied in has been multiplied back out again. So the point jump is one
+// affine addition of the jump constant J = half*G, and the oracle states it directly:
+//
+//     lam = (Jy - y1)/(Jx - x1);  x3 = lam^2 - x1 - Jx;  y3 = (x1 - x3)*lam - y1
+//
+// ONE inversion per batch, and no suffix products anywhere -- the oracle does not run the
+// algorithm it is judging, which is the property stages 2a-2c-i were built around and the
+// one H14 lost. It is also why this rung is worth having even though `walk` passed: the walk
+// accumulates dx_inv_i, and an `inverse` that is wrong only at the very end would leave every
+// accumulated value right and this one wrong.
+//
+// `bump` is the difference between the two rungs. `jump` runs one batch and leaves s1/rem
+// alone, which is exactly what the SASS does without its LOOPTOP/LOOPEND regions; `loop`
+// runs the real guard and advances both.
+static void wantJump(const uint64_t jx[4], const uint64_t jy[4],
+                     const uint64_t x1in[4], const uint64_t y1in[4],
+                     const uint64_t s1in[4], const uint64_t remin[4],
+                     uint64_t B, unsigned batches, bool bump,
+                     uint64_t outX[4], uint64_t outY[4],
+                     uint64_t outS[4], uint64_t outC[4])
+{
+	uint64_t x1[4], y1[4], s1[4], rem[4];
+	memcpy(x1, x1in, 32); memcpy(y1, y1in, 32);
+	memcpy(s1, s1in, 32); memcpy(rem, remin, 32);
+
+	for (unsigned n = 0; n < batches; n++) {
+		if (bump && !(rem[3] | rem[2] | rem[1]) && rem[0] < B) break;   // ge256_u64
+		uint64_t d[4], dinv[4], s[4], lam[4], sq[4], t[4], x3[4], y3[4];
+		submodP(jx, x1, d);
+		invmodP(d, dinv);
+		submodP(jy, y1, s);
+		mulmodP(s, dinv, lam);
+		mulmodP(lam, lam, sq);
+		submodP(sq, x1, t);
+		submodP(t, jx, x3);
+		submodP(x1, x3, t);
+		mulmodP(t, lam, y3);
+		submodP(y3, y1, y3);
+		memcpy(x1, x3, 32); memcpy(y1, y3, 32);
+		if (!bump) continue;
+		// s1 += B and rem -= B, 256-bit against a value that fits in one limb. rem >= B is
+		// guaranteed by the guard above, so no borrow escapes limb 3.
+		uint64_t c = (s1[0] + B < s1[0]) ? 1ull : 0ull;
+		s1[0] += B;
+		for (int k = 1; k < 4 && c; k++) { s1[k] += 1; c = (s1[k] == 0) ? 1ull : 0ull; }
+		uint64_t bw = (rem[0] < B) ? 1ull : 0ull;
+		rem[0] -= B;
+		for (int k = 1; k < 4 && bw; k++) { bw = (rem[k] == 0) ? 1ull : 0ull; rem[k] -= 1; }
+	}
+	memcpy(outX, x1, 32); memcpy(outY, y1, 32);
+	memcpy(outS, s1, 32); memcpy(outC, rem, 32);
+}
+
 static void explain_py(const uint64_t got[4], const uint64_t x1[4], const uint64_t jx[4])
 {
 	const uint64_t zero[4] = {0, 0, 0, 0};
@@ -448,6 +504,7 @@ int main(int argc, char** argv)
 	if (argc < 3) {
 		printf("usage: %s <cubinA> <cubinB> [threads] [iters] [mode]\n", argv[0]);
 		printf("       mode = mul (1b) | sufp (2a) | inv (2b) | walk (2c-i) | pts (2c-ii)\n");
+		printf("              | jump (2d, the point jump) | loop (2d, the batch loop)\n");
 		printf("       %s --selftest        (oracle only, no GPU needed)\n", argv[0]);
 		return 1;
 	}
@@ -462,12 +519,21 @@ int main(int argc, char** argv)
 	const bool ptsm = (argc > 5) && !strcmp(argv[5], "pts");
 	const bool walkm = ptsm || ((argc > 5) && !strcmp(argv[5], "walk"));
 	const bool invm = walkm || ((argc > 5) && !strcmp(argv[5], "inv"));
-	const bool sufp = invm || ((argc > 5) && !strcmp(argv[5], "sufp"));
+	// jump and loop are stage 2d and they are NOT supersets of ptsm here, deliberately. They
+	// run the same kernel path, but their oracle is the affine addition below rather than the
+	// per-point product -- pts costs 512 Fermat inversions per thread and answers a question
+	// these two do not ask.
+	const bool loopm = (argc > 5) && !strcmp(argv[5], "loop");
+	const bool jumpm = loopm || ((argc > 5) && !strcmp(argv[5], "jump"));
+	const bool sufp = invm || jumpm || ((argc > 5) && !strcmp(argv[5], "sufp"));
 	if (argc > 5 && !sufp && strcmp(argv[5], "mul")) {
-		printf("unknown mode '%s' -- expected mul, sufp, inv, walk or pts\n", argv[5]);
+		printf("unknown mode '%s' -- expected mul, sufp, inv, walk, pts, jump or loop\n",
+		       argv[5]);
 		return 1;
 	}
-	printf("mode   : %s\n", ptsm ? "pts  (stage 2c-ii -- the +/- point arithmetic)"
+	printf("mode   : %s\n", loopm ? "loop (stage 2d -- the outer batch loop)"
+	                      : jumpm ? "jump (stage 2d -- the point jump)"
+	                       : ptsm ? "pts  (stage 2c-ii -- the +/- point arithmetic)"
 	                      : walkm ? "walk (stage 2c-i -- the inverse chain over every subp[i])"
 	                       : invm ? "inv  (stage 2b -- the ladder plus one InvMod256)"
 	                       : sufp ? "sufp (stage 2a -- the suffix-product ladder)"
@@ -526,6 +592,12 @@ int main(int argc, char** argv)
 	// three places that silently produce a plausible wrong answer if they disagree.
 	const unsigned BATCH = 1024;
 	const unsigned half = BATCH >> 1;
+	// Four batches on the loop rung, one everywhere else. rem is seeded at 0x4000 = 16*B, so
+	// four is comfortably inside the range and still exercises the guard, the back edge and
+	// three re-entries into the ladder with a point the previous batch produced. One would
+	// run the loop body once and prove only that the branch was taken. Declared beside BATCH
+	// because the oracle and the launch must agree on it -- the same reason BATCH is.
+	const unsigned BPL = loopm ? 4u : 1u;
 
 	std::vector<uint64_t> gx(half * 4), gy(half * 4);
 	for (size_t i = 0; i < gx.size(); i++) { gx[i] = rnd64(); gy[i] = rnd64(); }
@@ -570,7 +642,7 @@ int main(int argc, char** argv)
 		CK(cuMemsetD8(M[m].fr, 0, 128), "memset fr");
 
 		unsigned long long thrTotal = threads;
-		unsigned batch = BATCH, bpl = 1;
+		unsigned batch = BATCH, bpl = BPL;
 		void* args[8] = {&M[m].px, &M[m].py, &M[m].sc, &M[m].ct, &M[m].fr,
 		                 &thrTotal, &batch, &bpl};
 
@@ -616,7 +688,8 @@ int main(int argc, char** argv)
 	                          : "A and B DISAGREE.");
 
 	//---- 2. each vs the oracle ------------------------------------------------------
-	printf(ptsm ? "==== each vs the canonical product of every px3 ====\n"
+	printf(jumpm ? "==== each vs the canonical point after the jump ====\n"
+	     : ptsm ? "==== each vs the canonical product of every px3 ====\n"
 	     : walkm ? "==== each vs the canonical product of 1/(Gx[i]-x1) ====\n"
 	     : invm ? "==== each vs the canonical inverse ====\n"
 	     : sufp ? "==== each vs the canonical suffix product ====\n"
@@ -633,7 +706,12 @@ int main(int argc, char** argv)
 	for (size_t t = 0; t < threads; t++) {
 		uint64_t a[4], b[4];
 		for (int k = 0; k < 4; k++) { a[k] = hx[t * 4 + k]; b[k] = hy[t * 4 + k]; }
-		if (sufp) {
+		if (jumpm) {
+			// All four arrays carry real results on this rung, so all four are filled here.
+			wantJump(jx, jy, a, b, &hs[t * 4], &hc[t * 4], (uint64_t)BATCH, BPL, loopm,
+			         &wantPxAll[t * 4], &wantPyAll[t * 4],
+			         &wantScAll[t * 4], &wantCtAll[t * 4]);
+		} else if (sufp) {
 			// subp[half-1] is the ladder's first factor on its own -- the value stored
 			// before the loop, at the top of the frame, so reading it back says the ladder
 			// stored where it meant to rather than merely computing the right product. It
@@ -668,13 +746,40 @@ int main(int argc, char** argv)
 				case 1: noncanon++; break;
 				default: wrong++; if (firstWrong == (size_t)-1) firstWrong = t; break;
 			}
-			for (int k = 0; k < 4; k++) {
-				if (outPy[m][t * 4 + k] != wantPy[k]) {
+			if (jumpm) {
+				// y1 comes off the end of MulMod256 -> SubMod256, so it is congruent but not
+				// guaranteed canonical -- C8 reaches the point jump exactly as it reaches
+				// everything else. An equality test here would report a correct kernel as
+				// broken on a value that is arithmetically right.
+				int ky = 0;
+				if (classify(&outPy[m][t * 4], wantPy, &ky) > 1) {
 					idPy++;
 					if (firstPy == (size_t)-1) firstPy = t;
 				}
+			} else {
+				for (int k = 0; k < 4; k++) {
+					if (outPy[m][t * 4 + k] != wantPy[k]) {
+						idPy++;
+						if (firstPy == (size_t)-1) firstPy = t;
+					}
+				}
 			}
-			if (ptsm) {
+			if (jumpm) {
+				// s1 and rem are integer bookkeeping, not field elements: exact or wrong,
+				// with no congruence to allow for. On the `jump` rung they are still the
+				// inputs unchanged, which is the check that the point jump did not scribble
+				// on them.
+				for (int k = 0; k < 4; k++) {
+					if (outSc[m][t * 4 + k] != wantScAll[t * 4 + k]) {
+						idSc++;
+						if (firstSc == (size_t)-1) firstSc = t;
+					}
+					if (outCt[m][t * 4 + k] != wantCtAll[t * 4 + k]) {
+						idCt++;
+						if (firstCt == (size_t)-1) firstCt = t;
+					}
+				}
+			} else if (ptsm) {
 				// Lam and Sqr come straight out of MulMod256 and SqrMod256, so they are
 				// congruent but not necessarily canonical -- C8 again. Comparing them for
 				// equality would report the two links as broken on a value that is
@@ -700,7 +805,11 @@ int main(int argc, char** argv)
 		}
 		printf("  %s:  EXACT %zu   NON-CANON %zu   WRONG %zu   (of %u)\n",
 		       M[m].name, exact, noncanon, wrong, threads);
-		if (ptsm)
+		if (jumpm)
+			printf("      jumped point -- x1 above, y1 %s  s1 %s  rem %s%s\n",
+			       idPy ? "WRONG" : "ok", idSc ? "WRONG" : "ok", idCt ? "WRONG" : "ok",
+			       loopm ? "   (4 batches)" : "   (s1/rem must be UNCHANGED on this rung)");
+		else if (ptsm)
 			printf("      tail chain -- lam %s  lam^2 %s  px3 %s   (scalars/counts spent"
 			       " on the bisect, so no identity guard on this rung)\n",
 			       idSc ? "WRONG" : "ok", idCt ? "WRONG" : "ok", idPy ? "WRONG" : "ok");
@@ -743,12 +852,13 @@ int main(int argc, char** argv)
 			// only thing wrong with it was the line that produced it.
 			memcpy(wp, &wantPyAll[firstPy * 4], sizeof(wp));
 			printf("      first wrong Py at thread %zu%s\n", firstPy,
-			       ptsm ? "   (px3 of the tail point: i = half-1, minus branch)"
+			       jumpm ? "   (y1 after the jump)"
+			       : ptsm ? "   (px3 of the tail point: i = half-1, minus branch)"
 			       : sufp ? "   (subp[half-1] = Jx - x1, stored before the loop)" : "");
 			dump256("x1", a);
-			if (sufp && !ptsm) dump256("Jx", jx);
+			if (sufp && !ptsm && !jumpm) dump256("Jx", jx);
 			dump_delta(&outPy[m][firstPy * 4], wp);
-			if (sufp && !ptsm) explain_py(&outPy[m][firstPy * 4], a, jx);
+			if (sufp && !ptsm && !jumpm) explain_py(&outPy[m][firstPy * 4], a, jx);
 		}
 		// The two links BEHIND px3. Reported in chain order -- lam, then lam^2, then px3
 		// above -- so the first one marked wrong is the call that diverges. If all three
@@ -763,6 +873,19 @@ int main(int argc, char** argv)
 		if (ptsm && idCt) {
 			printf("      first wrong lam^2 at thread %zu"
 			       "   (SqrMod256(lam), tail)\n", firstCt);
+			dump_delta(&outCt[m][firstCt * 4], &wantCtAll[firstCt * 4]);
+		}
+		// The bookkeeping halves of stage 2d. A wrong s1 with a right rem (or the reverse)
+		// says the carry chain is wrong in one of the two and not that the loop miscounted;
+		// both wrong by the same multiple of B says it ran the wrong number of batches.
+		if (jumpm && idSc) {
+			printf("      first wrong s1 at thread %zu   (%s)\n", firstSc,
+			       loopm ? "s1 += B, once per batch" : "must be unchanged");
+			dump_delta(&outSc[m][firstSc * 4], &wantScAll[firstSc * 4]);
+		}
+		if (jumpm && idCt) {
+			printf("      first wrong rem at thread %zu   (%s)\n", firstCt,
+			       loopm ? "rem -= B, once per batch" : "must be unchanged");
 			dump_delta(&outCt[m][firstCt * 4], &wantCtAll[firstCt * 4]);
 		}
 		if (idPy || idSc || idCt) bad = 1;

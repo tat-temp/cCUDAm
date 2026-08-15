@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 : "${RCASM:?set RCASM to the RCAsm checkout}"
 V="${WORK:-/tmp/tkbuild}/variants"
 mkdir -p "$V"
-VARIANTS="${VARIANTS:-id local call full sufp inv walk pts}"
+VARIANTS="${VARIANTS:-id local call full sufp inv walk pts jump loop}"
 python3 variants.py main.asm "$V" $VARIANTS
 echo
 for n in $VARIANTS; do
@@ -22,7 +22,7 @@ done
 echo "Run each against the compiled kernel; the first fault names the cause:"
 for n in $VARIANTS; do
     case "$n" in
-        sufp|inv|walk|pts) echo "  ./abtest ab_compiled_$n.cubin ../../asm/tk/TestKernel_$n.cubin 256 1 $n" ;;
+        sufp|inv|walk|pts|jump|loop) echo "  ./abtest ab_compiled_$n.cubin ../../asm/tk/TestKernel_$n.cubin 256 1 $n" ;;
         *)        echo "  ./abtest ab_compiled.cubin ../../asm/tk/TestKernel_$n.cubin 256" ;;
     esac
 done

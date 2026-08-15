@@ -992,8 +992,22 @@ pass**:
 
 `id` and `local` compute something different from the compiled kernel by construction, so their
 mismatch is the expected reading; the other six are held to their answers against an independent
-oracle. What is left of the plan's kernel body is **stage 2d** — the point jump, `Scal += B`,
-`Rem -= B`, and the outer batch loop.
+oracle.
+
+**Stage 2d is written and has not run.** Two more rungs, because it is two constructs: `jump` adds
+the point jump — the first and only consumer of the inverse chain's *final* value, which is why
+`walk` passing did not already cover it — and `loop` adds `s1 += B`, `rem -= B` and the back edge,
+running four batches so the third and fourth start from a point the kernel itself produced.
+`loop` is main.asm verbatim, so its cubin must come out byte-identical to `TestKernel.cubin` and
+the rebuild fails if it does not. Everything offline passes: alignment, stalls, barriers and
+branch/return targets on all eleven cubins, and the two the checkers caught while it was being
+written are recorded at the point of the fix (a fold reading its operand three cycles after it was
+written, and `Scal` read in the loop body before the barrier its load armed was ever waited).
+
+The jump's oracle is worth noting for how little it computes: after the walk's last chain update
+`inverse` is exactly `1/(Jx - x1)` — every factor the ladder multiplied in has been multiplied back
+out — so the expectation is one affine point addition, one inversion per batch, and no suffix
+products anywhere. The oracle still does not run the algorithm it is judging.
 
 The `pts` rung took three hardware runs and cost a seventh hardware rule; the rule and the
 correction to it are recorded at the head of `asm/tk/main.asm` and in `asm/mod_sub.asm`. In short:

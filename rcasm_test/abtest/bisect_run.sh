@@ -39,7 +39,7 @@ cd "$(dirname "$0")"
 [ -x ./abtest ] || { echo "build first: ./build.sh"; exit 1; }
 
 fault=""
-for n in id local call full sufp inv walk pts; do
+for n in id local call full sufp inv walk pts jump loop; do
     f="../../asm/tk/TestKernel_$n.cubin"
     printf '######## %-5s ' "$n"
     if [ ! -f "$f" ]; then echo "-- MISSING $f"; continue; fi
@@ -48,6 +48,8 @@ for n in id local call full sufp inv walk pts; do
         inv)  out=$(./abtest ab_compiled_inv.cubin  "$f" 256 1 inv  2>&1) ;;
         walk) out=$(./abtest ab_compiled_walk.cubin "$f" 256 1 walk 2>&1) ;;
         pts)  out=$(./abtest ab_compiled_pts.cubin  "$f" 256 1 pts  2>&1) ;;
+        jump) out=$(./abtest ab_compiled_jump.cubin "$f" 256 1 jump 2>&1) ;;
+        loop) out=$(./abtest ab_compiled_loop.cubin "$f" 256 1 loop 2>&1) ;;
         *)    out=$(./abtest ab_compiled.cubin      "$f" 256 1 mul  2>&1) ;;
     esac
     err=$(echo "$out" | grep -E 'cuCtxSynchronize \(kernel\)|cuModuleLoad|cuLaunchKernel' | head -1)
@@ -61,7 +63,7 @@ for n in id local call full sufp inv walk pts; do
         # Let the whole diagnostic block through, not just the verdict line. When a rung
         # is held to its answer, "WRONG 256" is the least useful thing the harness knows;
         # the value it actually computed is the thing that names the cause.
-        echo "$out" | grep -E 'EXACT|identity check|subp\[half-1\]|last px3|A and B|first wrong|tail chain|^ +(x1|Jx|a|b|want|got|delta) +:|==>' \
+        echo "$out" | grep -E 'EXACT|identity check|subp\[half-1\]|last px3|A and B|first wrong|tail chain|jumped point|^ +(x1|Jx|a|b|want|got|delta) +:|==>' \
                     | sed 's/^/  /'
     fi
 done

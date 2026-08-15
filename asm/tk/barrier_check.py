@@ -44,15 +44,23 @@ perfectly correct in each case:
      128 bits were foreign to the entire constant image: the two loads that landed were the
      two issued first.
 
-THE THRESHOLD IS MEASURED, NOT GUESSED, and it is ptxas's ceiling rather than a known
-hardware limit. Over the compiled kernels the most ptxas ever leaves outstanding on one
-barrier is SIX; this kernel ran EIGHT and read stale registers, while its groups of five
-(barriers 2 and 3 in the prologue) are correct on hardware. So the true limit is six or
-seven, and MAX_OUTSTANDING is set to 6 -- the largest value the compiler itself relies on.
+**CHECK 3 IS A NOTE, NOT A FAILURE, AND ITS THRESHOLD IS KNOWN TO BE WRONG.** It used to
+read: "over the compiled kernels the most ptxas ever leaves outstanding on one barrier is
+SIX; this kernel ran EIGHT and read stale registers, so the true limit is six or seven."
+That was measured over the kernels that existed at the time. The stage-2d compiled kernels
+put **TWELVE** LDGs on barrier 5 and are correct by construction -- they are ptxas's output.
 
-A first version of this check used 4 and flagged three groups that demonstrably work. A
-checker that cries wolf on known-good code is one that gets ignored, so the number has to
-come from measurement.
+So the count cannot be the mechanism. Both observations stand: 6 was really the corpus
+maximum, and the stage-2a ladder really did read MulB4..MulB7 stale with eight outstanding.
+What is refuted is the inference joining them. Whatever went wrong in stage 2a, it was not
+"more than six on one barrier", and the fix that worked -- one group per barrier, drained
+before reuse -- is good practice whether or not the count explains anything.
+
+The number is kept at 6 as an advisory because a group that large is still worth looking at,
+and the check still prints. It cannot fail a build: a gate that rejects the compiler's own
+output is a gate that gets switched off, and this is the second threshold in this directory
+to be falsified by simply looking at a larger corpus (see stall_check.py's note on the
+two-cycle carry pairs). Measure the corpus you have; do not promote it to a limit.
 
 What the count does NOT appear to be about is spacing: ptxas puts a wait as little as TWO
 cycles after the arm it covers (`LDC R5, c[0x0][0x360]` followed immediately by an IMAD
@@ -170,7 +178,7 @@ def check(path):
 
     live = {b: [] for b in range(6)}     # barrier -> outstanding arming instructions
     pending = {}                         # (prefix, regnum) -> (barrier, addr, text)
-    bad, note = [], []
+    bad, note, over = [], [], []
 
     def flag(k, msg):
         (bad if k <= kend else note).append(msg)
@@ -250,10 +258,14 @@ def check(path):
         if wbar != 7:
             live[wbar].append(addr)
             if len(live[wbar]) > MAX_OUTSTANDING:
-                flag(k, "        /*%s*/ makes %d operations outstanding on barrier %d\n"
-                        "            armed at %s\n"
-                        "            %s" % (addr, len(live[wbar]), wbar,
-                                            " ".join(live[wbar]), text))
+                # A NOTE, never a failure -- see the docstring. ptxas puts twelve on one
+                # barrier in the stage-2d compiled kernels, so this count cannot be the
+                # mechanism it was thought to be, and a gate that fails the compiler's own
+                # output is a gate that gets switched off.
+                over.append("        /*%s*/ makes %d operations outstanding on barrier %d\n"
+                            "            armed at %s\n"
+                            "            %s" % (addr, len(live[wbar]), wbar,
+                                                " ".join(live[wbar]), text))
             d = dst(text)
             if d:
                 pfx, base, n = d
@@ -261,6 +273,8 @@ def check(path):
                     pending[(pfx, base + j)] = (wbar, addr, text, k)
 
     tail = "   (%d in the vendored FUNCTION bodies -- expected)" % len(note) if note else ""
+    if over:
+        tail += "   (%d over %d outstanding -- note only)" % (len(over), MAX_OUTSTANDING)
     if not bad:
         print("OK    %s   (%d instructions, kernel body %d)%s"
               % (path, len(rows), kend + 1, tail))

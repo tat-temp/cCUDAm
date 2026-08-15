@@ -19,6 +19,10 @@ correct by hand before the ladder found the real problem (a .128 op on R50).
          of subp[] and advances the inverse, with the point arithmetic still absent
   pts    stage 2c-i + the +/- point arithmetic (stage 2c-ii): SqrMod256, SubMod256_3 and
          NegMod256, both branches and the minus-only tail
+  jump   stage 2c-ii + the point jump (stage 2d, part 1): one batch, then x1/y1 advance by
+         J = half*G through the inverse the walk finished with
+  loop   jump + s1 += B, rem -= B and the outer batch loop (stage 2d, part 2) -- the whole
+         points-only kernel, and main.asm exactly as written
 
 Regions are `//@@NAME_BEGIN` .. `//@@NAME_END`. A region named in `cut` is deleted; one
 named in `on` has its body uncommented; everything else is left as written.
@@ -31,13 +35,12 @@ and its MulMod256 calls overwrite the register Prod aliases. It would assemble, 
 produce numbers. So the TOP rung needs no edits at all, and the ones below
 it get rebuilt.
 
-**pts is now the one exception, and deliberately so.** It swaps STOREID for STORELAM, which
-spends start_scalars and counts256 on the tail point's lam and lam^2 rather than copying the
-inputs back. So `TestKernel.cubin` (main.asm as written) and `TestKernel_pts.cubin` are no
-longer byte-identical, and a rebuild that checks for that will say so. The cost is the
-identity guard on this one rung; the eight others keep it, which is why the swap lives in
-variants.py rather than in main.asm. main.asm stays the real kernel -- stage 2d needs those
-two arrays back for `Scal += B` and `Rem -= B`.
+**`loop` is the rung with no edits, and that is the invariant to check after a rebuild:**
+`TestKernel_loop.cubin` must come out byte-identical to `TestKernel.cubin`. Every other rung
+now differs from main.asm, `pts` most of all -- it swaps STOREID for STORELAM and STOREPNTX/Y
+for STOREPTS, spending all four output arrays on the tail point's chain rather than on the
+kernel's actual results. That costs `pts` its identity guard, which is exactly why the swap
+lives here and not in main.asm: the eight other rungs keep it.
 
 Exactly one of the STORE* regions writes Px in each variant, and exactly one writes Py.
 
@@ -46,23 +49,36 @@ usage: variants.py <main.asm> <outdir> [name ...]
 import re, sys, os
 
 # name  -> (regions to delete, regions to uncomment)
+#
+# LOOPTOP and LOOPEND are the outer batch loop's two halves and they are ONE construct: the
+# label lives in the first and the back edge in the second, so a rung that cuts one must cut
+# the other or the assembler is handed a branch to a label that no longer exists.
 NOSTORE = ["STOREACC", "STOREINV", "STOREWALK", "STOREPTS"]
+NOLOOP = ["JUMP", "LOOPTOP", "LOOPEND"]
+NOPNT = ["STOREPNTX", "STOREPNTY"]
 VARIANTS = {
-    "id":    (["SUFP", "INV", "WALK"] + NOSTORE, ["STOREPNTX", "STOREPNTY"]),
-    "local": (["SUFP", "INV", "WALK"] + NOSTORE, ["LOCAL", "STOREPNTX", "STOREPNTY"]),
-    "call":  (["SUFP", "INV", "WALK", "STOREPNTX"] + NOSTORE, ["CALL", "STOREPROD", "STOREPNTY"]),
-    "full":  (["SUFP", "INV", "WALK", "STOREPNTX"] + NOSTORE, ["CALL", "LOCAL", "STOREPROD", "STOREPNTY"]),
-    "sufp":  (["INV", "WALK", "STOREINV", "STOREWALK", "STOREPTS"], ["STOREACC"]),
-    "inv":   (["WALK", "STOREWALK", "STOREPTS"], ["STOREINV"]),
+    "id":    (["SUFP", "INV", "WALK"] + NOLOOP + NOSTORE, []),
+    "local": (["SUFP", "INV", "WALK"] + NOLOOP + NOSTORE, ["LOCAL"]),
+    "call":  (["SUFP", "INV", "WALK", "STOREPNTX"] + NOLOOP + NOSTORE, ["CALL", "STOREPROD"]),
+    "full":  (["SUFP", "INV", "WALK", "STOREPNTX"] + NOLOOP + NOSTORE,
+              ["CALL", "LOCAL", "STOREPROD"]),
+    "sufp":  (["INV", "WALK", "STOREINV", "STOREWALK"] + NOLOOP + NOPNT, ["STOREACC"]),
+    "inv":   (["WALK", "STOREWALK"] + NOLOOP + NOPNT, ["STOREINV"]),
     # PLUS/PLUST and WACC/WACCT are nested INSIDE the WALK region, so the rungs above that
     # cut WALK must not name them -- the marker is already gone by the time they are looked
     # up, and region() exits rather than shrugging.
-    "walk":  (["PLUS", "PLUST", "STOREPTS"], ["WACC", "WACCT", "STOREWALK"]),
+    "walk":  (["PLUS", "PLUST"] + NOLOOP + NOPNT, ["WACC", "WACCT", "STOREWALK"]),
     # pts spends start_scalars/counts256 on the tail point's Lam and Sqr instead of on the
-    # identity copy. It is the only rung that does, so it is the only one that names
-    # STOREID/STORELAM -- every other rung leaves both exactly as main.asm has them, which
-    # keeps the identity guard on the eight rungs that are not being bisected.
-    "pts":   (["STOREID"], ["STORELAM"]),
+    # identity copy, and Px/Py on the accumulated product and the tail's px3. It is the only
+    # rung that does either.
+    "pts":   (NOLOOP + NOPNT + ["STOREID"], ["STOREPTS", "STORELAM"]),
+    # Stage 2d in two rungs, because it is two constructs. `jump` is one batch with the point
+    # jump on the end -- the first time the inverse chain's final value is CONSUMED rather
+    # than accumulated, which is why the walk rung passing did not already cover it. `loop`
+    # adds s1 += B, rem -= B and the back edge, and is main.asm verbatim: no edits at all, so
+    # its cubin must come out byte-identical to TestKernel.cubin and the rebuild checks that.
+    "jump":  (["LOOPTOP", "LOOPEND"], []),
+    "loop":  ([], []),
 }
 
 src, outdir = sys.argv[1], sys.argv[2]
