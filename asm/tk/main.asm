@@ -620,15 +620,19 @@ call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:
     [B------:R-:W-:-:S01]    MOV Rinv5, InvO5
     [B------:R-:W-:-:S01]    IMAD Rinv6, RZ, RZ, InvO6
     [B------:R-:W-:-:S01]    MOV Rinv7, InvO7
-// Acc = 1
-    [B------:R-:W-:-:S01]    MOV Acc0, 0x1
-    [B------:R-:W-:-:S01]    IMAD Acc1, RZ, RZ, RZ
-    [B------:R-:W-:-:S01]    MOV Acc2, RZ
-    [B------:R-:W-:-:S01]    IMAD Acc3, RZ, RZ, RZ
-    [B------:R-:W-:-:S01]    MOV Acc4, RZ
-    [B------:R-:W-:-:S01]    IMAD Acc5, RZ, RZ, RZ
-    [B------:R-:W-:-:S01]    MOV Acc6, RZ
-    [B------:R-:W-:-:S01]    IMAD Acc7, RZ, RZ, RZ
+// Acc = 1. THE ACCUMULATOR IS BISECT SCAFFOLDING AND IS OFF BY DEFAULT -- see PACC below.
+// It is seeded here rather than inside the loop, so its gate is separate from theirs and both
+// the walk rung (WACC/WACCT) and the pts rung (PACC/PACCM/PACCT) have to switch it on.
+//@@ACCINIT_BEGIN
+//  [B------:R-:W-:-:S01]    MOV Acc0, 0x1
+//  [B------:R-:W-:-:S01]    IMAD Acc1, RZ, RZ, RZ
+//  [B------:R-:W-:-:S01]    MOV Acc2, RZ
+//  [B------:R-:W-:-:S01]    IMAD Acc3, RZ, RZ, RZ
+//  [B------:R-:W-:-:S01]    MOV Acc4, RZ
+//  [B------:R-:W-:-:S01]    IMAD Acc5, RZ, RZ, RZ
+//  [B------:R-:W-:-:S01]    MOV Acc6, RZ
+//  [B------:R-:W-:-:S01]    IMAD Acc7, RZ, RZ, RZ
+//@@ACCINIT_END
 // COfs walks UP in byte offsets, 0 .. (half-1)*32, and Idx holds the limit. Same trick as
 // the ladder: the loop variable is the byte offset, so it indexes subp[] and c_Gx[] with no
 // shift and no multiply, and the test stays an unsigned compare.
@@ -728,16 +732,26 @@ call_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B----
     [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointS
 call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointS
     [B------:R-:W-:-:S05]    LOP3.LUT TmpA, MulA0, 0x1, RZ, 0xc0, !PT
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointT
-call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointT
-    [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
-    [B------:R-:W-:-:S01]    MOV Acc1, MulR1
-    [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
-    [B------:R-:W-:-:S01]    MOV Acc3, MulR3
-    [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
-    [B------:R-:W-:-:S01]    MOV Acc5, MulR5
-    [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
-    [B------:R-:W-:-:S01]    MOV Acc7, MulR7
+// Acc *= px3 -- THE PTS RUNG'S INSTRUMENT, AND NOTHING ELSE'S. It is the product of every
+// candidate x-coordinate, which is what lets one 256-bit output stand for 1,023 points; the
+// default kernel, jump and loop store nothing from it and it is dead weight there.
+//
+// It is not small dead weight, which is why it is gated rather than left alone: the walk does
+// EIGHT MulMod256 per iteration and two of them are this, here and in the minus branch. At 112
+// instructions each that is ~17% of the walk's dynamic instruction count, and the walk is
+// essentially the whole kernel. No speed number taken with these on means anything.
+//@@PACC_BEGIN
+//  [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointT
+//call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointT
+//  [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
+//  [B------:R-:W-:-:S01]    MOV Acc1, MulR1
+//  [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
+//  [B------:R-:W-:-:S01]    MOV Acc3, MulR3
+//  [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
+//  [B------:R-:W-:-:S01]    MOV Acc5, MulR5
+//  [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
+//  [B------:R-:W-:-:S01]    MOV Acc7, MulR7
+//@@PACC_END
 
 //---- the - branch: identical, on -c_Gy[i]. x(-Q) == x(Q), so dx_inv_i is reused --------
     [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x40]
@@ -765,16 +779,20 @@ call_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B----
     [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAB
 call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAB
     [B------:R-:W-:-:S05]    LOP3.LUT TmpA, MulA0, 0x1, RZ, 0xc0, !PT
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAC
-call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAC
-    [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
-    [B------:R-:W-:-:S01]    MOV Acc1, MulR1
-    [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
-    [B------:R-:W-:-:S01]    MOV Acc3, MulR3
-    [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
-    [B------:R-:W-:-:S01]    MOV Acc5, MulR5
-    [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
-    [B------:R-:W-:-:S01]    MOV Acc7, MulR7
+// Acc *= px3, the minus branch's half. Same gate as PACC, separate region only because the
+// two are not contiguous.
+//@@PACCM_BEGIN
+//  [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAC
+//call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAC
+//  [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
+//  [B------:R-:W-:-:S01]    MOV Acc1, MulR1
+//  [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
+//  [B------:R-:W-:-:S01]    MOV Acc3, MulR3
+//  [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
+//  [B------:R-:W-:-:S01]    MOV Acc5, MulR5
+//  [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
+//  [B------:R-:W-:-:S01]    MOV Acc7, MulR7
+//@@PACCM_END
 //@@PLUS_END
 
 // gxmi = c_Gx[i] - x1, in place into MulB
@@ -848,16 +866,21 @@ call_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B----
     [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAK
 call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAK
     [B------:R-:W-:-:S05]    LOP3.LUT TmpA, MulA0, 0x1, RZ, 0xc0, !PT
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAL
-call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAL
-    [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
-    [B------:R-:W-:-:S01]    MOV Acc1, MulR1
-    [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
-    [B------:R-:W-:-:S01]    MOV Acc3, MulR3
-    [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
-    [B------:R-:W-:-:S01]    MOV Acc5, MulR5
-    [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
-    [B------:R-:W-:-:S05]    MOV Acc7, MulR7
+// Acc *= px3, the tail's. Once per batch rather than per point, so this one is not about speed
+// -- it is gated with the other two because the accumulator has to be all on or all off to mean
+// anything, and a product missing one of its 1,023 factors is worse than no product at all.
+//@@PACCT_BEGIN
+//  [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAL
+//call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAL
+//  [B------:R-:W-:-:S01]    IMAD Acc0, RZ, RZ, MulR0
+//  [B------:R-:W-:-:S01]    MOV Acc1, MulR1
+//  [B------:R-:W-:-:S01]    IMAD Acc2, RZ, RZ, MulR2
+//  [B------:R-:W-:-:S01]    MOV Acc3, MulR3
+//  [B------:R-:W-:-:S01]    IMAD Acc4, RZ, RZ, MulR4
+//  [B------:R-:W-:-:S01]    MOV Acc5, MulR5
+//  [B------:R-:W-:-:S01]    IMAD Acc6, RZ, RZ, MulR6
+//  [B------:R-:W-:-:S05]    MOV Acc7, MulR7
+//@@PACCT_END
 //@@PLUST_END
 //@@WALK_END
 

@@ -1026,8 +1026,19 @@ thread takes the same batch count — so `InvMod256`'s all-active-threads requir
 construction and the ragged warp (H4's shape, and the precondition written at the head of
 `main.asm`) remains untested. C8 is untouched: nothing here consumes a parity, and it has to be
 fixed before the hash layer returns. And no timing claim can be made from this kernel as it stands
-— it still carries the `Acc` accumulator, which is bisect scaffolding costing two extra `MulMod256`
-per point against the six the walk actually needs.
+— that needed the `Acc` accumulator out first, which is the next entry.
+
+**The bisect accumulator is gated off by default.** `Acc` is the product of every candidate
+x-coordinate, the instrument that lets one 256-bit output stand for 1,023 points, and only the
+`pts` rung reads it; the default kernel, `jump` and `loop` stored nothing from it and paid for it
+anyway — two of the walk's eight `MulMod256` per iteration, 1,023 calls per batch per thread. It
+now sits in `ACCINIT`/`PACC`/`PACCM`/`PACCT` regions switched on for `pts` alone, exactly as
+`WACC`/`WACCT` are switched on for `walk`. The default went 1,984 → **1,832** instructions, −152
+against the 38 at the call sites: all three shared the binding `RFirst=Acc, RSecond=PxN`, so
+`call_func`'s one-body-per-binding rule deleted the 112-instruction `MulMod256` body that only
+they used. `walk` and `pts` rebuilt byte-identical to the cubins already verified on hardware,
+and all four checkers pass on all eleven. **The re-run of the ladder is outstanding**, and until
+it lands this is a change that has been checked offline and not on a device.
 
 Two lessons, both of which this document already contains under other names. **A correct comment is
 not a permanent one**: the tail carried "no chain update after it", which was true on every rung up

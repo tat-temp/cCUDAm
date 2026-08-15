@@ -20,7 +20,7 @@ RCASM=/path/to/RCAsm ./build.sh
 | 2b | the single modular inversion: `call_func InvMod256` | **runs on hardware, A and B agree, 256/256 EXACT** — 976 instructions |
 | 2c-i | the inverse chain: an upward loop over every `subp[i]` | **runs on hardware, A and B agree, 256/256 EXACT** — 1,384 instructions |
 | 2c-ii | the ± point arithmetic: `SqrMod256`, `SubMod256_3`, `NegMod256` | **runs on hardware, A and B agree, 256/256 EXACT** — 1,888 instructions |
-| 2d | the point jump, `Scal += B` / `Rem -= B`, the outer batch loop | **runs on hardware, A and B agree, 256/256 EXACT on both rungs** — 1,952 / 1,984 instructions |
+| 2d | the point jump, `Scal += B` / `Rem -= B`, the outer batch loop | **runs on hardware, A and B agree, 256/256 EXACT on both rungs** — 1,800 / 1,832 instructions |
 
 **The points-only kernel is complete and correct on hardware.** Ten rungs, an RTX 5090: `id` and
 `local` mismatch by construction, `call` and `full` match the compiled kernel thread for thread,
@@ -32,8 +32,20 @@ What that does *not* cover, stated because a green ladder invites the wrong infe
 in one block, one launch, and a configuration where every thread takes the same batch count — so
 `InvMod256`'s all-active-threads precondition holds by construction and a ragged warp is still
 untested. C8 is untouched and still has to be fixed before the hash layer returns. Nothing here is
-a speed measurement, and the kernel still carries the `Acc` bisect accumulator (two extra
-`MulMod256` per point) that has to come out before one is taken.
+a speed measurement.
+
+**The bisect accumulator is now gated off by default** (`ACCINIT`, `PACC`, `PACCM`, `PACCT`,
+switched on for `pts` alone, the same way `WACC`/`WACCT` are switched on for `walk`). `Acc` is the
+product of every candidate x-coordinate — the instrument that lets one 256-bit output stand for
+1,023 points — and the default kernel, `jump` and `loop` never read it. It was not cheap: two of
+the walk's eight `MulMod256` per iteration, 1,023 calls per batch per thread. Removing the three
+call sites took the default from 1,984 to 1,832 instructions, **−152**, which is more than the 38
+instructions at the call sites: all three shared one binding (`RFirst=Acc, RSecond=PxN`), so the
+whole 112-instruction `MulMod256` body they alone used went with them. That is `call_func`'s
+one-body-per-binding rule read backwards, and it is worth knowing in both directions.
+
+`walk` and `pts` came out byte-identical to the cubins that passed on hardware, which is the
+check that says the gating moved nothing it should not have.
 
 **Stage 2a matches the compiled kernel on an RTX 5090** — 256 EXACT out of 256 on both the
 accumulator and the frame slot, A and B agreeing on every output limb. That covers a real

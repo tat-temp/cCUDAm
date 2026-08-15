@@ -67,11 +67,20 @@ VARIANTS = {
     # PLUS/PLUST and WACC/WACCT are nested INSIDE the WALK region, so the rungs above that
     # cut WALK must not name them -- the marker is already gone by the time they are looked
     # up, and region() exits rather than shrugging.
-    "walk":  (["PLUS", "PLUST"] + NOLOOP + NOPNT, ["WACC", "WACCT", "STOREWALK"]),
+    "walk":  (["PLUS", "PLUST"] + NOLOOP + NOPNT,
+              ["ACCINIT", "WACC", "WACCT", "STOREWALK"]),
     # pts spends start_scalars/counts256 on the tail point's Lam and Sqr instead of on the
     # identity copy, and Px/Py on the accumulated product and the tail's px3. It is the only
     # rung that does either.
-    "pts":   (NOLOOP + NOPNT + ["STOREID"], ["STOREPTS", "STORELAM"]),
+    #
+    # PACC/PACCM/PACCT are the px3 accumulator, and they are OFF in main.asm because they are
+    # this rung's instrument and no one else's: two of the walk's eight MulMod256 per iteration,
+    # about 17% of its dynamic instruction count, storing into a register the default kernel,
+    # jump and loop never read. Leaving them on would have put that in every speed measurement
+    # of a kernel that does not need them. ACCINIT comes with them -- the seed is gated
+    # separately so the walk rung, which cuts PLUS/PLUST entirely, can still have it.
+    "pts":   (NOLOOP + NOPNT + ["STOREID"],
+              ["ACCINIT", "PACC", "PACCM", "PACCT", "STOREPTS", "STORELAM"]),
     # Stage 2d in two rungs, because it is two constructs. `jump` is one batch with the point
     # jump on the end -- the first time the inverse chain's final value is CONSUMED rather
     # than accumulated, which is why the walk rung passing did not already cover it. `loop`
