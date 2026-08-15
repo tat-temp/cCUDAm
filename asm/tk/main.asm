@@ -879,6 +879,46 @@ call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B-----
 // `lam = s * inverse` copies inverse into Dxi rather than binding MulMod256 to RSecond=Rinv.
 // Eight register copies against a ninth 112-instruction body, once per batch.
 //@@JUMP_BEGIN
+// THE TAIL'S OWN CHAIN UPDATE -- GpuCore.cu:378-380, and it was missing from both this file and
+// the compiled reference until the jump rung ran on hardware. The walk leaves
+// Rinv = 1/((Jx-x1) * (Gx[half-1]-x1)); one more multiply by (Gx[half-1]-x1) is what makes it
+// 1/(Jx-x1), which is what the jump below consumes.
+//
+// It is worth being precise about why nothing caught this earlier, because the comment above the
+// tail at .label_walk_loop's exit said "no chain update after it" and was CORRECT when written:
+// on every rung up to pts, `inverse` is dead once the tail's dx_inv_i has been formed. Stage 2d
+// added the first consumer of it after the walk and turned a true statement into a defect. The
+// walk rung checks the product of the dx_inv_i and the pts rung checks the tail POINT, and this
+// multiply feeds neither -- it is the one link in the ladder whose only observable effect is on
+// the jump.
+//
+// A and B were wrong IDENTICALLY, since both are transcriptions of the same misreading, so the
+// A/B half of the harness said "agree" on both rungs. The oracle is what caught it: it inverts
+// (Jx - x1) by Fermat and shares no structure with the ladder. That is the entire reason it
+// exists, and it is the H14 lesson with the signs reversed -- two implementations agreeing is
+// not evidence when one person wrote both.
+//
+// It lives HERE rather than at the end of WALK so that every rung below jump keeps the cubin it
+// already passed on hardware with. Both call bindings are ones the walk loop already uses
+// (CallPointI, CallPointJ), so this adds no function bodies -- 4 loads, 2 calls, 8 copies.
+// COfs is still (half-1)*32: the loop leaves it at the limit and the tail only reads it.
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAT
+call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAT
+    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAU
+call_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAU
+    [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV Rinv1, MulR1
+    [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV Rinv3, MulR3
+    [B------:R-:W-:-:S01]    IMAD Rinv4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV Rinv5, MulR5
+    [B------:R-:W-:-:S01]    IMAD Rinv6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S02]    MOV Rinv7, MulR7
+
     [B------:R-:W-:-:S01]    IMAD Dxi0, RZ, RZ, Rinv0
     [B------:R-:W-:-:S01]    MOV Dxi1, Rinv1
     [B------:R-:W-:-:S01]    IMAD Dxi2, RZ, RZ, Rinv2

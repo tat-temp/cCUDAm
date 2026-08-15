@@ -19,8 +19,8 @@ RCASM=/path/to/RCAsm ./build.sh
 | 2a | the suffix-product ladder: a real loop, indexed constant loads, `STL` at a computed address | **runs on hardware, A and B agree, 256/256 EXACT** — 256 instructions |
 | 2b | the single modular inversion: `call_func InvMod256` | **runs on hardware, A and B agree, 256/256 EXACT** — 976 instructions |
 | 2c-i | the inverse chain: an upward loop over every `subp[i]` | **runs on hardware, A and B agree, 256/256 EXACT** — 1,384 instructions |
-| 2c-ii | the ± point arithmetic: `SqrMod256`, `SubMod256_3`, `NegMod256` | **assembles and checks clean** — 1,896 instructions, awaiting a run |
-| 2d | the point jump, `Scal += B` / `Rem -= B`, the outer batch loop | not written |
+| 2c-ii | the ± point arithmetic: `SqrMod256`, `SubMod256_3`, `NegMod256` | **runs on hardware, A and B agree, 256/256 EXACT** — 1,888 instructions |
+| 2d | the point jump, `Scal += B` / `Rem -= B`, the outer batch loop | **ran, A and B agree, and both were WRONG** — a missing chain update, fixed; 1,952 / 1,984 instructions, awaiting a re-run |
 
 **Stage 2a matches the compiled kernel on an RTX 5090** — 256 EXACT out of 256 on both the
 accumulator and the frame slot, A and B agreeing on every output limb. That covers a real
@@ -132,6 +132,43 @@ instructions); and the loop spends 16 register copies an iteration moving `MulR`
 accumulator and the running inverse, because a call point's `Ro` is fixed and cannot
 ping-pong. Both are size and speed, not correctness, and both are cheaper to fix once the
 walk is known to be right.
+
+**Stage 2d ran, A and B agreed, and both were wrong** — which is the outcome this harness was
+built to be able to report, and the first time it has had to.
+
+`jump` and `loop` both came back `A and B agree on every output limb` with `s1 ok  rem ok`, and
+both at `WRONG 256` against the oracle on `x1` *and* `y1`. So the outer batch loop, its guard,
+the `Scal += B` / `Rem -= B` carry chains and the whole of the hand-written jump reproduce the
+compiled kernel exactly; what they reproduce is a defect.
+
+**`GpuCore.cu:378-380` had no counterpart on either side.** The walk's tail forms its
+`dx_inv_i` and then, in the shipped kernel, does one more chain update —
+`inverse *= (c_Gx[half-1] - x1)` — which is what turns `1/((Jx-x1)·(Gx[half-1]-x1))` into the
+`1/(Jx-x1)` the jump consumes. Without it `lam` is off by that factor. Not congruent, so it
+classifies `WRONG` rather than `NON-CANON`, and it moves `x3` as well as `y3` — a sign error or
+a swapped subtract would have left `lam²` and therefore `x3` intact, which is what said early
+that the *inverse* was wrong rather than the jump's own arithmetic.
+
+Three things about how it survived this long are worth keeping:
+
+- **The comment above the tail said "no chain update after it", and it was true when written.**
+  On every rung up to `pts`, `inverse` is dead once the tail's `dx_inv_i` exists. Stage 2d added
+  the first consumer of it after the walk and turned a true statement into a defect. A correct
+  comment is not a permanent one.
+- **No earlier rung could have caught it.** `walk` checks the product of the `dx_inv_i` and
+  `pts` checks the tail *point*; this multiply feeds neither. It is the one link in the ladder
+  whose only observable effect is on the jump, which is exactly why the jump is its own rung.
+- **A and B agreeing proved nothing, because one person wrote both.** Both are transcriptions of
+  the same misreading, so the A/B half of the harness reported agreement on a defect. What
+  caught it is the oracle — which inverts `Jx - x1` by Fermat and shares no structure with the
+  suffix-product ladder it judges. That is the H14 lesson with the signs reversed: a harness
+  comparing two implementations that share an author is a harness comparing an implementation
+  against itself.
+
+The fix is at the head of the `JUMP` region rather than at the end of `WALK`, so every rung
+below `jump` keeps the cubin it already passed on hardware with — verified byte-identical after
+the rebuild. Both call bindings are ones the walk loop already uses, so it adds no function
+bodies: +16 instructions, being 4 loads, 2 calls and 8 copies.
 
 **Stage 1b matches the compiled kernel exactly on an RTX 5090** — 253 EXACT, 3 non-canonical,
 0 wrong out of 256 threads, which is *the same verdict side A gets*. That is the first

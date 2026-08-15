@@ -994,7 +994,33 @@ pass**:
 mismatch is the expected reading; the other six are held to their answers against an independent
 oracle.
 
-**Stage 2d is written and has not run.** Two more rungs, because it is two constructs: `jump` adds
+**Stage 2d ran, and it is the first time the oracle has convicted both sides at once.** Both rungs
+reported `A and B agree on every output limb` with `s1 ok  rem ok`, and both `WRONG 256` on `x1`
+and `y1`. The outer batch loop, its guard and the two 256-bit bookkeeping chains are therefore
+correct, and the hand-written jump reproduces the compiled one exactly — reproducing a defect
+present in both.
+
+**The defect: `GpuCore.cu:378-380` was transcribed onto neither side.** The walk's tail forms its
+`dx_inv_i` and then, in the shipped kernel, updates the chain once more —
+`inverse *= (c_Gx[half-1] - x1)` — which is what makes `inverse` equal `1/(Jx - x1)` at the jump
+rather than `1/((Jx - x1)·(Gx[half-1] - x1))`. `lam` was off by that factor: not congruent, hence
+`WRONG` and not `NON-CANON`, and it moves `x3` as well as `y3`, which is what ruled out a sign
+error or a swapped subtract before anything was read. Fixed at the head of the `JUMP` region on the
+hand-written side and under `#if STAGE_JUMP` on the reference, so the eight rungs already verified
+on hardware keep their exact cubins — checked byte-identical after the rebuild. The reference grew
+by exactly 240 instructions (one `sub_mod` + one `mul_mod`) and the SASS by exactly 16, reusing two
+existing call bindings so no function body was duplicated. **Awaiting a re-run.**
+
+Two lessons, both of which this document already contains under other names. **A correct comment is
+not a permanent one**: the tail carried "no chain update after it", which was true on every rung up
+to `pts`, where `inverse` is dead after the tail — stage 2d added the first consumer of it and made
+the comment a defect. And **A/B agreement is worth nothing when one person wrote both sides**: both
+are transcriptions of the same misreading, so the A/B half reported a clean pass. The oracle is what
+caught it, precisely because it inverts `Jx - x1` by Fermat and shares no structure with the ladder
+— H14 with the signs reversed. The A/B comparison and the independent oracle are two checks, not
+one check written twice, and this run is the evidence.
+
+Two more rungs, because it is two constructs: `jump` adds
 the point jump — the first and only consumer of the inverse chain's *final* value, which is why
 `walk` passing did not already cover it — and `loop` adds `s1 += B`, `rem -= B` and the back edge,
 running four batches so the third and fourth start from a point the kernel itself produced.

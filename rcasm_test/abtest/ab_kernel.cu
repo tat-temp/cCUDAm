@@ -210,6 +210,19 @@ __global__ void TestKernel(
 #else
         mul_mod(wacc, wacc, dx_inv_i);
 #endif
+#if STAGE_JUMP
+        // GpuCore.cu:378-380. The tail's OWN chain update, and it was missing here until the
+        // jump rung ran: without it `inverse` reaches the jump as 1/((Jx-x1)*(Gx[half-1]-x1))
+        // rather than 1/(Jx-x1), so lam is off by that factor -- not congruent, so it reads as
+        // WRONG rather than NON-CANON, and it moves x3 as well as y3.
+        //
+        // Gated on STAGE_JUMP because `inverse` is dead after this block on every lower rung, so
+        // the two spellings compute the same thing there and this keeps walk/pts bit-stable. The
+        // hand-written side is gated the same way, in its JUMP region, for the same reason.
+        uint64_t last_dx[4];
+        sub_mod(last_dx, &c_Gx[(size_t)i * 4], x1);
+        mul_mod(inverse, inverse, last_dx);
+#endif
     }
 #endif
 
