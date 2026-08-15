@@ -46,8 +46,25 @@ FUNCTION SubMod256_3()
 // and no other emitted body writes Ro's registers after this one produces them. The
 // arithmetic had nowhere left to be wrong.
 //
-// 18 instructions against 1023 calls per thread, so the widening is not worth optimising
-// back down until it is known which of the two actually mattered.
+// CONFIRMED ON HARDWARE, same day: with only this changed, stage 2c-ii's pts rung came back
+// EXACT on all 256 threads and the tail chain reports lam ok / lam^2 ok / px3 ok. The
+// prediction was falsifiable -- a still-wrong px3 would have killed the timing story and made
+// both reproductions above coincidence -- and it held.
+//
+// WHAT IS CONFIRMED IS THE FIX, NOT THE MECHANISM, and the obvious reading of it is wrong.
+// "Two cycles is below the floor for a carry-in predicate" does not survive the cubin:
+// MulMod256, SqrMod256 and InvMod256 contain 126 carry-out -> carry-in pairs at two cycles
+// between them, and all three are correct on hardware. What separates this routine from those
+// 126 is not the distance, it is what sits in the gap -- every one of them spans an IADD3,
+// IMAD or SHF, and this was the only two-cycle pair in the kernel spanning a MOV. That is one
+// instance, and the widening below changed fifteen lines rather than the one, so it is a
+// candidate and not a finding.
+//
+// NARROWING IT IS ONE RUN, and a sharp one: restore the originals except instruction 7's
+// stall. The delta has two halves and they are attributed separately, so if the 2^224 half
+// disappears and the 0x7A1 half does not, the run has separated the two claims above by
+// itself. Worth doing when a hardware run is being spent anyway; not worth one of its own,
+// since this is 18 instructions against 1023 calls per thread.
     [B------:R-:W-:-:S06]    IADD3.X Ro0, Pt0, Pt2, RFirst0, ~RSecond0, ~RThird0, PT, PT
     [B------:R-:W-:-:S06]    IADD3.X Ro1, Pt0, Pt2, RFirst1, ~RSecond1, ~RThird1, Pt0, Pt2
     [B------:R-:W-:-:S06]    IADD3.X Ro2, Pt0, Pt2, RFirst2, ~RSecond2, ~RThird2, Pt0, Pt2

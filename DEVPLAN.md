@@ -976,6 +976,42 @@ failure. First 4 threads carry constructed edge cases including `(P-1)²` and `2
 **What this does not say:** stage 2 is the batch loop, and none of it is written. This is one
 multiply, not a walk.
 
+### The walk computes the right answer too — RTX 5090, 2026-08-15
+
+The batch loop the previous section said was unwritten. `asm/tk/variants.py` builds an eight-rung
+ladder out of one `main.asm`, each rung one construct away from its neighbour, and **all eight now
+pass**:
+
+| rung | what it adds | result |
+|---|---|---|
+| `id` / `local` / `call` / `full` | prologue, local round trip, `call_func`, both | 253 EXACT / 3 NON-CANON, identical to the compiled kernel |
+| `sufp` | stage 2a — the suffix-product ladder: a real loop, dynamically indexed constant loads, `STL` at a computed address | 256 EXACT |
+| `inv` | stage 2b — `call_func InvMod256`: 70 temporaries, a uniform of its own, all active threads in the warp | 256 EXACT |
+| `walk` | stage 2c-i — the upward loop that reads every `subp[]` slot and advances the inverse | 256 EXACT |
+| `pts` | stage 2c-ii — `SqrMod256`, `SubMod256_3`, `NegMod256`, both branches and the minus-only tail | **256 EXACT** |
+
+`id` and `local` compute something different from the compiled kernel by construction, so their
+mismatch is the expected reading; the other six are held to their answers against an independent
+oracle. What is left of the plan's kernel body is **stage 2d** — the point jump, `Scal += B`,
+`Rem -= B`, and the outer batch loop.
+
+The `pts` rung took three hardware runs and cost a seventh hardware rule; the rule and the
+correction to it are recorded at the head of `asm/tk/main.asm` and in `asm/mod_sub.asm`. In short:
+`SubMod256_3` came back wrong by exactly `2^224 + 0x7A1` on all 256 threads, widening its stalls
+fixed it, and the obvious generalisation from that — "a carry-out predicate needs more than two
+cycles" — is **false**, refuted by 126 two-cycle carry pairs in `MulMod256`/`SqrMod256`/`InvMod256`
+that are all correct on hardware. The surviving candidate is much narrower (that pair was the
+kernel's only two-cycle carry spanning a `MOV`), and it is recorded as a candidate.
+
+Two things worth carrying forward from how it was found. The diagnostic was **lying** for a full
+run — a stale `want` printed beside a live `got` — and the harness reported "matches no simple
+hypothesis" about a hypothesis nobody had made; that is the fourth silent-clean-report of this
+project's class. And the host simulator built to settle it (`asm/tk/vsim.py`, which runs the
+vendored `FUNCTION` bodies directly out of `asm/mod_*.asm`) first had to be **calibrated against
+routines whose behaviour was already known** — under a plausible-but-wrong reading of `IADD3.X`'s
+two carry-out predicates it accused `SubMod256_3` of an arithmetic bug it does not have. A model
+chosen against the code under suspicion proves whatever it was built to prove.
+
 ### The alignment rule that nothing in the toolchain enforces — 2026-08-14
 
 Getting to that result cost a GPU round trip, and the reason is worth its own entry because it will

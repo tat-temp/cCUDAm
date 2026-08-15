@@ -302,7 +302,10 @@ static int upload_const(CUmodule m, const char* sym, const void* src, size_t n)
 
 static void dump256(const char* tag, const uint64_t v[4])
 {
-	printf("        %-5s: %016llx %016llx %016llx %016llx\n", tag,
+	// %-6s, not %-5s: "delta" is exactly five characters, so the narrower field left it the
+	// one tag with no space before its colon -- and bisect_run.sh's filter matches ` +:`, so
+	// the delta line was silently dropped from every run that printed one.
+	printf("        %-6s: %016llx %016llx %016llx %016llx\n", tag,
 	       (unsigned long long)v[3], (unsigned long long)v[2],
 	       (unsigned long long)v[1], (unsigned long long)v[0]);
 }

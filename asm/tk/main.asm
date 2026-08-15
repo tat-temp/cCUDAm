@@ -70,6 +70,31 @@
 // the interleaved rem==0 test below relies on, though at S01 it only reached two and was
 // wrong for that reason.
 //
+// A CARRY-OUT PREDICATE IS FINE AT TWO CYCLES -- EXCEPT ACROSS A MOV, WHERE IT WAS NOT.
+// Stage 2c-ii's tail point came back wrong by exactly 2^224 + 0x7A1 and widening every stall
+// in SubMod256_3 to S06 made the rung EXACT on all 256 threads, so a timing fix is confirmed.
+// The tempting generalisation -- "two cycles is below the floor for a carry-in" -- is FALSE,
+// and the cubin says so directly. Over the emitted bodies:
+//
+//   MulMod256, SqrMod256 and InvMod256 contain 126 carry-out -> carry-in pairs at TWO
+//   cycles, and all three are correct on hardware. In every one of those 126 the intervening
+//   instruction is IADD3, IMAD or SHF.
+//
+//   SubMod256_3 held the only two-cycle pair in the kernel with a **MOV** between producer
+//   and consumer. It is also the only routine that computed a wrong answer, and a stale
+//   read at exactly that pair reproduces the 2^224 half of the delta.
+//
+// One instance is not a rule, and the widening changed fifteen lines rather than that one, so
+// what is established is the fix and not the mechanism. Treat "same-pipe forwarding is faster
+// than cross-pipe, and MOV is the odd one out" as the surviving candidate, not as fact.
+//
+// The method matters more than either number. A first pass took one GLOBAL minimum per
+// routine, found nothing tighter than what already runs, and read as an acquittal. That is
+// the wrong comparison twice over: a predicate consumed as a branch guard (13), as a SEL
+// selector, and as a carry-in are three different consumers with three different floors, and
+// even within one consumer the surrounding instructions are part of the shape. Compare like
+// against like, and when the like-for-like comparison exonerates the suspect, say so.
+//
 // A BRANCH IS DIFFERENT, AND IT IS THE BIGGEST NUMBER HERE: a guarded branch reads its
 // predicate far earlier in the pipeline than an ALU instruction reads an operand, and
 // wants **THIRTEEN** cycles. Measured, and about as unambiguous as this project gets: over

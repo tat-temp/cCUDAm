@@ -53,6 +53,17 @@ note and do not fail the run. A checker that cries wolf on known-good vendored c
 that gets ignored. The split is the last EXIT: the kernel ends there, and every appended
 body ends with BRXU.U instead.
 
+**The note count is not a defect backlog, and it is worth knowing why before anyone works
+through it.** Once carry-OUT predicates were recorded as destinations (see dst()), the notes
+jumped from 8 to ~115, because every carry chain in the vendored bodies became visible. Those
+were then surveyed properly: MulMod256, SqrMod256 and InvMod256 hold 126 carry-out ->
+carry-in pairs at TWO cycles, and all three are correct on hardware, so two cycles is simply
+not a defect for that consumer. The one two-cycle pair that DID produce a wrong answer -- in
+SubMod256_3, stage 2c-ii -- is also the only one in the kernel with a MOV between producer
+and consumer. That is a candidate discriminator, not a rule, and it is deliberately NOT
+encoded here: a threshold this file cannot justify from measurement is exactly the kind that
+gets ignored the next time it fires.
+
 Exit 1 if anything in the KERNEL BODY is under-stalled, so it can gate a build.
 """
 import re, subprocess, sys, os
