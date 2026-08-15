@@ -895,6 +895,9 @@ call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B-----
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], PntY4
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], PntY6
 //@@STOREPNTY_END
+// The scalar and count arrays are identity everywhere except the pts rung, which spends
+// them on the tail point's INTERMEDIATES instead -- see STORELAM below.
+//@@STOREID_BEGIN
     [B--2---:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64], Scal0
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x8], Scal2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x10], Scal4
@@ -903,6 +906,35 @@ call_func MulMod256(RFirst=Acc, RSecond=PxN, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B-----
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrC.64+0x8], Rem2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrC.64+0x10], Rem4
     [B------:R-:W-:-:S05]    STG.E.64 desc[uDesc][AddrC.64+0x18], Rem6
+//@@STOREID_END
+// The tail point's two intermediates, so one launch says WHERE the tail diverges rather
+// than only that it does:
+//
+//     Lam = MulMod256(-c_Gy[511] - y1, dx_inv)   -> start_scalars
+//     Sqr = SqrMod256(Lam)                       -> counts256
+//
+// with Py already carrying PxN = SubMod256_3(Sqr, x1, c_Gx[511]). Together with Px those
+// are the whole tail chain, and the first one that disagrees names the call that is wrong.
+//
+// This is worth doing precisely because the offline simulation of that chain reproduces the
+// oracle EXACTLY -- source and emitted body alike. So a divergence here cannot be an
+// arithmetic error in the routine; it is a hazard around the call, and knowing which call
+// is most of the answer. Both registers are still live at PLUST_END: SqrMod256 does not
+// write Ri, and nothing after SubMod256_3 touches Sqr.
+//
+// B2 is kept on the first store even though Scal is no longer written. The barrier belongs
+// to Scal's load and draining it here costs nothing, where dropping it would leave a load
+// armed at EXIT for no reason other than that this rung stopped using the value.
+//@@STORELAM_BEGIN
+//  [B--2---:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64], Lam0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x8], Lam2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x10], Lam4
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x18], Lam6
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrC.64], Sqr0
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrC.64+0x8], Sqr2
+//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrC.64+0x10], Sqr4
+//  [B------:R-:W-:-:S05]    STG.E.64 desc[uDesc][AddrC.64+0x18], Sqr6
+//@@STORELAM_END
 
     [B------:R-:W-:Y:S05]    EXIT
 }

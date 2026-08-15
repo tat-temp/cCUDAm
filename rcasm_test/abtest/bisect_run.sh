@@ -61,7 +61,7 @@ for n in id local call full sufp inv walk pts; do
         # Let the whole diagnostic block through, not just the verdict line. When a rung
         # is held to its answer, "WRONG 256" is the least useful thing the harness knows;
         # the value it actually computed is the thing that names the cause.
-        echo "$out" | grep -E 'EXACT|identity check|subp\[half-1\]|last px3|A and B|first wrong|^ +(x1|Jx|a|b|want|got|got-want) +:|==>' \
+        echo "$out" | grep -E 'EXACT|identity check|subp\[half-1\]|last px3|A and B|first wrong|tail chain|^ +(x1|Jx|a|b|want|got|delta) +:|==>' \
                     | sed 's/^/  /'
     fi
 done

@@ -129,15 +129,23 @@ __global__ void TestKernel(
             if (NEG) neg_mod(py_i);                                                    \
             sub_mod(s, py_i, y1);                                                      \
             mul_mod(lam, s, dx_inv_i);                                                 \
-            sqr_mod(px3, lam);                                                          \
-            sub_mod3(px3, px3, x1, px_i);                                              \
+            uint64_t sq[4];                                                            \
+            sqr_mod(sq, lam);                                                          \
+            sub_mod3(px3, sq, x1, px_i);                                               \
             sub_mod(s, x1, px3);                                                       \
             mul_mod(s, s, lam);                                                        \
             uint8_t odd; sub_mod_is_odd(&odd, s, y1); (void)odd;                       \
             mul_mod(wacc, wacc, px3);                                                  \
-            for (int k = 0; k < 4; k++) lastpx3[k] = px3[k];                           \
+            for (int k = 0; k < 4; k++) {                                              \
+                lastpx3[k] = px3[k]; lastlam[k] = lam[k]; lastsqr[k] = sq[k];          \
+            }                                                                          \
         } while (0)
+    // The tail point's chain, one link per output array: Px = the product, Py = px3,
+    // start_scalars = lam, counts256 = lam^2. Four arrays, four links, so a single launch
+    // says WHICH link diverges rather than only that the product does.
     uint64_t lastpx3[4] = {0, 0, 0, 0};
+    uint64_t lastlam[4] = {0, 0, 0, 0};
+    uint64_t lastsqr[4] = {0, 0, 0, 0};
 #endif
 
     for (int i = 0; i < (int)half - 1; ++i) {
@@ -180,8 +188,13 @@ __global__ void TestKernel(
 #else
         Py[idx]            = subp[half - 1][k];   // written before the loop, highest address
 #endif
+#if STAGE_PTS
+        start_scalars[idx] = lastlam[k];
+        counts256[idx]     = lastsqr[k];
+#else
         start_scalars[idx] = s1[k];
         counts256[idx]     = rem[k];
+#endif
     }
 #else
     uint64_t prod[4];

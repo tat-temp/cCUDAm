@@ -307,6 +307,24 @@ static void dump256(const char* tag, const uint64_t v[4])
 	       (unsigned long long)v[1], (unsigned long long)v[0]);
 }
 
+// want, got, and the 256-bit difference. The difference is the part that has actually paid:
+// the tail's px3 came back 2^224 + 0x7A1 from correct, and "carry-sized, limbs 1 and 2
+// untouched" is a different diagnosis from "wrong operand" -- which is not visible at all
+// while staring at two 64-hex-digit numbers.
+static void dump_delta(const uint64_t got[4], const uint64_t want[4])
+{
+	uint64_t d[4];
+	bool bw = false;
+	for (int k = 0; k < 4; k++) {
+		const uint64_t g = got[k], w = want[k];
+		d[k] = g - w - (bw ? 1 : 0);
+		bw = bw ? (g <= w) : (g < w);
+	}
+	dump256("want", want);
+	dump256("got", got);
+	dump256("delta", d);
+}
+
 // Py in sufp mode is subp[half-1] = (Jx - x1), the value stored BEFORE the ladder's loop.
 // It depends on three mechanisms and nothing else -- the constant-bank read, the modular
 // subtract, and the local round trip at the top of the frame -- so a wrong value here says
@@ -329,7 +347,8 @@ static void dump256(const char* tag, const uint64_t v[4])
 static void wantPx_ladder(const uint64_t jx[4], const uint64_t* gx, const uint64_t* gy,
                           unsigned half, const uint64_t x1[4], const uint64_t y1[4],
                           bool invm, bool walkm, bool ptsm, uint64_t out[4],
-                          uint64_t last[4] = nullptr)
+                          uint64_t last[4] = nullptr,
+                          uint64_t lastlam[4] = nullptr, uint64_t lastsqr[4] = nullptr)
 {
 	if (ptsm) {
 		// The point arithmetic, from the group law rather than from GpuCore.cu's shape:
@@ -351,7 +370,7 @@ static void wantPx_ladder(const uint64_t jx[4], const uint64_t* gx, const uint64
 			invmodP(d, dinv);
 			for (int neg = 0; neg < 2; ++neg) {
 				if (i == half - 1 && neg == 0) continue;   // the tail is minus only
-				uint64_t py[4], s[4], lam[4], px3[4], t[4];
+				uint64_t py[4], s[4], lam[4], px3[4], t[4], sq[4];
 				memcpy(py, &gy[(size_t)i * 4], sizeof(py));
 				if (neg) {
 					const uint64_t zero[4] = {0, 0, 0, 0};
@@ -359,11 +378,15 @@ static void wantPx_ladder(const uint64_t jx[4], const uint64_t* gx, const uint64
 				}
 				submodP(py, y1, s);
 				mulmodP(s, dinv, lam);
-				mulmodP(lam, lam, px3);                    // lam^2
-				submodP(px3, x1, t);
+				mulmodP(lam, lam, sq);                     // lam^2
+				submodP(sq, x1, t);
 				submodP(t, &gx[(size_t)i * 4], px3);       // - px_i
 				mulmodP(acc, px3, acc);
 				if (last) memcpy(last, px3, 4 * sizeof(uint64_t));
+				// The two intermediates behind px3, kept so the harness can bisect the
+				// tail's chain in one launch instead of one launch per link.
+				if (lastlam) memcpy(lastlam, lam, 4 * sizeof(uint64_t));
+				if (lastsqr) memcpy(lastsqr, sq, 4 * sizeof(uint64_t));
 			}
 		}
 		memcpy(out, acc, 4 * sizeof(uint64_t));
@@ -601,6 +624,9 @@ int main(int argc, char** argv)
 	// every (Gx[i] - x1) by Fermat, and paying that twice for an identical answer is the
 	// kind of waste that turns a check people run into one they skip.
 	std::vector<uint64_t> wantPxAll(nlimb), wantPyAll(nlimb);
+	// start_scalars and counts256 are identity everywhere except pts, which spends them on
+	// the tail point's lam and lam^2.
+	std::vector<uint64_t> wantScAll(hs), wantCtAll(hc);
 	for (size_t t = 0; t < threads; t++) {
 		uint64_t a[4], b[4];
 		for (int k = 0; k < 4; k++) { a[k] = hx[t * 4 + k]; b[k] = hy[t * 4 + k]; }
@@ -614,7 +640,9 @@ int main(int argc, char** argv)
 			// In pts mode Py is the tail's px3, not subp[half-1] -- the value that says
 			// WHICH point is wrong rather than only that the product is.
 			wantPx_ladder(jx, gx.data(), gy.data(), half, a, b, invm, walkm, ptsm,
-			              &wantPxAll[t * 4], ptsm ? &wantPyAll[t * 4] : nullptr);
+			              &wantPxAll[t * 4], ptsm ? &wantPyAll[t * 4] : nullptr,
+			              ptsm ? &wantScAll[t * 4] : nullptr,
+			              ptsm ? &wantCtAll[t * 4] : nullptr);
 		} else {
 			mulmodP(a, b, &wantPxAll[t * 4]);
 			memcpy(&wantPyAll[t * 4], b, 4 * sizeof(uint64_t));   // Py is identity in mul mode
@@ -624,7 +652,8 @@ int main(int argc, char** argv)
 	int bad = 0;
 	for (int m = 0; m < 2; m++) {
 		size_t exact = 0, noncanon = 0, wrong = 0, firstWrong = (size_t)-1;
-		size_t idPy = 0, idSc = 0, idCt = 0, firstPy = (size_t)-1;
+		size_t idPy = 0, idSc = 0, idCt = 0;
+		size_t firstPy = (size_t)-1, firstSc = (size_t)-1, firstCt = (size_t)-1;
 		for (size_t t = 0; t < threads; t++) {
 			uint64_t want[4], got[4], wantPy[4];
 			for (int k = 0; k < 4; k++) got[k] = outPx[m][t * 4 + k];
@@ -641,15 +670,41 @@ int main(int argc, char** argv)
 					idPy++;
 					if (firstPy == (size_t)-1) firstPy = t;
 				}
-				if (outSc[m][t * 4 + k] != hs[t * 4 + k]) idSc++;
-				if (outCt[m][t * 4 + k] != hc[t * 4 + k]) idCt++;
+			}
+			if (ptsm) {
+				// Lam and Sqr come straight out of MulMod256 and SqrMod256, so they are
+				// congruent but not necessarily canonical -- C8 again. Comparing them for
+				// equality would report the two links as broken on a value that is
+				// arithmetically right, which is the one thing this bisect must not do.
+				int kk = 0;
+				uint64_t g[4];
+				for (int k = 0; k < 4; k++) g[k] = outSc[m][t * 4 + k];
+				if (classify(g, &wantScAll[t * 4], &kk) > 1) {
+					idSc++;
+					if (firstSc == (size_t)-1) firstSc = t;
+				}
+				for (int k = 0; k < 4; k++) g[k] = outCt[m][t * 4 + k];
+				if (classify(g, &wantCtAll[t * 4], &kk) > 1) {
+					idCt++;
+					if (firstCt == (size_t)-1) firstCt = t;
+				}
+			} else {
+				for (int k = 0; k < 4; k++) {
+					if (outSc[m][t * 4 + k] != hs[t * 4 + k]) idSc++;
+					if (outCt[m][t * 4 + k] != hc[t * 4 + k]) idCt++;
+				}
 			}
 		}
 		printf("  %s:  EXACT %zu   NON-CANON %zu   WRONG %zu   (of %u)\n",
 		       M[m].name, exact, noncanon, wrong, threads);
-		printf("      %s -- Py %s  scalars %s  counts %s\n",
-		       ptsm ? "last px3 + identity" : sufp ? "subp[half-1] + identity" : "identity check",
-		       idPy ? "BROKEN" : "ok", idSc ? "BROKEN" : "ok", idCt ? "BROKEN" : "ok");
+		if (ptsm)
+			printf("      tail chain -- lam %s  lam^2 %s  px3 %s   (scalars/counts spent"
+			       " on the bisect, so no identity guard on this rung)\n",
+			       idSc ? "WRONG" : "ok", idCt ? "WRONG" : "ok", idPy ? "WRONG" : "ok");
+		else
+			printf("      %s -- Py %s  scalars %s  counts %s\n",
+			       sufp ? "subp[half-1] + identity" : "identity check",
+			       idPy ? "BROKEN" : "ok", idSc ? "BROKEN" : "ok", idCt ? "BROKEN" : "ok");
 		if (wrong) {
 			bad = 1;
 			uint64_t want[4], a[4], b[4];
@@ -689,19 +744,23 @@ int main(int argc, char** argv)
 			       : sufp ? "   (subp[half-1] = Jx - x1, stored before the loop)" : "");
 			dump256("x1", a);
 			if (sufp && !ptsm) dump256("Jx", jx);
-			dump256("want", wp);
-			dump256("got", &outPy[m][firstPy * 4]);
-			{
-				uint64_t d[4]; bool bw = false;
-				for (int k = 0; k < 4; k++) {
-					uint64_t g = outPy[m][firstPy * 4 + k];
-					uint64_t t = g - wp[k] - (bw ? 1 : 0);
-					bw = bw ? (g <= wp[k]) : (g < wp[k]);
-					d[k] = t;
-				}
-				dump256("got-want", d);
-			}
+			dump_delta(&outPy[m][firstPy * 4], wp);
 			if (sufp && !ptsm) explain_py(&outPy[m][firstPy * 4], a, jx);
+		}
+		// The two links BEHIND px3. Reported in chain order -- lam, then lam^2, then px3
+		// above -- so the first one marked wrong is the call that diverges. If all three
+		// are wrong the divergence is at or before MulMod256(s, dx_inv); if only px3 is,
+		// it is SubMod256_3; and if none are while Px still is, the point arithmetic is
+		// right and the accumulation is not.
+		if (ptsm && idSc) {
+			printf("      first wrong lam at thread %zu"
+			       "   (MulMod256(-c_Gy[511] - y1, dx_inv), tail)\n", firstSc);
+			dump_delta(&outSc[m][firstSc * 4], &wantScAll[firstSc * 4]);
+		}
+		if (ptsm && idCt) {
+			printf("      first wrong lam^2 at thread %zu"
+			       "   (SqrMod256(lam), tail)\n", firstCt);
+			dump_delta(&outCt[m][firstCt * 4], &wantCtAll[firstCt * 4]);
 		}
 		if (idPy || idSc || idCt) bad = 1;
 	}

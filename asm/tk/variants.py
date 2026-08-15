@@ -31,6 +31,14 @@ and its MulMod256 calls overwrite the register Prod aliases. It would assemble, 
 produce numbers. So the TOP rung needs no edits at all, and the ones below
 it get rebuilt.
 
+**pts is now the one exception, and deliberately so.** It swaps STOREID for STORELAM, which
+spends start_scalars and counts256 on the tail point's lam and lam^2 rather than copying the
+inputs back. So `TestKernel.cubin` (main.asm as written) and `TestKernel_pts.cubin` are no
+longer byte-identical, and a rebuild that checks for that will say so. The cost is the
+identity guard on this one rung; the eight others keep it, which is why the swap lives in
+variants.py rather than in main.asm. main.asm stays the real kernel -- stage 2d needs those
+two arrays back for `Scal += B` and `Rem -= B`.
+
 Exactly one of the STORE* regions writes Px in each variant, and exactly one writes Py.
 
 usage: variants.py <main.asm> <outdir> [name ...]
@@ -50,7 +58,11 @@ VARIANTS = {
     # cut WALK must not name them -- the marker is already gone by the time they are looked
     # up, and region() exits rather than shrugging.
     "walk":  (["PLUS", "PLUST", "STOREPTS"], ["WACC", "WACCT", "STOREWALK"]),
-    "pts":   ([], []),                              # == main.asm as committed
+    # pts spends start_scalars/counts256 on the tail point's Lam and Sqr instead of on the
+    # identity copy. It is the only rung that does, so it is the only one that names
+    # STOREID/STORELAM -- every other rung leaves both exactly as main.asm has them, which
+    # keeps the identity guard on the eight rungs that are not being bisected.
+    "pts":   (["STOREID"], ["STORELAM"]),
 }
 
 src, outdir = sys.argv[1], sys.argv[2]
