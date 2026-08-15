@@ -9,7 +9,18 @@
 # their instruction forms are unproven against the shipped encoder repository.
 set -e
 cd "$(dirname "$0")"
-: "${RCASM:?set RCASM to the RCAsm checkout (the directory containing cuAssembler/)}"
+# YOU PROBABLY DO NOT NEED TO RUN THIS. Every TestKernel*.cubin is committed, already built
+# and already through align_check/stall_check/barrier_check/pc_check. Running the A/B ladder
+# needs `rcasm_test/abtest/build.sh` and nothing from here. This script is for the case where
+# an .asm actually changed, and only then does it need an RCAsm checkout.
+if [ -z "$RCASM" ]; then
+    echo "RCASM is not set, and this script assembles .asm sources -- it is not needed to RUN" >&2
+    echo "the ladder. The cubins are committed:" >&2
+    echo "    cd rcasm_test/abtest && ./build.sh && ./bisect_run.sh" >&2
+    echo "If you did change an .asm, point RCASM at the RCAsm checkout (the directory" >&2
+    echo "containing cuAssembler/), with the fixes from asm/TESTKERNEL_TEMPLATE.md applied." >&2
+    exit 1
+fi
 CUDA="${CUDA:-/usr/local/cuda}"
 WORK="${WORK:-/tmp/tkbuild}"
 ASM="$(cd .. && pwd)"          # repo asm/ -- holds Kernel02's mod_*.asm

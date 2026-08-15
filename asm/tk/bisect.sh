@@ -7,7 +7,15 @@
 # that faults names the construct responsible.
 set -e
 cd "$(dirname "$0")"
-: "${RCASM:?set RCASM to the RCAsm checkout}"
+# See build.sh: this REBUILDS the ladder from source and is not what you run to exercise it.
+# The cubins are committed. To run the ladder:
+#     cd rcasm_test/abtest && ./build.sh && ./bisect_run.sh
+if [ -z "$RCASM" ]; then
+    echo "RCASM is not set. This script re-assembles the .asm sources; you do not need it to" >&2
+    echo "run the ladder -- the cubins are committed:" >&2
+    echo "    cd rcasm_test/abtest && ./build.sh && ./bisect_run.sh" >&2
+    exit 1
+fi
 V="${WORK:-/tmp/tkbuild}/variants"
 mkdir -p "$V"
 VARIANTS="${VARIANTS:-id local call full sufp inv walk pts jump loop}"
