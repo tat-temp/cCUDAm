@@ -1123,26 +1123,34 @@ The reference side changed too, and for the better: **A is now `GpuCore.cubin`**
 `ab_kernel.cu`'s staged transcription. The two come out within 1.3% on instruction count (5,520
 against 5,448), which is a late, free check that the staged reference was faithful.
 
+These are the clean numbers, re-measured after the throttled session below. The two A columns agree
+to **0.03%** — same reference binary in both runs — which is what licenses comparing the two B
+columns to each other across separate invocations:
+
 | A — `GpuCore.cu`, NO_HASH | B | B/A |
 |---|---|---:|
-| 19.5350 ms | `TestKernel_loop` — 42 calls — 16.1567 ms | **0.827** |
-| 19.5215 ms | `TestKernel_inline` — 2 calls — 15.7835 ms | **0.809** |
+| 8.0572 ms | `TestKernel_loop` — 42 calls — 7.1556 ms | **0.888** |
+| 8.0596 ms | `TestKernel_inline` — 2 calls — 6.8022 ms | **0.844** |
 
 **Removing 36 indirect branches per walk iteration — about 18,400 per batch per thread, through
-29 KB of scattered code — bought 2.3%.** Hypothesis 2 is refuted, and by a margin that leaves no
-room to argue it was mismeasured: the two A columns agree to 0.07%, so the run is stable to well
-under the effect being looked for.
+29 KB of scattered code — bought 4.9%**, and took the lead over the compiled kernel from 11.2% to
+15.6%.
+
+So hypothesis 2 is **not** refuted, it is sized: the calls are about a third of the total lead and
+about 5% of this kernel's time. Real, worth having, and still nowhere near enough. Even with every
+per-point branch gone, issuing *half* the field-math instructions buys 15.6% where an issue-bound
+kernel would give something approaching 50%. **Hypothesis 1 remains the residual**, now as the
+explanation for a 15.6% result rather than an 11% one.
 
 Both runs also came back **EXACT 43,520 of 43,520** against the oracle on both sides, with A and B
 agreeing on every output limb. That is the other half of what the A/B was for — inlining ought to be
 semantically inert, and this is what says it is, rather than the transform merely looking correct.
 
-So the 11% is *not* the calls, and hypothesis 1 now stands alone by elimination rather than by
-evidence. **P2 is the experiment**, and it is a build flag on both sides.
+**P2 is still the experiment for the residual**, and it is a build flag on both sides.
 
 Two things the numbers say in passing:
 
-- **`REG 255` is now the largest single lever, not instruction count.** B wins 17-19% while running
+- **`REG 255` is now the largest single lever, not instruction count.** B wins 11-16% while running
   at *half* A's occupancy — 1 resident block per SM against 2. Getting under 128 registers is worth
   more than anything remaining on the arithmetic, and it is the one item that the 2.3% result makes
   *more* attractive rather than less.
@@ -1222,20 +1230,32 @@ grid — the same binary, 2.40× apart. A run two sessions before that put the e
 machine was in a degraded state — thermal or power throttling, or the card was shared — for the
 whole of that session.
 
-**What survives it:** any ratio taken *within* one run. The inline-vs-call result stands, because
-`TestKernel_loop` at 16.1567 ms and `TestKernel_inline` at 15.7835 ms were measured back to back in
-the same degraded session and the two A columns agreed to 0.07%.
+Every number taken in that session is superseded by the re-run recorded above: the lead over the
+compiled kernel was **17.3% / 19.1%** throttled and is **11.2% / 15.6%** clean, and the cost of the
+calls was **2.3%** throttled and is **4.9%** clean.
 
-**What does not:** the *17.3% and 19.1%* leads recorded above for the hand-written kernel over
-`GpuCore.cu` NO_HASH. Both were taken in the throttled session. Against the clean numbers on either
-side of it — `TestKernel_loop` at 7.1646 ms, `GpuCore` NO_HASH at 8.1294 ms — the lead is nearer
-**12%**, which is also what the first measurement said. **Treat 17-19% as withdrawn and 11-12% as
-the standing figure until the pair is re-run.** Whole-program, at a 39-43% field share, that is
-about **5%**.
+**And that last pair is the finding, because it kills the rule I reached for first.** "Ratios taken
+within one run survive, only absolute times are affected" is the natural response to a throttled
+session, it is what this document said for one commit, and it is **false**. Throttling did not scale
+both kernels by one factor — it changed the *mix*. Slowing the core clock while memory keeps its own
+pace makes every kernel relatively more memory-bound, which compresses exactly the differences that
+come from issue and branch behaviour: the call overhead measured **less than half its true size**
+under throttle. A ratio between two kernels that differ in *what they are bound by* is not protected
+by having been measured back to back.
 
-This is the second time this harness has been saved by measuring both sides in one process. It is
-worth stating as a rule: **a wall-clock number is only comparable to another taken in the same run**,
-and the harness should never be handed a single kernel.
+So the rule is narrower and less comfortable than the one it replaces:
+
+- **A wall-clock number is comparable only to one taken in the same run** — still true, still the
+  reason the harness must never be handed a single kernel.
+- **A ratio is trustworthy only if the machine was in a known state**, and "both sides ran back to
+  back" does not establish that. The cheap guard is an *absolute* anchor: the reference side should
+  land where it has landed before. `GpuCore` NO_HASH at grid 170 is 8.03-8.13 ms across three clean
+  sessions and was 19.52-19.54 ms in the bad one. A reference 2.4× off its own history is the signal,
+  and it was sitting in the output the whole time.
+
+Whole-program, at a 39-43% field share and a 15.6% points-only lead, the hand-written route is worth
+about **6-7%** — provided the hash layer costs the same, which it cannot be assumed to, since it
+would have to be hand-written too.
 
 Two lessons, both of which this document already contains under other names. **A correct comment is
 not a permanent one**: the tail carried "no chain update after it", which was true on every rung up

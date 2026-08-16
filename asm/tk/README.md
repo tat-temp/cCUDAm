@@ -79,20 +79,24 @@ The reference also moved up to the real thing: A is `GpuCore.cubin` from
 `make cubin SM=120 NO_HASH=1`, not `ab_kernel.cu`. They agree within 1.3% on instruction count
 (5,520 vs 5,448) — a free, late check that the staged reference was faithful.
 
+Clean numbers, re-measured after the throttled session below. The two A columns agree to 0.03%,
+which is what lets the two B columns be compared across separate invocations:
+
 | A — `GpuCore.cu` NO_HASH | B | B/A |
 |---|---|---:|
-| 19.5350 ms | `TestKernel_loop` — 42 calls — 16.1567 ms | **0.827** |
-| 19.5215 ms | `TestKernel_inline` — 2 calls — 15.7835 ms | **0.809** |
+| 8.0572 ms | `TestKernel_loop` — 42 calls — 7.1556 ms | **0.888** |
+| 8.0596 ms | `TestKernel_inline` — 2 calls — 6.8022 ms | **0.844** |
 
 **36 indirect branches per walk iteration removed, ~18,400 per batch per thread, and it bought
-2.3%.** The two A columns agree to 0.07%, so the run resolves far below the effect being looked for.
-Both were EXACT 43,520/43,520 against the oracle on both sides with every limb agreeing, which is
-the other half of the point: inlining should be semantically inert and this says it is.
+4.9%** — taking the lead over the compiled kernel from 11.2% to 15.6%. Both EXACT 43,520/43,520
+against the oracle with every limb agreeing, which is the other half of the point: inlining should be
+semantically inert and this says it is.
 
-So the calls are not where the time goes, and local memory stands by elimination rather than by
-evidence. The experiment is a smaller `MAX_BATCH_SIZE` on both sides. Meanwhile the biggest lever
-here is not instruction count at all — B wins 17-19% at *half* A's occupancy, so `REG 255` → ≤128 is
-worth more than anything left in the arithmetic. See `../../DEVPLAN.md`.
+So the calls are about a third of the lead and ~5% of this kernel — real, and still not the story.
+Half the field-math instructions buys 15.6% where issue-bound would give nearer 50%, so local memory
+remains the residual. The experiment is a smaller `MAX_BATCH_SIZE` on both sides. And the biggest
+single lever is still not instruction count: B wins 11-16% at *half* A's occupancy, so
+`REG 255` → ≤128 is worth more than anything left in the arithmetic. See `../../DEVPLAN.md`.
 
 ### How much of the clock is hashing — 2026-08-16
 
@@ -116,20 +120,27 @@ hide, and the candidate is the frame. That is hypothesis 1 again, from a directi
 do with instruction counts, and it makes `REG 255` worse than the occupancy argument alone: the part
 this kernel replaces is exactly the part that wants the second block it cannot have.
 
-### The throttled session — 17-19% is withdrawn
+### The throttled session — and why "same run" is not enough
 
-`GpuCore.cubin` NO_HASH measured 19.5350 ms at grid 170 in the session that produced the inline
-result, and 8.1294 ms here — same binary, same `REG 128` / `LOCAL 16416`, same grid, **2.40× apart**.
-An earlier session put the equivalent kernel at 8.02 ms, so this session and the first agree and the
-middle one was throttled throughout.
+`GpuCore.cubin` NO_HASH measured 19.5350 ms at grid 170 in the session that first produced the inline
+result, and 8.0572 ms in the re-run — same binary, same `REG 128` / `LOCAL 16416`, same grid,
+**2.42× apart**. An earlier session put the equivalent kernel at 8.02 ms, so two sessions agree and
+one was throttled from end to end.
 
-The inline-vs-call 2.3% **stands** — both sides were measured back to back inside that session, and
-the two A columns agreed to 0.07%. The 17.3% / 19.1% leads over the compiled kernel **do not**;
-against clean numbers on either side (7.16 ms here, 8.13 ms there) the lead is nearer **12%**, which
-is what the first measurement said too. Re-run the pair before quoting anything.
+Everything measured there is superseded: the lead over the compiled kernel was 17.3% / 19.1%
+throttled and is 11.2% / 15.6% clean; the call overhead was 2.3% throttled and is 4.9% clean.
 
-The rule this keeps re-teaching: **a wall-clock number is comparable only to one taken in the same
-run.** Never hand this harness a single kernel.
+**That last pair is the lesson.** The obvious response to a throttled session — "absolute times are
+void but ratios taken back to back survive" — is wrong, and this file said it for one commit.
+Throttling does not scale a kernel by one factor; it changes what the kernel is bound by. A slower
+core against unchanged memory makes everything relatively more memory-bound, which compresses
+precisely the differences that come from issue and branch behaviour. The call overhead came out at
+**less than half its true size**. Two kernels bound by different things do not have a stable ratio
+across machine states, however adjacent their launches.
+
+The guard is cheap and was sitting in the output all along: **the reference side has a history, so
+check it against itself.** `GpuCore` NO_HASH at grid 170 is 8.03-8.13 ms in every clean session. A
+reference 2.4× off its own past is the signal that the run is not comparable to anything.
 
 Two operational notes. **`stall_check.py` reports BAD on the inline cubin and must not be
 "fixed"** — it separates authored from vendored code by position, and inlining moves vendored code
