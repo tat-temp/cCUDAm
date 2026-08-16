@@ -1108,6 +1108,63 @@ What has *not* been established: that local memory is the bottleneck. It is the 
 and it is untested — the direct experiment is a build at a smaller `MAX_BATCH_SIZE` on both sides,
 and until that runs, "not instruction bound" is the measured claim and the cause is a guess.
 
+### The calls were not it — inlining measured, RTX 5090, 2026-08-16
+
+The 11% above had two candidate explanations and they are separable, so they were separated.
+`asm/tk/inline.py` rewrites 41 of the kernel's 42 `call_func` sites as `inc_func` — same bindings,
+same bodies, no branch and no return — leaving only `InvMod256` as a call, since it runs once per
+1,023 points and inlining it would test nothing at the cost of the whole rest of the kernel again.
+The result is 3,304 instructions against 1,832, kernel body 2,713 against 326, and a **`BRXU` count
+of 2**: every indirect branch on the per-point path is gone. Hypothesis 1 is untouched by it —
+identical frame, identical `subp[]` traffic, identical arithmetic.
+
+The reference side changed too, and for the better: **A is now `GpuCore.cubin`** from
+`make cubin SM=120 NO_HASH=1` — the shipped kernel with hashing compiled out — instead of
+`ab_kernel.cu`'s staged transcription. The two come out within 1.3% on instruction count (5,520
+against 5,448), which is a late, free check that the staged reference was faithful.
+
+| A — `GpuCore.cu`, NO_HASH | B | B/A |
+|---|---|---:|
+| 19.5350 ms | `TestKernel_loop` — 42 calls — 16.1567 ms | **0.827** |
+| 19.5215 ms | `TestKernel_inline` — 2 calls — 15.7835 ms | **0.809** |
+
+**Removing 36 indirect branches per walk iteration — about 18,400 per batch per thread, through
+29 KB of scattered code — bought 2.3%.** Hypothesis 2 is refuted, and by a margin that leaves no
+room to argue it was mismeasured: the two A columns agree to 0.07%, so the run is stable to well
+under the effect being looked for.
+
+Both runs also came back **EXACT 43,520 of 43,520** against the oracle on both sides, with A and B
+agreeing on every output limb. That is the other half of what the A/B was for — inlining ought to be
+semantically inert, and this is what says it is, rather than the transform merely looking correct.
+
+So the 11% is *not* the calls, and hypothesis 1 now stands alone by elimination rather than by
+evidence. **P2 is the experiment**, and it is a build flag on both sides.
+
+Two things the numbers say in passing:
+
+- **`REG 255` is now the largest single lever, not instruction count.** B wins 17-19% while running
+  at *half* A's occupancy — 1 resident block per SM against 2. Getting under 128 registers is worth
+  more than anything remaining on the arithmetic, and it is the one item that the 2.3% result makes
+  *more* attractive rather than less.
+- **Do not quote absolute milliseconds across sessions.** `TestKernel_loop.cubin` is byte-identical
+  to the run three commits ago and measured 7.16 ms there against 16.16 ms here, with the A side
+  moving by a similar factor. Both sides moved together, so every within-run ratio in this document
+  stands; the machine state that produced the shift is unidentified and no cross-session wall-clock
+  comparison should be made until it is. Same-session, same-process, back-to-back is the only
+  comparison this harness supports.
+
+**And one thing about the checkers, because it looks like a regression and is not.** `stall_check.py`
+reports **BAD** on the inline cubin. It separates authored code from vendored code by *position* —
+the kernel body ends at the last `EXIT`, appended `FUNCTION` bodies follow it — because the vendored
+routines deliberately run below the measured stall floor and are correct on hardware. Inlining moves
+exactly that code to the near side of the `EXIT`, so the positional rule can no longer tell them
+apart. `asm/tk/sigcmp.sh` forces every violation to print in both builds and reduces them to
+`(distance, need)` signatures: the signature *set* is identical, nothing new appears, and 105 → 278
+is accounted for exactly by copy multiplicity (10 per `MulMod256` body, 31 per
+`SqrMod256`+`SubMod256_3` pair, reproducing both totals with nothing left over). The checker was
+**not** weakened to make the build green — a checker relaxed to pass a build it correctly flagged is
+worth less than no checker.
+
 Two lessons, both of which this document already contains under other names. **A correct comment is
 not a permanent one**: the tail carried "no chain update after it", which was true on every rung up
 to `pts`, where `inverse` is dead after the tail — stage 2d added the first consumer of it and made

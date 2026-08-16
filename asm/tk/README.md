@@ -64,10 +64,43 @@ block: 43,520 and 174,080 threads against the 256 everything before them ran at.
 **Read the 11% carefully, because it is smaller than it should be.** This walk issues about half
 the field-math instructions the compiled one does — six `MulMod256` at 112 against six inlined
 `mul_mod` at ~222 per iteration. Halving the instructions bought 11% of the time, so the kernel is
-not instruction-issue bound, and the thing both sides carry identically is the 16 KB frame and
-32 KB of `subp[]` traffic per thread per batch. That is a hypothesis, not a result; the experiment
-is a smaller `MAX_BATCH_SIZE` on both sides. See `../../DEVPLAN.md` for what it does to the case
-for this whole route.
+not instruction-issue bound. Two suspects: the 16 KB frame and 32 KB of `subp[]` traffic per thread
+per batch, which both sides carry identically; or the calls, which only this side pays. They are
+separable, so the next section separates them.
+
+### It was not the calls — 2026-08-16
+
+`inline.py` rewrites 41 of the 42 `call_func` sites as `inc_func` — same bindings, same bodies, no
+branch and no return — leaving `InvMod256` alone, since it runs once per 1,023 points. 3,304
+instructions against 1,832, kernel body 2,713 against 326, **`BRXU` count 2**: every indirect branch
+on the per-point path gone, and nothing else touched.
+
+The reference also moved up to the real thing: A is `GpuCore.cubin` from
+`make cubin SM=120 NO_HASH=1`, not `ab_kernel.cu`. They agree within 1.3% on instruction count
+(5,520 vs 5,448) — a free, late check that the staged reference was faithful.
+
+| A — `GpuCore.cu` NO_HASH | B | B/A |
+|---|---|---:|
+| 19.5350 ms | `TestKernel_loop` — 42 calls — 16.1567 ms | **0.827** |
+| 19.5215 ms | `TestKernel_inline` — 2 calls — 15.7835 ms | **0.809** |
+
+**36 indirect branches per walk iteration removed, ~18,400 per batch per thread, and it bought
+2.3%.** The two A columns agree to 0.07%, so the run resolves far below the effect being looked for.
+Both were EXACT 43,520/43,520 against the oracle on both sides with every limb agreeing, which is
+the other half of the point: inlining should be semantically inert and this says it is.
+
+So the calls are not where the time goes, and local memory stands by elimination rather than by
+evidence. The experiment is a smaller `MAX_BATCH_SIZE` on both sides. Meanwhile the biggest lever
+here is not instruction count at all — B wins 17-19% at *half* A's occupancy, so `REG 255` → ≤128 is
+worth more than anything left in the arithmetic. See `../../DEVPLAN.md`.
+
+Two operational notes. **`stall_check.py` reports BAD on the inline cubin and must not be
+"fixed"** — it separates authored from vendored code by position, and inlining moves vendored code
+to the near side of the last `EXIT`. `sigcmp.sh` shows the violation signature set is identical
+across the two builds and 105 → 278 is copy multiplicity exactly. And **absolute milliseconds do not
+travel between sessions**: `TestKernel_loop.cubin` is byte-identical to the 7.16 ms run above and
+measured 16.16 ms here, with A moving by a similar factor. Within-run ratios stand; the cause of the
+shift is unidentified, so nothing cross-session should be compared until it is.
 
 **Stage 2a matches the compiled kernel on an RTX 5090** — 256 EXACT out of 256 on both the
 accumulator and the frame slot, A and B agreeing on every output limb. That covers a real
