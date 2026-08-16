@@ -926,11 +926,15 @@ int main(int argc, char** argv)
 		       100.0 * (ms[1] < ms[0] ? ms[0] - ms[1] : ms[1] - ms[0]) / ms[0],
 		       ms[1] < ms[0] ? "FASTER" : "slower",
 		       "   (check BLOCKS/SM above before reading anything into this)");
-	// And the residual asymmetry, which is small and favours B: A folds every candidate point
-	// into a sink so nvcc cannot delete the walk, a handful of XORs per point that B does not
-	// carry. It is the escape that makes the compiled side a valid reference at all -- without
-	// it there is no walk to compare against -- so it cannot simply be removed.
-	printf("  A additionally runs the NO_HASH sink (a few XOR per point); B does not.\n");
+	// And the residual asymmetry, stated as a rule rather than as a side, because which side
+	// carries it depends on what was passed in. A cubin built NO_HASH folds every candidate point
+	// into a sink so nvcc cannot delete the walk -- a handful of XORs per point. That escape is
+	// what makes a points-only build a valid reference at all (without it there is no walk left to
+	// compare against), so it cannot simply be removed. It used to say "A runs the sink", which was
+	// true of every configuration this harness had been used in and became exactly backwards the
+	// first time a full-hash cubin was passed as A to measure the hash/field split.
+	printf("  NOTE: a NO_HASH cubin carries the sink (a few XOR per point); a full one does not.\n"
+	       "        Whichever side that is, it biases the ratio slightly against it.\n");
 
 	for (int m = 0; m < 2; m++) {
 		cuMemFree(M[m].px); cuMemFree(M[m].py); cuMemFree(M[m].sc);
