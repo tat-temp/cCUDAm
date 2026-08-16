@@ -94,6 +94,43 @@ evidence. The experiment is a smaller `MAX_BATCH_SIZE` on both sides. Meanwhile 
 here is not instruction count at all — B wins 17-19% at *half* A's occupancy, so `REG 255` → ≤128 is
 worth more than anything left in the arithmetic. See `../../DEVPLAN.md`.
 
+### How much of the clock is hashing — 2026-08-16
+
+`GpuCore.cubin` built full and `NO_HASH=1`, run against each other. `REG` 120 and 128, so both hold
+2 blocks/SM and this one is occupancy-matched at every grid:
+
+| grid | A — full | B — points-only | hashing |
+|---|---:|---:|---:|
+| 170 | 18.8218 ms | 8.1294 ms | **56.8%** |
+| 680 | 74.0192 ms | 29.1436 ms | **60.6%** |
+
+So field math is **39-43% of wall clock**, not the 31% the dynamic instruction split implied — this
+route addresses about a third more of the program than the estimates assumed. Both sides EXACT and
+limb-identical, which is also what says `NO_HASH` is a faithful subset of the shipped kernel and not
+a differently-behaving stand-in.
+
+The scaling is the useful part. Quadrupling the work and doubling blocks/SM costs the full kernel
+3.93× and the points-only kernel 3.59× — a 1.7% efficiency gain against a 10.4% one. Latency-bound
+work gains from a second resident block; issue-bound work does not. The field math has something to
+hide, and the candidate is the frame. That is hypothesis 1 again, from a direction with nothing to
+do with instruction counts, and it makes `REG 255` worse than the occupancy argument alone: the part
+this kernel replaces is exactly the part that wants the second block it cannot have.
+
+### The throttled session — 17-19% is withdrawn
+
+`GpuCore.cubin` NO_HASH measured 19.5350 ms at grid 170 in the session that produced the inline
+result, and 8.1294 ms here — same binary, same `REG 128` / `LOCAL 16416`, same grid, **2.40× apart**.
+An earlier session put the equivalent kernel at 8.02 ms, so this session and the first agree and the
+middle one was throttled throughout.
+
+The inline-vs-call 2.3% **stands** — both sides were measured back to back inside that session, and
+the two A columns agreed to 0.07%. The 17.3% / 19.1% leads over the compiled kernel **do not**;
+against clean numbers on either side (7.16 ms here, 8.13 ms there) the lead is nearer **12%**, which
+is what the first measurement said too. Re-run the pair before quoting anything.
+
+The rule this keeps re-teaching: **a wall-clock number is comparable only to one taken in the same
+run.** Never hand this harness a single kernel.
+
 Two operational notes. **`stall_check.py` reports BAD on the inline cubin and must not be
 "fixed"** — it separates authored from vendored code by position, and inlining moves vendored code
 to the near side of the last `EXIT`. `sigcmp.sh` shows the violation signature set is identical

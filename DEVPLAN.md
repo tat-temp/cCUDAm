@@ -1165,6 +1165,78 @@ is accounted for exactly by copy multiplicity (10 per `MulMod256` body, 31 per
 **not** weakened to make the build green — a checker relaxed to pass a build it correctly flagged is
 worth less than no checker.
 
+### The hash/field split, measured at last — RTX 5090, 2026-08-16
+
+Everything above sizes the SASS route against a **~69% hashing / ~31% field math** split that was
+never a time measurement — it is a *dynamic instruction count*, and it has been carried through this
+document as if it were a share of the clock. `GpuCore.cubin` built twice, full and `NO_HASH=1`, and
+run against each other in the same harness, replaces it with the real thing. Registers are 120 and
+128, so both sides hold 2 blocks/SM and the comparison is occupancy-matched at *every* grid.
+
+| grid | blocks/SM | A — full | B — points-only | B/A | **hashing** |
+|---|---:|---:|---:|---:|---:|
+| 170 — 1 wave | 2 / 2 | 18.8218 ms | 8.1294 ms | 0.432 | **56.8%** |
+| 680 — 2 waves | 2 / 2 | 74.0192 ms | 29.1436 ms | 0.394 | **60.6%** |
+
+Both EXACT on every thread and limb-identical to each other, which is the check that says `NO_HASH`
+is a faithful subset of the shipped kernel rather than a differently-behaving stand-in — worth
+having, since every points-only measurement in this document rests on it.
+
+**Field math is 39-43% of wall clock, not 31%.** The instruction-share proxy understated it,
+because the two hash bodies are `__noinline__` — emitted once, called from four sites — so a static
+count under-represents them and a *dynamic* count over-represents their cost relative to field math
+that is waiting on memory. Every estimate in this document built on the 31% figure is therefore low
+by about a third, in the route's favour.
+
+**The scaling behaviour is the more interesting half, and it corroborates hypothesis 1 for free.**
+Going from 1 wave to 2 quadruples the work and doubles the resident blocks per SM:
+
+| | 1 wave | 2 waves | vs 4× linear |
+|---|---:|---:|---:|
+| full | 18.8218 | 74.0192 | 3.93× — **1.7% better than linear** |
+| points-only | 8.1294 | 29.1436 | 3.59× — **10.4% better than linear** |
+
+Doubling occupancy buys the points-only kernel five times what it buys the full one. That is the
+signature of latency-bound work against issue-bound work: hashing is a dense dependent chain of
+`LOP3`/`SHF` that gains almost nothing from another resident block, while the field math has
+somewhere to hide. **The thing it is hiding is the 16 KB frame and the `subp[]` round trip**, which
+is hypothesis 1 arriving from a direction that has nothing to do with instruction counts.
+
+Two consequences, and they point in opposite directions from where this document has been looking:
+
+- **P3 is now the highest-value performance item in the project, by a wide margin.** 57-61% of wall
+  clock is hashing, and P3 — dropping `__noinline__` on the hot `getHash160_w2_from_limbs` and
+  hoisting the inverse-chain update — is the only item that touches it. It is filed at 5-15%
+  unmeasured, against a share of the clock more than half again the size of what the entire SASS
+  rewrite addresses.
+- **`REG 255` is worse for the hand-written kernel than the raw occupancy argument suggested.** The
+  part it replaces is precisely the part that gains from a second resident block, and it is the part
+  that cannot have one.
+
+### The throttle — and what it voids
+
+`GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago
+and **8.1294 ms** here. Same flags, same reported `REG 128` / `LOCAL 16416`, same harness, same
+grid — the same binary, 2.40× apart. A run two sessions before that put the equivalent kernel at
+8.0244 ms, so *this* session and the earliest one agree and the middle one is the outlier. The
+machine was in a degraded state — thermal or power throttling, or the card was shared — for the
+whole of that session.
+
+**What survives it:** any ratio taken *within* one run. The inline-vs-call result stands, because
+`TestKernel_loop` at 16.1567 ms and `TestKernel_inline` at 15.7835 ms were measured back to back in
+the same degraded session and the two A columns agreed to 0.07%.
+
+**What does not:** the *17.3% and 19.1%* leads recorded above for the hand-written kernel over
+`GpuCore.cu` NO_HASH. Both were taken in the throttled session. Against the clean numbers on either
+side of it — `TestKernel_loop` at 7.1646 ms, `GpuCore` NO_HASH at 8.1294 ms — the lead is nearer
+**12%**, which is also what the first measurement said. **Treat 17-19% as withdrawn and 11-12% as
+the standing figure until the pair is re-run.** Whole-program, at a 39-43% field share, that is
+about **5%**.
+
+This is the second time this harness has been saved by measuring both sides in one process. It is
+worth stating as a rule: **a wall-clock number is only comparable to another taken in the same run**,
+and the harness should never be handed a single kernel.
+
 Two lessons, both of which this document already contains under other names. **A correct comment is
 not a permanent one**: the tail carried "no chain update after it", which was true on every rung up
 to `pts`, where `inverse` is dead after the tail — stage 2d added the first consumer of it and made
