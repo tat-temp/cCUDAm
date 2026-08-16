@@ -47,6 +47,28 @@ one-body-per-binding rule read backwards, and it is worth knowing in both direct
 `walk` and `pts` came out byte-identical to the cubins that passed on hardware, which is the
 check that says the gating moved nothing it should not have.
 
+## Speed — RTX 5090, 170 SMs
+
+Measured once the accumulator was out, `loop` mode, four batches, best of five launches, verified
+on the same run (every limb agreeing, every thread EXACT):
+
+| grid | A blocks/SM | B blocks/SM | A (compiled) | B (this) | B/A |
+|---|---:|---:|---:|---:|---:|
+| 170 — matched | 1 | 1 | 8.02 ms | 7.16 ms | **0.893** |
+| 680 | 2 | 1 | 28.95 ms | 27.19 ms | **0.939** |
+
+Faster in both, by 11% at matched occupancy and 6% when the compiled kernel gets the second
+resident block that `REG 255` denies this one. Both runs were also the first at more than one
+block: 43,520 and 174,080 threads against the 256 everything before them ran at.
+
+**Read the 11% carefully, because it is smaller than it should be.** This walk issues about half
+the field-math instructions the compiled one does — six `MulMod256` at 112 against six inlined
+`mul_mod` at ~222 per iteration. Halving the instructions bought 11% of the time, so the kernel is
+not instruction-issue bound, and the thing both sides carry identically is the 16 KB frame and
+32 KB of `subp[]` traffic per thread per batch. That is a hypothesis, not a result; the experiment
+is a smaller `MAX_BATCH_SIZE` on both sides. See `../../DEVPLAN.md` for what it does to the case
+for this whole route.
+
 **Stage 2a matches the compiled kernel on an RTX 5090** — 256 EXACT out of 256 on both the
 accumulator and the frame slot, A and B agreeing on every output limb. That covers a real
 back edge, 511 iterations of it, dynamically indexed constant loads out of bank 3, `STL`

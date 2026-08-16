@@ -912,7 +912,25 @@ int main(int argc, char** argv)
 	printf("\n==== timing ====\n");
 	printf("  A %.4f ms    B %.4f ms    B/A %.3fx\n", ms[0], ms[1],
 	       ms[0] > 0 ? ms[1] / ms[0] : 0.0f);
-	printf("  (meaningless until both kernels do the same amount of work)\n");
+	// This used to read "meaningless until both kernels do the same amount of work". On the
+	// lower rungs that was the whole truth; on jump and loop they demonstrably DO the same work
+	// -- every output limb agrees and every thread is EXACT -- so the ratio is now real, and
+	// the caveats are the two below rather than a blanket refusal to interpret it.
+	//
+	// OCCUPANCY FIRST, because it is the larger of the two and it is not a property of the code
+	// being compared. Read the BLOCKS/SM line above: if the two sides differ there, part of this
+	// ratio is latency hiding rather than instruction count. A grid equal to the SM count gives
+	// both sides one resident block and takes that term out.
+	if (ms[0] > 0 && ms[1] > 0)
+		printf("  B is %.1f%% %s than A%s\n",
+		       100.0 * (ms[1] < ms[0] ? ms[0] - ms[1] : ms[1] - ms[0]) / ms[0],
+		       ms[1] < ms[0] ? "FASTER" : "slower",
+		       "   (check BLOCKS/SM above before reading anything into this)");
+	// And the residual asymmetry, which is small and favours B: A folds every candidate point
+	// into a sink so nvcc cannot delete the walk, a handful of XORs per point that B does not
+	// carry. It is the escape that makes the compiled side a valid reference at all -- without
+	// it there is no walk to compare against -- so it cannot simply be removed.
+	printf("  A additionally runs the NO_HASH sink (a few XOR per point); B does not.\n");
 
 	for (int m = 0; m < 2; m++) {
 		cuMemFree(M[m].px); cuMemFree(M[m].py); cuMemFree(M[m].sc);

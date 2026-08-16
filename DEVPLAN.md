@@ -1059,6 +1059,55 @@ actually get. `abtest` now prints `BLOCKS/SM` and the wave count from
 `cuOccupancyMaxActiveBlocksPerMultiprocessor` beside `REG`, so the two numbers cannot be quoted
 apart from the occupancy that produced them.
 
+### Measured — RTX 5090, 170 SMs, 2026-08-16
+
+**Correct at scale and across blocks.** 43,520 threads (170 blocks) and 174,080 threads (680
+blocks), `loop` mode, four batches each: every output limb agrees between the two kernels and every
+thread is EXACT against the oracle — 174,080 and 696,320 limbs compared. That closes the
+single-block gap above; the block term of the gid arithmetic, per-thread addressing past `gid 255`
+and the `threadsTotal` bail against a real bound are all now exercised.
+
+**And the hand-written kernel is faster, in both configurations:**
+
+| grid | A blocks/SM | B blocks/SM | A | B | B/A |
+|---|---:|---:|---:|---:|---:|
+| 170 — matched, only 170 blocks exist so A cannot use its second slot | 1 | 1 | 8.02 ms | 7.16 ms | **0.893** |
+| 680 — A runs 2 waves, B needs 4 | 2 | 1 | 28.95 ms | 27.19 ms | **0.939** |
+
+So `REG 255` costs about half the lead, which is hazard 3 with a number on it at last: 11% at
+matched occupancy, 6% once the compiled kernel is allowed the second resident block it fits in and
+this one does not.
+
+**The 11% is the finding, and it is not the good news it looks like.** Dynamically the
+hand-written walk does about half the field-math instructions of the compiled one — six
+`MulMod256` at 112 instructions against six inlined `mul_mod` at ~222, which is the 2× ratio this
+entire route is premised on. Halving the instruction count bought **11% of wall clock**. This
+kernel is therefore *not instruction-issue bound*, and the obvious suspect is the one thing both
+sides carry identically: the 16 KB local frame, and 32 KB of `subp[]` traffic per thread per batch
+(512 slots written, 512 read, 32 B each).
+
+That reframes the prize, and it does so in the direction this document keeps warning about.
+**The ~15% ceiling recorded above assumed halving field-math instructions halves field-math time,
+and this measurement refutes that assumption directly.** Points-only is *entirely* field math and
+returned 11%; with the hash layer restored at ~69% of the dynamic instruction count, the same win
+lands on ~31% of the program and the whole-program gain is nearer **3-4%** — the same order as P4
+alone, for a rewrite of the entire arithmetic layer in hand-scheduled SASS.
+
+Two things follow, and neither is "abandon it":
+
+- **P2 just became the most interesting item in this document.** If `subp[]` traffic is the
+  binding constraint, then `-DMAX_BATCH_SIZE=256` — a build flag, costing ~0.35% arithmetic — is
+  attacking the thing that actually limits this kernel, and it helps *both* implementations.
+  It should be measured before anything else, and this harness can now measure it.
+- **The register budget is worth real money here.** Going from `REG 255` to ≤128 would give the
+  hand-written kernel the second resident block and, on the evidence of the two rows above, most
+  of the 5 points of lead that the deep grid gives away. That is a bigger and much cheaper win
+  than any further instruction-count work.
+
+What has *not* been established: that local memory is the bottleneck. It is the leading hypothesis
+and it is untested — the direct experiment is a build at a smaller `MAX_BATCH_SIZE` on both sides,
+and until that runs, "not instruction bound" is the measured claim and the cause is a guess.
+
 Two lessons, both of which this document already contains under other names. **A correct comment is
 not a permanent one**: the tail carried "no chain update after it", which was true on every rung up
 to `pts`, where `inverse` is dead after the tail — stage 2d added the first consumer of it and made
