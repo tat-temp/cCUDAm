@@ -1221,6 +1221,56 @@ Two consequences, and they point in opposite directions from where this document
   part it replaces is precisely the part that gains from a second resident block, and it is the part
   that cannot have one.
 
+### 255 -> 127 registers, and `rem` out of the kernel — 2026-08-16
+
+The occupancy item above, done. `asm/tk/main.asm` is now inline-native (`inc_func` everywhere but
+`InvMod256`) and allocates **127 registers**, so at 256 threads it gets **two resident blocks per
+SM** — the same as the compiled kernel, where it previously got one. All ten ladder variants
+build, `align`/`barrier`/`pc` pass on every one, and the default build is byte-identical to the
+`loop` variant as it must be. **Not yet run on hardware**; the ladder is the check.
+
+The allocation is three overlays over one span, mirroring the lexical scopes of
+`GpuCore.cu:221-407` — a live-range partition ptxas already proved fits in 126 registers on this
+same algorithm with `inv_mod` fully inlined, so a known-good answer rather than a guess.
+`persistent` R0..R33; overlay A R34..R45 (prologue/epilogue only); overlay B R34..R126 (the
+inversion); overlay C R36..R125 (ladder, walk, jump).
+
+**`rem` is gone, and that is what made 127 reachable** — 8 registers held live straight through
+the inversion, worth the difference between 127 and 135. The instruction saving is *not* the
+reason: about 16 per batch against a batch's ~76,000, i.e. 0.02%. The second reason is
+correctness: a `rem`-driven loop guard lets threads leave the batch loop at different iterations,
+which is H4's straddling warp and the one thing that can silently break `InvMod256`'s
+all-active-threads precondition. With `BDone < BpL` as the only guard, the trip count is a kernel
+*parameter*, so the precondition stops being a comment and becomes the control flow.
+
+**Two vendored contracts turned out to be wrong, and only the emitted cubin said so.** Both are
+invisible at `regcnt=255`:
+
+- **`InvMod256`'s `Ro` is nine registers, not eight** — a 288-bit intermediate whose `Ro8` is the
+  overflow word its normalisation loop tests. The first version of the table gave `InvO` eight
+  and placed `InvT` immediately after, landing `Ro8` exactly on `Rt0`. **That build assembled and
+  passed align, barrier and pc.** It would have corrupted every inversion.
+- **`InvMod256`'s `Rt` is 73, not the "Rt_cnt = 70" in its own header** — `tvars=Rt64` feeds
+  inlined helpers needing nine, so the body reaches `Rt72`.
+
+That near-miss produced `asm/tk/reg_live.py`, which is the missing checker in this family: nothing
+else verifies that two names live at the same time were given different registers, and a collision
+assembles, passes everything, loads, runs and returns wrong numbers. Widths in it are **declared,
+not inferred from the distance to the next name** — inferring is exactly what hid the bug, since
+the table said eight and the table was the thing being checked. Validated against three
+deliberately broken tables (the collision, a `regcnt` below the allocation, a 256-bit value on an
+odd base); all three reported with the right diagnosis.
+
+**New host item, and this kernel is not production-ready without it.** `GpuPuzzle.cpp` must own
+the remaining-batch count and size `batches_per_launch` so no thread is asked for more batches
+than it has left, including on the final launch. Until then the hand-written kernel is correct
+only under the harness's uniform seeding. It interacts with C1's batch-aligned partition and with
+H4, and it has its own test surface. `GpuCore.cu` is unchanged and still writes `counts256`;
+`abtest` simply stops comparing that array — except on the `pts` rung, where it carries
+`SqrMod256`'s output rather than `rem` and both sides still write it. That **is** a reduction in
+what the harness proves, taken deliberately: `rem` was an identity copy plus a subtract, and what
+carries the walk, the jump and the back edge is `Px`/`Py` after the batch completes.
+
 ### The throttle — and what it voids
 
 `GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago

@@ -47,6 +47,77 @@ one-body-per-binding rule read backwards, and it is worth knowing in both direct
 `walk` and `pts` came out byte-identical to the cubins that passed on hardware, which is the
 check that says the gating moved nothing it should not have.
 
+## 127 registers — two resident blocks per SM
+
+`REG 255 -> 127`, so at a 256-thread block this kernel now gets **two resident blocks per SM**
+instead of one, the same as the compiled kernel. 128 is a cliff, not a gradient: 128 × 256 =
+32,768 is exactly half the 65,536-register file, and 129 costs a whole block. `main.asm` is also
+inline-native now — `inc_func` everywhere except `InvMod256`, which stays a call.
+
+The allocation is three overlays over one span, mirroring the lexical scopes of
+`GpuCore.cu:221-407`. That is not decoration: those scopes are a live-range partition ptxas
+already proved fits in 126 registers on this same algorithm with `inv_mod` fully inlined, so they
+are a known-good answer rather than a guess.
+
+| span | | |
+|---|---|---|
+| persistent | R0..R33 | `x1`, `y1`, `s1` and nine scalars |
+| overlay A | R34..R45 | prologue and epilogue only — tid/ctaid, the base pointers, `threadsTotal` |
+| overlay B | R34..R126 | the inversion: `Inv` 9, `InvO` 9, `InvT` 73 |
+| overlay C | R36..R125 | ladder, walk and jump: eight 256-bit values + one 26-register scratch block |
+
+Three things paid for it. **`rem` is gone** — 8 registers held live straight through the
+inversion, and the difference between 127 and 135. **`Tmp`/`SqrT`/`Pt3T` are one block**, since
+`MulMod256` (Rt 20), `SqrMod256` (Rt 26) and `SubMod256_3` (Rt 2) never nest. **The base pointers
+are rebuilt before the write-back** rather than held across the ladder, which is eight
+instructions once per kernel against eight registers held across ~76,000 instructions per batch.
+
+### Two vendored contracts are wrong, and only the cubin says so
+
+Both were found by measuring the emitted code, and both are invisible at `regcnt=255`:
+
+- **`InvMod256`'s `Ro` is NINE registers, not eight.** It is a 288-bit intermediate — `Ro8` is
+  the overflow word its `while ((int)res[8] > 0)` normalisation loop tests. The first version of
+  the table gave `InvO` eight and put `InvT` immediately after, landing `Ro8` exactly on `Rt0`.
+  **That build assembled, and align, barrier and pc all passed.**
+- **`InvMod256`'s `Rt` is 73, not the "Rt_cnt = 70" in its own header.** `tvars=Rt64` feeds
+  inlined helpers that need nine, so the body reaches `Rt72`.
+
+`Ro` cannot alias `Ri`, which would have saved nine more:
+`_mul_P_by_32_add_shift(Ro=Ro0,...)` writes the output while `val` is still read by later
+`_mul_256_by_i32(Rval=val,...)` calls. Checked in the source rather than inferred from the
+in-place C++ call.
+
+### `reg_live.py` — the check that near-miss earned
+
+Nothing in the toolchain checks that two names live at the same time got different registers. A
+collision assembles, passes every other check, loads, runs and returns wrong numbers.
+
+```bash
+python3 reg_live.py main.asm TestKernel*.cubin
+```
+
+It reports the allocation, then fails on: two names overlapping **within one overlay** (or
+against `persistent`, which is live everywhere), a multi-register name on an odd base, and any
+cubin naming a register at or above **its own** declared count — read from `-res-usage`, not from
+`main.asm`, because `variants.py` legitimately raises `regcnt` to 136 for the accumulator rungs.
+
+Widths are **declared, not inferred from the distance to the next name**. Inferring is precisely
+what hid the `Ro8` bug: the table said eight, and the table was the thing being checked.
+
+Validated against three deliberately broken tables — the `Ro8`/`Rt0` collision, a `regcnt` below
+the allocation, and a 256-bit value on an odd base — and it reports all three with the right
+diagnosis.
+
+### `Acc` sits above `regcnt` on purpose
+
+The bisect accumulator lives at R128..R135, outside the declared 127. That is safe only because
+it is named exclusively inside gated regions, so the production kernel never touches it;
+`variants.py` raises `regcnt` to 136 for the rungs that switch those regions on, derived from the
+region list rather than set by hand. Keeping it inside 127 is arithmetically impossible —
+persistent 34 + 9 + 9 + 73 + 8 already exceeds it — and deleting the instrument to hit a number
+would be trading a check for a benchmark.
+
 ## Speed — RTX 5090, 170 SMs
 
 Measured once the accumulator was out, `loop` mode, four batches, best of five launches, verified

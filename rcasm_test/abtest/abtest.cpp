@@ -643,8 +643,8 @@ int main(int argc, char** argv)
 		printf("       REG %d   LOCAL %d   MAX_THREADS %d   BLOCKS/SM %d"
 		       "   (%d SMs -> %d resident blocks, %d waves for this grid)\n",
 		       regs, lmem, maxthr, blocksPerSM, smCount, blocksPerSM * smCount,
-		       blocksPerSM * smCount ? (int)((grid + blocksPerSM * smCount - 1)
-		                                     / (blocksPerSM * smCount)) : 0);
+		       (blocksPerSM * smCount) > 0 ? (int)((grid + blocksPerSM * smCount - 1)
+		                                           / (blocksPerSM * smCount)) : 0);
 
 		if (upload_const(M[m].mod, "c_Gx", gx.data(), gx.size() * 8)) return 1;
 		if (upload_const(M[m].mod, "c_Gy", gy.data(), gy.size() * 8)) return 1;
@@ -690,17 +690,38 @@ int main(int argc, char** argv)
 		printf("\n");
 	}
 
+	// counts256 IS NO LONGER A COMPARABLE OUTPUT, except on the pts rung.
+	//
+	// The hand-written kernel stopped tracking and writing rem: it costs 8 registers held live
+	// straight through the inversion, which is the difference between 127 registers and 135,
+	// i.e. between two resident blocks per SM and one. The compiled reference still writes it,
+	// so comparing the array would report a disagreement that is a deliberate contract change
+	// rather than a defect.
+	//
+	// pts is the exception and keeps its check: that rung spends counts256 on SqrMod256's
+	// output via STORELAM, so the array carries a field element there and both sides write it.
+	//
+	// This IS a reduction in what the harness proves, and it is worth naming rather than
+	// burying: rem was an identity copy plus a 256-bit subtract, and what carried the walk, the
+	// jump and the back edge was always Px and Py after the batch completes. Those are
+	// untouched. The bookkeeping that leaves is the host's now -- see DEVPLAN.
+	const bool cmpCt = ptsm;
+
 	//---- 1. A vs B ------------------------------------------------------------------
 	size_t dPx = 0, dPy = 0, dSc = 0, dCt = 0, firstAB = (size_t)-1;
 	for (size_t i = 0; i < nlimb; i++) {
 		if (outPx[0][i] != outPx[1][i]) { dPx++; if (firstAB == (size_t)-1) firstAB = i / 4; }
 		if (outPy[0][i] != outPy[1][i]) dPy++;
 		if (outSc[0][i] != outSc[1][i]) dSc++;
-		if (outCt[0][i] != outCt[1][i]) dCt++;
+		if (cmpCt && outCt[0][i] != outCt[1][i]) dCt++;
 	}
 	printf("==== A vs B ====\n");
-	printf("  differing limbs:  Px %zu   Py %zu   scalars %zu   counts %zu   (of %zu each)\n",
-	       dPx, dPy, dSc, dCt, nlimb);
+	if (cmpCt)
+		printf("  differing limbs:  Px %zu   Py %zu   scalars %zu   counts %zu   (of %zu each)\n",
+		       dPx, dPy, dSc, dCt, nlimb);
+	else
+		printf("  differing limbs:  Px %zu   Py %zu   scalars %zu   (of %zu each)"
+		       "   [counts256 not written by this kernel]\n", dPx, dPy, dSc, nlimb);
 	const bool abSame = !(dPx | dPy | dSc | dCt);
 	printf("  %s\n\n", abSame ? "A and B agree on every output limb."
 	                          : "A and B DISAGREE.");
@@ -792,7 +813,7 @@ int main(int argc, char** argv)
 						idSc++;
 						if (firstSc == (size_t)-1) firstSc = t;
 					}
-					if (outCt[m][t * 4 + k] != wantCtAll[t * 4 + k]) {
+					if (cmpCt && outCt[m][t * 4 + k] != wantCtAll[t * 4 + k]) {
 						idCt++;
 						if (firstCt == (size_t)-1) firstCt = t;
 					}
@@ -817,24 +838,24 @@ int main(int argc, char** argv)
 			} else {
 				for (int k = 0; k < 4; k++) {
 					if (outSc[m][t * 4 + k] != hs[t * 4 + k]) idSc++;
-					if (outCt[m][t * 4 + k] != hc[t * 4 + k]) idCt++;
+					if (cmpCt && outCt[m][t * 4 + k] != hc[t * 4 + k]) idCt++;
 				}
 			}
 		}
 		printf("  %s:  EXACT %zu   NON-CANON %zu   WRONG %zu   (of %u)\n",
 		       M[m].name, exact, noncanon, wrong, threads);
 		if (jumpm)
-			printf("      jumped point -- x1 above, y1 %s  s1 %s  rem %s%s\n",
-			       idPy ? "WRONG" : "ok", idSc ? "WRONG" : "ok", idCt ? "WRONG" : "ok",
-			       loopm ? "   (4 batches)" : "   (s1/rem must be UNCHANGED on this rung)");
+			printf("      jumped point -- x1 above, y1 %s  s1 %s%s\n",
+			       idPy ? "WRONG" : "ok", idSc ? "WRONG" : "ok",
+			       loopm ? "   (4 batches)" : "   (s1 must be UNCHANGED on this rung)");
 		else if (ptsm)
 			printf("      tail chain -- lam %s  lam^2 %s  px3 %s   (scalars/counts spent"
 			       " on the bisect, so no identity guard on this rung)\n",
 			       idSc ? "WRONG" : "ok", idCt ? "WRONG" : "ok", idPy ? "WRONG" : "ok");
 		else
-			printf("      %s -- Py %s  scalars %s  counts %s\n",
+			printf("      %s -- Py %s  scalars %s\n",
 			       sufp ? "subp[half-1] + identity" : "identity check",
-			       idPy ? "BROKEN" : "ok", idSc ? "BROKEN" : "ok", idCt ? "BROKEN" : "ok");
+			       idPy ? "BROKEN" : "ok", idSc ? "BROKEN" : "ok");
 		if (wrong) {
 			bad = 1;
 			uint64_t want[4], a[4], b[4];
@@ -901,11 +922,8 @@ int main(int argc, char** argv)
 			       loopm ? "s1 += B, once per batch" : "must be unchanged");
 			dump_delta(&outSc[m][firstSc * 4], &wantScAll[firstSc * 4]);
 		}
-		if (jumpm && idCt) {
-			printf("      first wrong rem at thread %zu   (%s)\n", firstCt,
-			       loopm ? "rem -= B, once per batch" : "must be unchanged");
-			dump_delta(&outCt[m][firstCt * 4], &wantCtAll[firstCt * 4]);
-		}
+		// The matching "first wrong rem" dump is gone with rem itself: idCt can only be
+		// non-zero on the pts rung now, which has its own dump above.
 		if (idPy || idSc || idCt) bad = 1;
 	}
 

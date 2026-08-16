@@ -41,7 +41,7 @@
 
 // Register names must NOT end in a digit: RCAsm resolves `name<N>` to `R<base+N>` by
 // stripping trailing digits, so `x1` is ambiguous with `x` index 1 and is rejected
-// ("digits at the end of var are not allowed"). Hence PntX/PntY/Scal/Rem, which is
+// ("digits at the end of var are not allowed"). Hence PntX/PntY/Scal, which is
 // also what Kernel02 does.
 //
 // Control codes: [Bnnnnnn:Rn:Wn:Y:Snn] = wait-barrier mask, read barrier, write
@@ -179,16 +179,75 @@
 // straight elementwise pass in increasing index order, so instruction k writes Ro_k in
 // the same instruction that reads RFirst_k and RSecond_k, and nothing later reads either
 // input again -- the second half touches only Ro.
-KERNEL TestKernel(regcnt=255, \
-    ThrID=R2, BlockID=R3, gID=R4, TmpA=R5, TmpB=R6, Idx=R7, \
-    PntX=R8, PntY=R16, Scal=R24, Rem=R32, \
-    AddrX=R40, AddrY=R42, AddrS=R44, AddrC=R46, Thr=R48, \
-    COfs=R50, SAdr=R51, \
-    MulA=R52, MulB=R60, MulR=R68, Prod=R68, Half=R76, \
-    Tmp=R84, \
-    Inv=R104, InvO=R116, InvT=R128, \
-    Lam=R128, PxN=R136, Sqr=R144, SqrT=R152, Pt3T=R178, \
-    Rinv=R200, Acc=R208, Dxi=R216, BpL=R224, BDone=R225, \
+// REGISTER ALLOCATION -- read this before moving anything.
+//
+// RCAsm has no allocator: this table IS the allocation, and a name owns its span for the
+// whole kernel whether it is live there or not. The first version of it spent 226 registers
+// (R2..R225) on a peak live set of 185, declared regcnt=255, and therefore got ONE resident
+// block per SM where the compiled kernel gets two -- 128 * 256 = 32768 is exactly half the
+// 65536-register file, so 128 is a cliff and 129 costs a whole block. Measured, that block is
+// worth having: the points-only half of the program scales 10.4% better than linear when
+// occupancy doubles, against the full kernel's 1.7%, so the half this kernel replaces is
+// exactly the half that wants the second block.
+//
+// The layout is now three OVERLAYS over one span, mirroring the lexical scopes of
+// GpuCore.cu:221-407 -- which is not a coincidence and not a guess: those scopes are a
+// live-range partition ptxas already proved fits in 126 registers, on this same algorithm,
+// with inv_mod fully inlined. Names deliberately collide, exactly as MulR/Prod always have.
+//
+//   persistent  R0..R33   live entry to exit
+//   overlay A   R34..R45  prologue and epilogue ONLY -- tid/ctaid, the four base pointers
+//                         and threadsTotal. The pointers are REBUILT before the write-back
+//                         rather than held across the ladder, which is what frees this span.
+//   overlay B   R34..R126 the inversion: Inv (9, SPOILED), InvO (9), InvT (73)
+//   overlay C   R36..R125 suffix products, walk and jump: eight 256-bit values plus ONE
+//                         26-register scratch block shared by MulMod256 (Rt 20),
+//                         SqrMod256 (Rt 26) and SubMod256_3 (Rt 2). They never nest, so
+//                         Tmp/SqrT/Pt3T are three names for one block and every existing
+//                         `Rt=` binding keeps working unchanged.
+//
+// B tops at R126 and C at R125, so regcnt = 127 -- one under the cliff, which is the whole
+// point and leaves no room to be careless.
+//
+// TWO NUMBERS IN THAT TABLE ARE NOT THE ONES mod_inv.asm ADVERTISES, and both were found by
+// measuring the emitted cubin rather than by reading the header:
+//
+//   * InvMod256's Ro is NINE registers, not eight. It is a 288-bit intermediate (Ro8 is the
+//     overflow word the `while ((int)res[8] > 0)` normalisation loop tests), and it is only
+//     the low eight that are the answer. The first version of this table gave InvO eight and
+//     put InvT immediately after, which landed Ro8 exactly on Rt0. That build assembled, both
+//     alignment and barrier checks passed, and it would have corrupted the inversion.
+//   * InvMod256's Rt is 73, not the "Rt_cnt = 70" in its own header. `tvars=Rt64` is handed
+//     to inlined helpers that need nine, so the body reaches Rt72. Invisible at regcnt=255,
+//     fatal at 127.
+//
+// Ro CANNOT alias Ri, which would have saved nine more: `_mul_P_by_32_add_shift(Ro=Ro0,...)`
+// writes the output while `val` is still read by later `_mul_256_by_i32(Rval=val,...)` calls.
+// Checked in the source, not assumed from the in-place C++ call.
+//
+// ALIGNMENT IS PART OF THE ALLOCATION, not a detail: `.64` needs an even base, `.128` a
+// multiple of 4. There is no `.128` anywhere in mod_inv/mod_mul/mod_sub, so the vendored
+// blocks need only be even -- which is what lets InvT start at R54 and fit. In THIS file the
+// `.128` bases are MulA/MulB/MulR (the subp[] round trip), so those three are on multiples
+// of 4. Moving one by two registers produces a cubin that loads, disassembles cleanly and
+// returns wrong numbers.
+//
+// Acc is the bisect accumulator and sits ABOVE regcnt on purpose. It is referenced only
+// inside gated regions (ACCINIT/PACC/PACCM/PACCT/WACC/WACCT), so the production kernel never
+// names R128..R135 and declaring them costs nothing; variants.py raises regcnt to 136 for the
+// variants that switch those regions on. Keeping it inside 127 is not possible -- persistent
+// 34 + Inv 9 + InvO 9 + InvT 73 + Acc 8 already exceeds it -- and deleting the instrument to
+// hit a number would be trading a check for a benchmark.
+KERNEL TestKernel(regcnt=127, \
+    BDone=R0, gID=R2, TmpA=R3, TmpB=R4, Idx=R5, Half=R6, SAdr=R7, \
+    PntX=R8, PntY=R16, Scal=R24, \
+    COfs=R32, BpL=R33, \
+    ThrID=R34, BlockID=R35, AddrX=R36, AddrY=R38, AddrS=R40, AddrC=R42, Thr=R44, \
+    Inv=R34, InvO=R44, InvT=R54, \
+    Rinv=R36, Dxi=R44, MulB=R52, MulA=R60, MulR=R68, Prod=R68, \
+    Lam=R76, Sqr=R84, PxN=R92, \
+    Tmp=R100, SqrT=R100, Pt3T=R100, \
+    Acc=R128, \
     uDesc=UR4, uCallM=UR6, uCallI=UR8, uInvT=UR10 )
 {
 //---- frame ------------------------------------------------------------------------
@@ -218,7 +277,6 @@ KERNEL TestKernel(regcnt=255, \
     [B------:R-:W3:-:S01]    LDC.64 AddrX, c[0x0][0x380]
     [B------:R-:W3:-:S01]    LDC.64 AddrY, c[0x0][0x388]
     [B------:R-:W3:-:S01]    LDC.64 AddrS, c[0x0][0x390]
-    [B------:R-:W3:-:S01]    LDC.64 AddrC, c[0x0][0x398]
     [B------:R-:W3:-:S02]    LDC.64 Thr,   c[0x0][0x3a8]
 
     [B0-----:R-:W-:-:S02]    IADD3 R1, PT, PT, R1, -0x4000, RZ
@@ -245,10 +303,13 @@ KERNEL TestKernel(regcnt=255, \
 //---- per-thread addresses: base + gid*32 (four u64 per array) ---------------------
     [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrX, gID, 0x20, AddrX
     [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrY, gID, 0x20, AddrY
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrS, gID, 0x20, AddrS
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32 AddrC, gID, 0x20, AddrC
+    [B------:R-:W-:-:S02]    IMAD.WIDE.U32 AddrS, gID, 0x20, AddrS
+// AddrC is deliberately NOT built here. counts256 is no longer read or written by this
+// kernel (see the batch loop below), and AddrX/AddrY/AddrS are rebuilt from scratch at the
+// write-back rather than held -- which is what lets overlay B put InvT's 70 temporaries in
+// this span. Rebuilding costs one LDC.64 and one IMAD.WIDE.U32 each, once per kernel.
 
-//---- load PntX, PntY, Scal, Rem ---------------------------------------------------
+//---- load PntX, PntY, Scal --------------------------------------------------------
 // One barrier per group of four, and the B2 wait below is not decoration: uDesc is loaded
 // on barrier 2 and read HERE, so without it this reads the descriptor before the LDCU has
 // landed. It happens to work -- the LDCU is fifteen instructions back -- which is exactly
@@ -266,27 +327,30 @@ KERNEL TestKernel(regcnt=255, \
     [B------:R-:W2:-:S01]    LDG.E.64 Scal2, desc[uDesc][AddrS.64+0x8]
     [B------:R-:W2:-:S01]    LDG.E.64 Scal4, desc[uDesc][AddrS.64+0x10]
     [B------:R-:W2:-:S01]    LDG.E.64 Scal6, desc[uDesc][AddrS.64+0x18]
-    [B------:R-:W3:-:S01]    LDG.E.64 Rem0, desc[uDesc][AddrC.64]
-    [B------:R-:W3:-:S01]    LDG.E.64 Rem2, desc[uDesc][AddrC.64+0x8]
-    [B------:R-:W3:-:S01]    LDG.E.64 Rem4, desc[uDesc][AddrC.64+0x10]
-    [B------:R-:W3:-:S02]    LDG.E.64 Rem6, desc[uDesc][AddrC.64+0x18]
 
-//---- if (rem == 0) return ---------------------------------------------------------
-// S03, not S01. Interleaving the two chains buys each dependency TWO cycles instead of
-// one, which is the right idea and not enough: a LOP3 needs FOUR before its result can be
-// read, measured over ptxas's own output. At S03 each chain gets 3+3=6. This was wrong in
-// every variant from stage 1 onward and no test could see it -- the failure mode is a
-// garbage TmpA, which would have to come out exactly zero to make a thread wrongly exit.
-// Found by stall_check.py only once it started summing across instructions.
-    [B---3--:R-:W-:-:S03]    LOP3.LUT TmpA, Rem0, Rem2, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S03]    LOP3.LUT TmpB, Rem4, Rem6, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S03]    LOP3.LUT TmpA, TmpA, Rem1, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S03]    LOP3.LUT TmpB, TmpB, Rem3, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S03]    LOP3.LUT TmpA, TmpA, Rem5, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S05]    LOP3.LUT TmpB, TmpB, Rem7, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S05]    LOP3.LUT TmpA, TmpA, TmpB, RZ, 0xfc, !PT
-    [B------:R-:W-:Y:S13]    ISETP.EQ.U32.AND P0, PT, TmpA, RZ, PT
-    [B------:R-:W-:-:S05] @P0 EXIT
+//---- rem is gone, and the `if (rem == 0) return` with it --------------------------
+// GpuCore.cu:162 bails on a zero count and :200 makes `ge256_u64(rem, B)` half the loop
+// guard. Both are removed here, and the reason is not the instruction count: the whole of
+// rem cost about 16 instructions per batch against a batch's ~76,000, i.e. 0.02%, which is
+// nothing. Two other things make it worth doing.
+//
+// IT IS WHAT PAYS FOR 126 REGISTERS. rem is 8 registers held live from the prologue to the
+// write-back, straight through the inversion -- and persistent + Inv + InvO + InvT lands at
+// 135 with it and 127 without. There is no version of this allocation that keeps rem and
+// reaches two blocks per SM.
+//
+// AND IT REMOVES THE RAGGED-WARP EXIT BY CONSTRUCTION. A rem-driven guard lets threads leave
+// the batch loop at DIFFERENT iterations -- that is exactly H4's straddling warp, and it is
+// the one thing that can silently break InvMod256's "requires all active threads in warp!"
+// precondition (mod_inv.asm:189), which this file has declared in its header since stage 1
+// and has never had enforced. With BDone < BpL as the only guard, every thread in the launch
+// runs the same number of batches because the count is a kernel PARAMETER, not per-thread
+// state. The precondition stops being a comment and becomes the control flow.
+//
+// THE HOST NOW OWNS THE TAIL. GpuPuzzle.cpp must size batches_per_launch so no thread is
+// asked for more batches than it has left, including on the final launch. That is a host
+// change, it is not done yet, and until it is this kernel is correct only under the
+// harness's uniform seeding. Recorded in DEVPLAN rather than left to be discovered.
 
 //====================================================================================
 // STAGE 2d, part 1 -- the head of the outer batch loop, GpuCore.cu:199-202.
@@ -319,22 +383,17 @@ KERNEL TestKernel(regcnt=255, \
     [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3b0]
     [B-----5:R-:W-:-:S05]    IMAD BDone, RZ, RZ, RZ
 .label_batch_loop:
-// rem >= B, with B < 2^32 so it lives in word 0 alone: the comparison is false only when
-// every high word is zero AND rem0 < B. Written that way round because both ISETPs are then
-// `.AND` and the result is the EXIT condition directly.
-    [B------:R-:W-:-:S03]    LOP3.LUT TmpA, Rem1, Rem2, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S03]    LOP3.LUT TmpB, Rem3, Rem4, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S03]    LOP3.LUT TmpA, TmpA, Rem5, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S03]    LOP3.LUT TmpB, TmpB, Rem6, RZ, 0xfc, !PT
-// S04 on the last chain link, not S03: the fold below reads TmpA from the instruction
-// immediately above it, so that one dependency gets the stall on its own rather than the
-// six the interleaving buys everywhere else. stall_check.py caught it on the first build.
-    [B------:R-:W-:-:S04]    LOP3.LUT TmpA, TmpA, Rem7, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S05]    LOP3.LUT TmpA, TmpA, TmpB, RZ, 0xfc, !PT
-    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P0, PT, TmpA, RZ, PT
-    [B------:R-:W-:-:S05]    ISETP.LT.U32.AND P0, PT, Rem0, Half, P0
+// ONE guard, where there used to be two. The `rem >= B` half is gone with rem itself -- see
+// the note in the prologue -- leaving the batch counter, which is warp-uniform by
+// construction because BpL is a kernel parameter. Every lane of the warp takes this branch
+// together, which is the property InvMod256 needs and the property the rem-driven guard
+// could not offer.
+//
+// S13 and the yield bit, not S05: a branch reads its guard predicate far earlier in the
+// pipeline than an ALU instruction reads an operand, and a guarded branch needs 13 cycles
+// with the yield set. This is the rule that produced a cubin which loaded, disassembled
+// cleanly and took the wrong branch.
     [B------:R-:W-:Y:S13]    ISETP.GE.U32.AND P1, PT, BDone, BpL, PT
-    [B------:R-:W-:Y:S13] @P0 BRA.U `(.label_batch_end)
     [B------:R-:W-:Y:S05] @P1 BRA.U `(.label_batch_end)
 //@@LOOPTOP_END
 
@@ -342,8 +401,8 @@ KERNEL TestKernel(regcnt=255, \
 // STAGE 1b -- prove the last two pieces of the carrier with ONE real field operation.
 //
 // Prod = MulMod256(PntX, PntY), through a real out-of-line CALL rather than an inline
-// expansion, then round-tripped through the local frame and written to Px. Py, Scal and
-// Rem stay identity. Checkable directly: the host computes MulModP(x, y) over the same
+// expansion, then round-tripped through the local frame and written to Px. Py and Scal
+// stay identity. Checkable directly: the host computes MulModP(x, y) over the same
 // inputs, so a wrong carry chain, a wrong register binding or a bad frame all surface
 // as a mismatch rather than as something subtle three stages later.
 //
@@ -432,8 +491,8 @@ KERNEL TestKernel(regcnt=255, \
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x30]
     [B------:R-:W4:-:S01]    LDC.64 MulB6, c[0x3][0x38]
     [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3b0]
-    [B0---4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointA
-call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointA
+    [B0---4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0)
 
 // COfs = half*32 = B*16 -- the multiply by 16 is where `half = B >> 1` gets absorbed, so
 // no shift instruction is needed. SAdr = R1 + COfs, putting subp[half-1] at [SAdr-0x20].
@@ -444,7 +503,9 @@ call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0, Ret="[B------:R-:W
 // read barrier nothing says when. MulA is rewritten by the copy block inside the loop, and
 // the high half of THIS store read its data after the loop had finished: Py came back as
 // subp[0].hi ++ subp[511].lo, subp[0] being the accumulator 511 iterations later. Barrier 3
-// is free from here on -- the Rem loads that used it are drained by the rem==0 test.
+// is free from here on -- the prologue's LDCs armed it and the threadsTotal test drained it.
+// (It used to be the rem==0 test that drained it; that test is gone with rem, and the
+// threadsTotal test sits earlier and does the same job.)
     [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
     [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
 
@@ -467,12 +528,12 @@ call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0, Ret="[B------:R-:W
 // MulB = c_Gx[j] - x1, in place (SubMod256 is alias-safe; see the KERNEL note).
 // Barrier 4 again, and it is drained on every iteration by the wait below, so the loop
 // never accumulates. PntX is already resolved by the pre-loop wait and stays live.
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointB
-call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointB
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
 // MulR = MulA * MulB. Ro is deliberately NOT MulA -- MulMod256 clobbers Ro while still
 // reading its inputs.
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointC
-call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointC
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
 // acc = MulR
     [B------:R-:W-:-:S01]    IMAD MulA0, RZ, RZ, MulR0
     [B------:R-:W-:-:S01]    MOV MulA1, MulR1
@@ -539,8 +600,8 @@ call_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x4048]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x4050]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][0x4058]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointD
-call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointD
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
 
 // subp[0] out of the frame rather than out of MulA, which still holds the same value. The
 // C++ reads subp[0], and taking it from memory is the only thing that ever reads the
@@ -555,8 +616,8 @@ call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0, Ret="[B------:R-:W
     [B------:R-:W0:-:S02]    LDL.128 MulA4, [R1+0x10]
 
 // MulR = d0 * subp[0]
-    [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointE
-call_func MulMod256(RFirst=MulB, RSecond=MulA, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointE
+    [B0-----:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulB, RSecond=MulA, Ro=MulR, Rt=Tmp, Pt=0)
 
 // Inv = MulR. Alternating IMAD/MOV is Kernel02's copy idiom -- two different pipes, so the
 // pairs dual-issue instead of queueing behind one another.
@@ -645,8 +706,8 @@ call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:
     [B------:R-:W0:-:S01]    LDL.128 MulA0, [SAdr]
     [B------:R-:W0:-:S02]    LDL.128 MulA4, [SAdr+0x10]
 // Dxi = subp[i] * inverse  == 1/(c_Gx[i] - x1)
-    [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointG
-call_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointG
+    [B0-----:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0)
 // Stage 2c-i accumulated dx_inv_i itself. Stage 2c-ii accumulates px3 instead, which
 // depends on dx_inv_i through lam, so the coverage carries and this becomes the earlier
 // rung's contribution rather than a second one.
@@ -713,24 +774,24 @@ call_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0, Ret="[B----
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x48]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x50]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x58]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointM
-call_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointM
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointN
-call_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointN
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SqrMod256) //RCASM:CallPointO
-call_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointO
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0)
     [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256_3) //RCASM:CallPointP
-call_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointP
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointQ
-call_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointQ
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointR
-call_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointR
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointS
-call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointS
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S05]    LOP3.LUT TmpA, MulA0, 0x1, RZ, 0xc0, !PT
 // Acc *= px3 -- THE PTS RUNG'S INSTRUMENT, AND NOTHING ELSE'S. It is the product of every
 // candidate x-coordinate, which is what lets one 256-bit output stand for 1,023 points; the
@@ -758,26 +819,26 @@ call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x48]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x50]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x58]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_NegMod256) //RCASM:CallPointU
-call_func NegMod256(Rio=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointU
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointV
-call_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointV
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointW
-call_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointW
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SqrMod256) //RCASM:CallPointX
-call_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointX
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func NegMod256(Rio=MulB, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0)
     [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256_3) //RCASM:CallPointY
-call_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointY
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointZ
-call_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointZ
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAA
-call_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAA
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAB
-call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAB
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S05]    LOP3.LUT TmpA, MulA0, 0x1, RZ, 0xc0, !PT
 // Acc *= px3, the minus branch's half. Same gate as PACC, separate region only because the
 // two are not contiguous.
@@ -800,11 +861,11 @@ call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointI
-call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointI
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
 // inverse *= gxmi
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointJ
-call_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointJ
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
     [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, MulR0
     [B------:R-:W-:-:S01]    MOV Rinv1, MulR1
     [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, MulR2
@@ -823,8 +884,8 @@ call_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
     [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
     [B------:R-:W0:-:S01]    LDL.128 MulA0, [SAdr]
     [B------:R-:W0:-:S02]    LDL.128 MulA4, [SAdr+0x10]
-    [B0-----:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointK
-call_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointK
+    [B0-----:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0)
 //@@WACCT_BEGIN
 //  [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointL
 //call_func MulMod256(RFirst=Acc, RSecond=Dxi, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointL
@@ -845,26 +906,26 @@ call_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0, Ret="[B----
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x48]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x50]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x58]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_NegMod256) //RCASM:CallPointAD
-call_func NegMod256(Rio=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAD
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAE
-call_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAE
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAF
-call_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAF
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SqrMod256) //RCASM:CallPointAG
-call_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAG
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func NegMod256(Rio=MulB, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0)
     [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256_3) //RCASM:CallPointAH
-call_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAH
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAI
-call_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAI
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAJ
-call_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAJ
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAK
-call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAK
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S05]    LOP3.LUT TmpA, MulA0, 0x1, RZ, 0xc0, !PT
 // Acc *= px3, the tail's. Once per batch rather than per point, so this one is not about speed
 // -- it is gated with the other two because the accumulator has to be all on or all off to mean
@@ -929,10 +990,10 @@ call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAT
-call_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAT
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAU
-call_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAU
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
     [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, MulR0
     [B------:R-:W-:-:S01]    MOV Rinv1, MulR1
     [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, MulR2
@@ -955,27 +1016,27 @@ call_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B---
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x8]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x10]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][0x18]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAM
-call_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAM
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)
 // lam = s * inverse
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAN
-call_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAN
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0)
 // x3 = lam^2 - x1 - Jx, one reduction
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SqrMod256) //RCASM:CallPointAO
-call_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAO
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0)
     [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x20]
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x28]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x30]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][0x38]
-    [B----4-:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256_3) //RCASM:CallPointAP
-call_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAP
+    [B----4-:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0)
 // y3 = (x1 - x3)*lam - y1
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAQ
-call_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAQ
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_MulMod256) //RCASM:CallPointAR
-call_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAR
-    [B------:R-:W-:-:S01]    UMOV uCallM0, `(.relN_end_SubMod256) //RCASM:CallPointAS
-call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallM, 0x00") //RCASM:CallPointAS
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0)
+    [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
+inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 // x1 = x3 ; y1 = y3. PntY is read by the SubMod256 immediately above, so it cannot be
 // overwritten before that call returns -- which is why both copies live here and not one
 // beside each producer.
@@ -1025,18 +1086,36 @@ call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W
     [B------:R-:W-:-:S04]    IADD3.X Scal5, P0, PT, Scal5, RZ, RZ, P0, !PT
     [B------:R-:W-:-:S04]    IADD3.X Scal6, P0, PT, Scal6, RZ, RZ, P0, !PT
     [B------:R-:W-:-:S04]    IADD3.X Scal7, PT, PT, Scal7, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Rem0, P0, PT, Rem0, ~Half, RZ, !PT, PT
-    [B------:R-:W-:-:S04]    IADD3.X Rem1, P0, PT, Rem1, 0xFFFFFFFF, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Rem2, P0, PT, Rem2, 0xFFFFFFFF, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Rem3, P0, PT, Rem3, 0xFFFFFFFF, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Rem4, P0, PT, Rem4, 0xFFFFFFFF, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Rem5, P0, PT, Rem5, 0xFFFFFFFF, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Rem6, P0, PT, Rem6, 0xFFFFFFFF, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Rem7, PT, PT, Rem7, 0xFFFFFFFF, RZ, P0, !PT
+// The eight-limb `rem -= B` that used to sit here is gone; BDone is the whole of the
+// bookkeeping now. Note P0 is still the carry chain of the Scal add above and must not be
+// read after this point.
     [B------:R-:W-:-:S05]    IADD3 BDone, PT, PT, BDone, 0x1, RZ
     [B------:R-:W-:Y:S05]    BRA.U `(.label_batch_loop)
 .label_batch_end:
 //@@LOOPEND_END
+
+//---- rebuild the per-thread addresses ---------------------------------------------
+// AddrX/AddrY/AddrS/AddrC live in overlay A, which the ladder, the inversion and the walk
+// have all been using for other things since the prologue -- InvT's 70 temporaries sit on
+// top of this span. So they are rebuilt here rather than held, which is the trade that pays
+// for the register count: eight instructions once per kernel against eight registers held
+// live across ~76,000 instructions per batch.
+//
+// AddrC is built here and NOT in the prologue: counts256 is write-only in this kernel now,
+// and only the gated STORELAM region actually uses it. Building it unconditionally is one
+// instruction and keeps the gated regions from having to carry their own setup.
+//
+// Barrier 3 is free at this point -- the prologue's LDCs were drained by the threadsTotal
+// test, and the suffix-product STL uses it only as a READ barrier, which the ladder has long
+// since passed. The S02/S05 pairing is the same as the prologue's.
+    [B------:R-:W3:-:S01]    LDC.64 AddrX, c[0x0][0x380]
+    [B------:R-:W3:-:S01]    LDC.64 AddrY, c[0x0][0x388]
+    [B------:R-:W3:-:S01]    LDC.64 AddrS, c[0x0][0x390]
+    [B------:R-:W3:-:S02]    LDC.64 AddrC, c[0x0][0x398]
+    [B---3--:R-:W-:-:S01]    IMAD.WIDE.U32 AddrX, gID, 0x20, AddrX
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrY, gID, 0x20, AddrY
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrS, gID, 0x20, AddrS
+    [B------:R-:W-:-:S05]    IMAD.WIDE.U32 AddrC, gID, 0x20, AddrC
 
 //---- write back -------------------------------------------------------------------
 // Px carries the MulMod256 result (stage 1b); the other three are identity. In the
@@ -1140,19 +1219,22 @@ call_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0, Ret="[B------:R-:W
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], PntY4
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], PntY6
 //@@STOREPNTY_END
-// Scal and Rem, which are an identity copy on every rung below `jump` and the real advanced
-// state on `jump` and `loop` -- the same four stores either way, because `s1 += B` and
-// `rem -= B` happen in registers. The pts rung is the one that spends these two arrays on
-// something else entirely; see STORELAM below.
+// Scal, which is an identity copy on every rung below `jump` and the real advanced state on
+// `jump` and `loop` -- the same four stores either way, because `s1 += B` happens in
+// registers. The pts rung is the one that spends this array on something else entirely; see
+// STORELAM below.
+//
+// counts256 IS NO LONGER WRITTEN. It used to take the matching four stores from Rem here,
+// and the harness compared it as a fourth output array. It does not any more: the kernel
+// neither reads nor tracks it, so whatever the host seeded stays there. abtest.cpp drops it
+// from both the A/B limb diff and the oracle check -- and that is a real reduction in what
+// the harness proves, taken deliberately: Px and Py after the batch completes are what carry
+// the walk, the jump and the loop, and rem was only ever an identity copy plus a subtract.
 //@@STOREID_BEGIN
     [B--2---:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64], Scal0
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x8], Scal2
     [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x10], Scal4
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x18], Scal6
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrC.64], Rem0
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrC.64+0x8], Rem2
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrC.64+0x10], Rem4
-    [B------:R-:W-:-:S05]    STG.E.64 desc[uDesc][AddrC.64+0x18], Rem6
+    [B------:R-:W-:-:S05]    STG.E.64 desc[uDesc][AddrS.64+0x18], Scal6
 //@@STOREID_END
 // The tail point's two intermediates, so one launch says WHERE the tail diverges rather
 // than only that it does:

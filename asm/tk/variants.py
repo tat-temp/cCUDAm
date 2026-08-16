@@ -109,6 +109,19 @@ def region(lines, name):
     return b, e
 
 
+# Acc sits at R128..R135, ABOVE the kernel's declared regcnt of 126, because keeping it
+# inside is arithmetically impossible: persistent 36 + Inv 9 + InvO 8 + InvT 70 + Acc 8 is
+# already 131. That is safe only because Acc is named exclusively inside these regions --
+# a variant that switches any of them on genuinely touches R128+ and must say so, or the
+# hardware will let it scribble on another thread's registers with nothing to report it.
+#
+# So: enabling any of these raises regcnt. Getting this wrong is not a build error, it is a
+# kernel that runs and corrupts a neighbour, which is why it is derived from the region list
+# rather than set per variant by hand.
+ACC_REGIONS = {"ACCINIT", "PACC", "PACCM", "PACCT", "WACC", "WACCT"}
+ACC_REGCNT = 136                          # R135 is the top of Acc, +1
+
+
 def build(cut, on):
     out = list(L)
     for name in on:                       # uncomment first: cutting shifts indices
@@ -118,6 +131,13 @@ def build(cut, on):
     for name in cut:                      # one at a time, re-finding each
         a, b = region(out, name)
         out[a:b + 1] = []
+    if ACC_REGIONS & set(on):
+        for i, ln in enumerate(out):
+            if ln.startswith("KERNEL "):
+                out[i] = re.sub(r"regcnt=\d+", "regcnt=%d" % ACC_REGCNT, ln)
+                break
+        else:
+            sys.exit("no KERNEL line to raise regcnt on")
     return "\n".join(out) + "\n"
 
 
