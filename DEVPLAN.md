@@ -1037,8 +1037,27 @@ now sits in `ACCINIT`/`PACC`/`PACCM`/`PACCT` regions switched on for `pts` alone
 against the 38 at the call sites: all three shared the binding `RFirst=Acc, RSecond=PxN`, so
 `call_func`'s one-body-per-binding rule deleted the 112-instruction `MulMod256` body that only
 they used. `walk` and `pts` rebuilt byte-identical to the cubins already verified on hardware,
-and all four checkers pass on all eleven. **The re-run of the ladder is outstanding**, and until
-it lands this is a change that has been checked offline and not on a device.
+and all four checkers pass on all eleven. **The re-run passes**: all ten rungs read exactly as they
+did before the gating, `pts` still reporting `lam ok  lam^2 ok  px3 ok` — so the accumulator still
+works where it is read — and `jump` and `loop` still 256 EXACT with it gone.
+
+### What no run has touched yet: more than one block
+
+Every hardware run in this whole ladder has been **256 threads, i.e. a single block**, so
+`IMAD gID, BlockID, 0x100, ThrID` has only ever been evaluated with `BlockID == 0`. The block term
+has never contributed, which means per-thread addressing above `gid 255`, the `gid >= threadsTotal`
+bail against a real bound, and the whole grid dimension are untested. That is not a speed caveat,
+it is a correctness gap, and a multi-block run closes it as a side effect of the first speed
+measurement. `abtest` now says so when `grid == 1` rather than leaving it to be remembered.
+
+**The speed measurement needs two configurations, not one.** The hand-written kernel runs at
+`REG 255` and the compiled one at `REG 128`, which at a 256-thread block is **1 resident block per
+SM against 2** — so a raw wall-clock ratio carries a 2× latency-hiding handicap that has nothing to
+do with instruction count. Running at exactly one block per SM (grid = SM count) neutralises it and
+measures instruction throughput; running several waves deep measures what the program would
+actually get. `abtest` now prints `BLOCKS/SM` and the wave count from
+`cuOccupancyMaxActiveBlocksPerMultiprocessor` beside `REG`, so the two numbers cannot be quoted
+apart from the occupancy that produced them.
 
 Two lessons, both of which this document already contains under other names. **A correct comment is
 not a permanent one**: the tail carried "no chain update after it", which was true on every rung up

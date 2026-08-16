@@ -548,8 +548,15 @@ int main(int argc, char** argv)
 	int cc_maj = 0, cc_min = 0;
 	cuDeviceGetAttribute(&cc_maj, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev);
 	cuDeviceGetAttribute(&cc_min, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev);
-	printf("device : %s (sm_%d%d)\n", nm, cc_maj, cc_min);
-	printf("threads: %u  (grid %u x block %u)   iters %d\n\n", threads, grid, block, iters);
+	int smCount = 0;
+	cuDeviceGetAttribute(&smCount, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev);
+	printf("device : %s (sm_%d%d, %d SMs)\n", nm, cc_maj, cc_min, smCount);
+	printf("threads: %u  (grid %u x block %u)   iters %d\n", threads, grid, block, iters);
+	// Every run before this one was a single block, so gid == threadIdx.x and the BlockID term
+	// of `IMAD gID, BlockID, 0x100, ThrID` was multiplied by zero. Say so when it stops being.
+	if (grid == 1)
+		printf("         ONE BLOCK -- BlockID is 0, so gid arithmetic is only half exercised\n");
+	printf("\n");
 
 	CUcontext ctx; CK(cuDevicePrimaryCtxRetain(&ctx, dev), "cuDevicePrimaryCtxRetain");
 	CK(cuCtxSetCurrent(ctx), "cuCtxSetCurrent");
@@ -626,7 +633,18 @@ int main(int argc, char** argv)
 		cuFuncGetAttribute(&regs, CU_FUNC_ATTRIBUTE_NUM_REGS, M[m].fn);
 		cuFuncGetAttribute(&lmem, CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, M[m].fn);
 		cuFuncGetAttribute(&maxthr, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, M[m].fn);
-		printf("       REG %d   LOCAL %d   MAX_THREADS %d\n", regs, lmem, maxthr);
+		// Occupancy, because a wall-clock ratio between these two kernels is uninterpretable
+		// without it. The hand-written side runs at REG 255 and the compiled one at REG 128,
+		// and at a 256-thread block that is 1 resident block per SM against 2 -- so a raw B/A
+		// carries a 2x latency-hiding handicap that has nothing to do with instruction count.
+		// Ask the driver rather than deriving it from the register file size, which varies.
+		int blocksPerSM = 0;
+		cuOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, M[m].fn, (int)block, 0);
+		printf("       REG %d   LOCAL %d   MAX_THREADS %d   BLOCKS/SM %d"
+		       "   (%d SMs -> %d resident blocks, %d waves for this grid)\n",
+		       regs, lmem, maxthr, blocksPerSM, smCount, blocksPerSM * smCount,
+		       blocksPerSM * smCount ? (int)((grid + blocksPerSM * smCount - 1)
+		                                     / (blocksPerSM * smCount)) : 0);
 
 		if (upload_const(M[m].mod, "c_Gx", gx.data(), gx.size() * 8)) return 1;
 		if (upload_const(M[m].mod, "c_Gy", gy.data(), gy.size() * 8)) return 1;
