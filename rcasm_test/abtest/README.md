@@ -14,6 +14,21 @@ not the machine with the GPU. `cuModuleLoad` reporting `CUDA_ERROR_FILE_NOT_FOUN
 for side B means the fixture is missing, not that the cubin is bad. Rebuild it with
 `RCASM=/path/to/RCAsm ../../asm/tk/build.sh`.
 
+**Speed runs use a different side A**, and it is *not* committed — `*.cubin` is gitignored, so
+it is absent from a fresh clone and the same `CUDA_ERROR_FILE_NOT_FOUND (301)` names the file
+without saying how to make it:
+
+```bash
+make -C ../.. nohash-cubin SM=120
+./abtest ../../GpuCore_nohash.cubin ../../asm/tk/TestKernel_loop.cubin 43520 5 loop
+```
+
+`ab_compiled*.cubin` are purpose-built bisect counterparts — one per rung, each computing what
+that rung computes — and are the right side A for a *correctness* diff. `GpuCore_nohash.cubin`
+is the real `TestKernel` with the hash layer compiled out, and is the only honest side A for a
+*speed* number: it is the kernel this one is trying to replace. Every ratio in
+`asm/tk/README.md` has it on one side.
+
 Arguments: `<cubinA> <cubinB> [threads] [iters]`. `threads` must be a multiple of 256
 (defaults to 256); `iters` reports the best launch time of N.
 

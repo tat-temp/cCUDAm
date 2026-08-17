@@ -80,7 +80,7 @@ CU_OBJECTS  := $(GPU_SRC:.cu=.o)
 
 TARGET := cCUDAHurricane
 
-.PHONY: all clean ptxinfo sass cubin
+.PHONY: all clean ptxinfo sass cubin nohash-cubin
 
 all: $(TARGET)
 
@@ -108,6 +108,17 @@ else
 	@rm -f GpuCore-rdc.o
 	@echo "wrote $(CUBIN_FILE)"
 endif
+
+# The points-only reference the hand-written SASS is measured against -- side A of every
+# rcasm_test/abtest speed run and of the occupancy comparison in asm/tk/README.md.
+#
+# It is a target rather than a note in a README because it was neither. *.cubin is gitignored,
+# so this file is not in a fresh clone; nothing in the tree said how to rebuild it; and the
+# harness's error for a missing side A is CUDA_ERROR_FILE_NOT_FOUND, which names the file and
+# not the command. Every measured ratio in this project has this on one side, so it has to be
+# reproducible from the repo by someone who was not there when it was first built.
+nohash-cubin:
+	$(MAKE) cubin NO_HASH=1 CUBIN_FILE=GpuCore_nohash.cubin SM=$(SM_ARCHS)
 
 $(TARGET): $(CPP_OBJECTS) $(CU_OBJECTS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)
