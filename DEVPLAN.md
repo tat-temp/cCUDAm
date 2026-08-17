@@ -1332,6 +1332,32 @@ compute an identity copy while side A computes `a*b mod P`, and `bisect_run.sh` 
 only thing read on them is whether the launch completes. What was *not* by construction was the
 scalar identity sub-check, which is what caught defect 2 — the one rung short enough to expose it.
 
+### The occupancy payoff, measured — RTX 5090, 2026-08-17
+
+**12.4%, isolated.** `TestKernel_occ255.cubin` is `TestKernel_loop` with `regcnt` 255 and nothing
+else changed — 3,278 instructions on both, byte-identical streams — so A/B-ing the two is the
+declared register count and nothing else. At 174,080 threads: 26.0692 ms at 1 block/SM against
+**22.8391 ms** at 2, both 174080/174080 EXACT with every limb agreeing.
+
+That control was necessary because the first occupancy-matched run, at 43,520 threads, could not
+have shown anything: 170 blocks on a 170-SM card puts one block per SM whichever build it is.
+`BLOCKS/SM` in the harness is *capacity*. Its timing half moved +1.0% on B and +2.2% on A against
+the previous session — drift, not signal — and reading the ratio's 15.6% → 16.6% as a gain would
+have been the throttle mistake in a new costume.
+
+**The lead over the compiled kernel doubled**, all at grid 680 against `GpuCore_nohash.cubin` at
+29.4246 ms: 26.0692 (255 registers, 1 blk/SM) is 11.4%, and 22.8921 (128 registers, 2 blk/SM) is
+**22.2%**. The lead also grows with grid — 16.6% at 170 blocks, 22.2% at 680 — which is the
+latency-bound signature the whole occupancy argument rested on, now measured on this kernel
+instead of inferred from the compiled one's scaling.
+
+**Worth ~8.8% to the whole program, not 22%.** This kernel is points-only and hashing is 57-61%
+of the full kernel's wall clock. At grid 680 the full compiled kernel is 74.02 ms against 29.14
+points-only; replacing the points half with 22.89 saves ~6.5 ms of 74. *What it would actually
+take* above estimated ~15% from halving the field-math instruction count — halving the
+instructions did not halve the time, and **8.8% is the number to plan against**. The corollary is
+that P3 is now unambiguously the highest-value item left: it is the only one touching the 57-61%.
+
 ### The throttle — and what it voids
 
 `GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago

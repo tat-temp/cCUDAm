@@ -133,6 +133,38 @@ that carries its own register count. It is now `ACC_TOP + 4`, matching the headr
 production allocation actually runs at. These two rungs are instruments and already sit above the
 128-register occupancy cliff, so the margin costs nothing.
 
+## The register work paid 12.4%, and the lead is 22.2% — 2026-08-17
+
+Measured with the control below, `loop` mode, four batches, best of five, 174,080 threads
+(680 blocks), every side 174080/174080 EXACT with every output limb agreeing:
+
+| | REG | blk/SM | waves | best of 5 |
+|---|---:|---:|---:|---:|
+| `TestKernel_occ255` | 255 | 1 | 4 | 26.0692 ms |
+| `TestKernel_loop` | 128 | 2 | 2 | **22.8391 ms** |
+
+**12.4% from the declared register count alone** — same 3,278 instructions, byte-identical
+stream, same process seconds apart. That is the occupancy payoff with nothing else in it.
+
+Against the real reference (`GpuCore_nohash.cubin`, 29.4246 ms at the same grid):
+
+| B build | B | lead over the compiled kernel |
+|---|---:|---:|
+| 255 registers, 1 blk/SM | 26.0692 ms | 11.4% |
+| 128 registers, 2 blk/SM | **22.8921 ms** | **22.2%** |
+
+The register work roughly doubled the lead, and the lead grows with grid — 16.6% at 170 blocks,
+22.2% at 680 — which is the latency-bound signature the occupancy argument rested on, now
+measured on this kernel rather than inferred from the compiled one's scaling.
+
+**What that is worth to the whole program is about 9%, not 22%, and the difference matters.**
+This kernel is points-only; hashing is 57-61% of the full kernel's wall clock and is untouched
+by any of it. At grid 680 the full compiled kernel was 74.02 ms against 29.14 points-only, so
+replacing the points half with 22.89 saves ~6.5 ms of 74 — **~8.8%**. The DEVPLAN estimate for
+this route was ~15% on the strength of halving the field-math instruction count; halving the
+instructions did not halve the time, and 8.8% is the honest figure to plan against. It also
+says plainly where the remaining headroom is: P3 is the only item that touches the 57-61%.
+
 ## `TestKernel_occ255.cubin` — the occupancy control
 
 `TestKernel_loop.cubin` with `regcnt` 255 and **nothing else changed**: same 3278 instructions,
