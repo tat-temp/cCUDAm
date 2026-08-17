@@ -195,19 +195,38 @@
 // live-range partition ptxas already proved fits in 126 registers, on this same algorithm,
 // with inv_mod fully inlined. Names deliberately collide, exactly as MulR/Prod always have.
 //
-//   persistent  R0..R33   live entry to exit
-//   overlay A   R34..R45  prologue and epilogue ONLY -- tid/ctaid, the four base pointers
+//   persistent  R0..R31   live entry to exit
+//   overlay A   R32..R43  prologue and epilogue ONLY -- tid/ctaid, the four base pointers
 //                         and threadsTotal. The pointers are REBUILT before the write-back
 //                         rather than held across the ladder, which is what frees this span.
-//   overlay B   R34..R126 the inversion: Inv (9, SPOILED), InvO (9), InvT (73)
-//   overlay C   R36..R125 suffix products, walk and jump: eight 256-bit values plus ONE
+//   overlay B   R32..R124 the inversion: Inv (9, SPOILED), InvO (9), InvT (73)
+//   overlay C   R32..R123 suffix products, walk and jump: eight 256-bit values, ONE
 //                         26-register scratch block shared by MulMod256 (Rt 20),
-//                         SqrMod256 (Rt 26) and SubMod256_3 (Rt 2). They never nest, so
-//                         Tmp/SqrT/Pt3T are three names for one block and every existing
-//                         `Rt=` binding keeps working unchanged.
+//                         SqrMod256 (Rt 26) and SubMod256_3 (Rt 2), plus COfs and BpL.
+//                         The three scratch users never nest, so Tmp/SqrT/Pt3T are three
+//                         names for one block and every `Rt=` binding keeps working.
 //
-// B tops at R126 and C at R125, so regcnt = 127 -- one under the cliff, which is the whole
-// point and leaves no room to be careless.
+// B tops at R124 and C at R123, so regcnt = 128.
+//
+// WHY R124 AND NOT R126, WHICH IS WHERE THE FIRST VERSION LANDED. **The declared count must
+// exceed the highest register used by more than one.** Measured on hardware, identical
+// instructions throughout, only regcnt changing:
+//
+//     regcnt 127 (top R126) -> 2 blocks/SM -> ILLEGAL_INSTRUCTION
+//     regcnt 128 (top R126) -> 2 blocks/SM -> ILLEGAL_INSTRUCTION
+//     regcnt 130, 136, 160, 192, 255       -> 1 block/SM  -> 256/256 EXACT
+//
+// The correlate is not the count itself -- the same code passes at 130 and faults at 128 --
+// it is that the count has to leave headroom above the top register. ptxas does the same
+// thing in its own output for this kernel: REG 122 declared, R119 the highest used. So the
+// rule is `regcnt >= top + 3`, and to stay at or under 128 (128 * 256 = 32768, exactly half
+// the register file, and the cliff for two resident blocks) the top must be R124 or lower.
+//
+// Two registers had to come out of `persistent` to get there, and neither costs anything:
+// COfs is reset by `MOV COfs, RZ` at the head of the walk and computed fresh in the ladder,
+// so it is dead across the inversion; BpL is now reloaded at the top of every batch instead
+// of held, one LDC against a batch's ~76,000 instructions. Both moved to overlay C, where
+// InvT is free to scribble on them.
 //
 // TWO NUMBERS IN THAT TABLE ARE NOT THE ONES mod_inv.asm ADVERTISES, and both were found by
 // measuring the emitted cubin rather than by reading the header:
@@ -238,15 +257,14 @@
 // variants that switch those regions on. Keeping it inside 127 is not possible -- persistent
 // 34 + Inv 9 + InvO 9 + InvT 73 + Acc 8 already exceeds it -- and deleting the instrument to
 // hit a number would be trading a check for a benchmark.
-KERNEL TestKernel(regcnt=127, \
+KERNEL TestKernel(regcnt=128, \
     BDone=R0, gID=R2, TmpA=R3, TmpB=R4, Idx=R5, Half=R6, SAdr=R7, \
     PntX=R8, PntY=R16, Scal=R24, \
-    COfs=R32, BpL=R33, \
-    ThrID=R34, BlockID=R35, AddrX=R36, AddrY=R38, AddrS=R40, AddrC=R42, Thr=R44, \
-    Inv=R34, InvO=R44, InvT=R54, \
-    Rinv=R36, Dxi=R44, MulB=R52, MulA=R60, MulR=R68, Prod=R68, \
-    Lam=R76, Sqr=R84, PxN=R92, \
-    Tmp=R100, SqrT=R100, Pt3T=R100, \
+    ThrID=R32, BlockID=R33, AddrX=R34, AddrY=R36, AddrS=R38, AddrC=R40, Thr=R42, \
+    Inv=R32, InvO=R42, InvT=R52, \
+    Rinv=R32, Dxi=R40, MulB=R48, MulA=R56, MulR=R64, Prod=R64, \
+    Lam=R72, Sqr=R80, PxN=R88, \
+    Tmp=R96, SqrT=R96, Pt3T=R96, COfs=R122, BpL=R123, \
     Acc=R128, \
     uDesc=UR4, uCallM=UR6, uCallI=UR8, uInvT=UR10 )
 {
@@ -379,10 +397,14 @@ KERNEL TestKernel(regcnt=127, \
 // the rungs below this one, which cut this region entirely. One redundant constant load per
 // batch against 1023 points is not worth a third register.
 //@@LOOPTOP_BEGIN
-    [B------:R-:W5:-:S01]    LDC BpL, c[0x0][0x3b4]
     [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3b0]
     [B-----5:R-:W-:-:S05]    IMAD BDone, RZ, RZ, RZ
 .label_batch_loop:
+// BpL is RELOADED every iteration rather than held across the batch, which is what lets it
+// live in overlay C where InvT will overwrite it. One LDC against a batch's ~76,000
+// instructions, and it is half of what moves the top of the allocation from R126 to R124 --
+// i.e. half of what buys the second resident block. See the register table.
+    [B------:R-:W5:-:S02]    LDC BpL, c[0x0][0x3b4]
 // ONE guard, where there used to be two. The `rem >= B` half is gone with rem itself -- see
 // the note in the prologue -- leaving the batch counter, which is warp-uniform by
 // construction because BpL is a kernel parameter. Every lane of the warp takes this branch
@@ -393,7 +415,7 @@ KERNEL TestKernel(regcnt=127, \
 // pipeline than an ALU instruction reads an operand, and a guarded branch needs 13 cycles
 // with the yield set. This is the rule that produced a cubin which loaded, disassembled
 // cleanly and took the wrong branch.
-    [B------:R-:W-:Y:S13]    ISETP.GE.U32.AND P1, PT, BDone, BpL, PT
+    [B-----5:R-:W-:Y:S13]    ISETP.GE.U32.AND P1, PT, BDone, BpL, PT
     [B------:R-:W-:Y:S05] @P1 BRA.U `(.label_batch_end)
 //@@LOOPTOP_END
 
@@ -1163,14 +1185,22 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 // Stage 2b's write-back: Px = the inverse, Py = subp[half-1] exactly as above. Keeping Py
 // unchanged across the stages is deliberate -- it means a later failure that is really a
 // stage-2a regression shows up on Py rather than being blamed on the newest thing added.
+// R2 ON THE LAST STG, AND IT IS NOT DECORATION -- the re-allocation earned it. InvO now sits
+// at R42..R50 and MulB at R48..R55, so the `LDL.128 MulB0` four lines below overwrites the
+// very registers the InvO6 store is still holding. A store does not read its data registers
+// at issue; the LSU reads them later, and with no read barrier nothing says when. Under the
+// old table InvO was at R116 and MulB at R60 and the two never met, so this hazard is a
+// consequence of packing the file down to 128 -- exactly the kind of thing that appears when
+// registers stop being plentiful. barrier_check.py caught it on the first build; it is the
+// same defect it caught in the suffix-product store, and the same remedy.
 //@@STOREINV_BEGIN
 //  [B0--3--:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], InvO0
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], InvO2
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], InvO4
-//  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], InvO6
+//  [B------:R2:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], InvO6
 //  [B------:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
 //  [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
-//  [B------:R-:W0:-:S01]    LDL.128 MulB0, [SAdr+-0x20]
+//  [B--2---:R-:W0:-:S01]    LDL.128 MulB0, [SAdr+-0x20]
 //  [B------:R-:W0:-:S02]    LDL.128 MulB4, [SAdr+-0x10]
 //  [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], MulB0
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], MulB2

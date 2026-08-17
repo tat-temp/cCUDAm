@@ -57,13 +57,24 @@ DEFAULT_WIDTH = 1       # scalars
 # the whole design. Names in the SAME group may not, and that is what gets checked.
 OVERLAY = {
     "persistent": ["BDone", "gID", "TmpA", "TmpB", "Idx", "Half", "SAdr",
-                   "PntX", "PntY", "Scal", "COfs", "BpL"],
+                   "PntX", "PntY", "Scal"],
     "A-prologue": ["ThrID", "BlockID", "AddrX", "AddrY", "AddrS", "AddrC", "Thr"],
     "B-inversion": ["Inv", "InvO", "InvT"],
+    # COfs is reset by `MOV COfs, RZ` at the head of the walk and computed fresh in the
+    # ladder; BpL is reloaded at the top of every batch. Neither survives the inversion, so
+    # both belong here rather than in persistent -- which is what got the top to R124.
     "C-walk": ["Rinv", "Dxi", "MulB", "MulA", "MulR", "Prod", "Lam", "Sqr", "PxN",
-               "Tmp", "SqrT", "Pt3T"],
+               "Tmp", "SqrT", "Pt3T", "COfs", "BpL"],
     "acc-variants": ["Acc"],
 }
+
+# The declared count must exceed the highest register used by MORE THAN ONE. Measured on an
+# RTX 5090 with identical instructions and only regcnt changing: top R126 faults with
+# ILLEGAL_INSTRUCTION at regcnt 127 and 128, and passes at 130 and above. ptxas leaves the
+# same margin in its own output for this kernel -- REG 122 declared, R119 the highest used.
+# Three is the observed requirement; the check uses it because a build that violates it does
+# not fail to assemble, it faults at launch after every other checker has passed.
+REG_HEADROOM = 3
 # Deliberate same-group aliases: two names for one block, never live at once.
 ALIAS_OK = {frozenset(("MulR", "Prod")), frozenset(("Tmp", "SqrT")),
             frozenset(("Tmp", "Pt3T")), frozenset(("SqrT", "Pt3T"))}
@@ -130,8 +141,11 @@ def check_table(regcnt, alloc):
     print("\ndeclared regcnt              : %d" % regcnt)
     print("top register, production     : R%d" % prod)
     print("top register, incl. Acc      : R%d  (acc variants raise regcnt -- see variants.py)" % top)
-    if prod >= regcnt:
-        bad.append("production allocation reaches R%d but regcnt is %d" % (prod, regcnt))
+    print("headroom above top           : %d  (needs >= %d)" % (regcnt - prod, REG_HEADROOM))
+    if regcnt - prod < REG_HEADROOM:
+        bad.append("regcnt %d leaves only %d above R%d; needs %d -- this FAULTS at launch "
+                   "with ILLEGAL_INSTRUCTION and every other checker passes"
+                   % (regcnt, regcnt - prod, prod, REG_HEADROOM))
     print("blocks/SM at 256 threads     : %d  (needs regcnt <= 128)" % (65536 // (regcnt * 256)))
     return bad
 
