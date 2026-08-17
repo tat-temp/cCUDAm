@@ -1227,7 +1227,9 @@ The occupancy item above, done. `asm/tk/main.asm` is now inline-native (`inc_fun
 `InvMod256`) and allocates **127 registers**, so at 256 threads it gets **two resident blocks per
 SM** — the same as the compiled kernel, where it previously got one. All ten ladder variants
 build, `align`/`barrier`/`pc` pass on every one, and the default build is byte-identical to the
-`loop` variant as it must be. **Not yet run on hardware**; the ladder is the check.
+`loop` variant as it must be. **Verified on hardware 2026-08-17** — see the section below; the
+final count is **128**, not the 127 written here, and the two defects the ladder found were both
+in the instruments rather than in this allocation.
 
 The allocation is three overlays over one span, mirroring the lexical scopes of
 `GpuCore.cu:221-407` — a live-range partition ptxas already proved fits in 126 registers on this
@@ -1273,11 +1275,21 @@ carries the walk, the jump and the back edge is `Px`/`Py` after the batch comple
 
 ### The register work on hardware — two defects, neither of them the allocation — 2026-08-17
 
-The ladder run the section above was waiting for. **Eight of ten rungs pass, including `jump` and
-`loop`** — the production kernel, at 128 registers and two resident blocks per SM, agreeing with
-the compiled reference on every output limb and EXACT on all 256 threads. So the allocation, the
-three overlays, the corrected `Ro`=9 / `Rt`=73 contracts and dropping `rem` are all confirmed on a
-device. The two failures were elsewhere, and both are instrument defects rather than kernel ones:
+The ladder run the section above was waiting for. First pass: **eight of ten rungs, including
+`jump` and `loop`** — the production kernel, at 128 registers and two resident blocks per SM,
+agreeing with the compiled reference on every output limb and EXACT on all 256 threads. So the
+allocation, the three overlays, the corrected `Ro`=9 / `Rt`=73 contracts and dropping `rem` were
+confirmed on a device immediately. The two failures were elsewhere, and both were instrument
+defects rather than kernel ones.
+
+**After the two fixes below: all ten rungs pass, no variant faults.** `id` and `local` report
+`scalars ok`; `sufp`, `inv`, `walk`, `pts`, `jump` and `loop` are 256 EXACT on both sides with
+every output limb agreeing; `call` and `full` are 253/3/0 on both sides, the three non-canonical
+being C8 and identical between them. `id`/`local` keep their `A and B DISAGREE`, which is by
+construction — those rungs compute an identity copy while side A computes `a*b mod P`.
+
+**This is the first fully green ladder, and it is what closes the register work.** `walk` and
+`pts` had never launched in this configuration at all.
 
 **1. `walk` and `pts` faulted with `ILLEGAL_INSTRUCTION` — the headroom rule again, in the one
 file that carries its own register count.** `variants.py` raises `regcnt` for the accumulator
