@@ -355,9 +355,16 @@ essentially at its floor. The headroom is in configuration, not arithmetic.
   **14-27 s per launch**. Governs Ctrl-C latency, found-key latency, WDDM TDR, the 5 s stat
   interval mismatch, and P5's setup cost (12-24× for free). Default to 4-8 and auto-tune `slices`
   for ~50-200 ms launches.
-- **P2 — `subp` local frame.** 16 KB/thread, sized by `MAX_BATCH_SIZE` regardless of the runtime
-  batch. *Not the dominant cost* — traffic is 32 B/key. Its real cost is a **4.28 GB driver-side
-  local reservation**. Cheapest fix: build `-DMAX_BATCH_SIZE=256` (≈ +0.35% arithmetic).
+- **P2 — speed case REFUTED, reservation still open.** 16 KB/thread, sized by `MAX_BATCH_SIZE`
+  regardless of the runtime batch. Building `-DMAX_BATCH_SIZE=256` bundles two changes and neither
+  pays: the **frame** shrinks 16 KB → 4 KB and is worth **0.00%** on the clock (measured twice,
+  same-run A/B, medians 1.000 both times), and the **batch** it forces from 1024 to 256 is
+  **0.47% slower** at a matched duty cycle — which is what amortizing `inv_mod`, the point jump
+  and the batch centre's own hash over a quarter as many keys predicts, so the locality credit is
+  zero. Its **real cost stands and is untouched by all of that**: a 4.28 GB driver-side local
+  reservation, and hardening item 11's note that `BYTES_PER_THREAD` is the only thing bounding
+  thread count today. That half is host sizing, needs a real `threadsTotal` cap, and `abtest`
+  cannot see it.
 - **P3 — first half REFUTED, second half open.** Dropping `__noinline__` from the hot
   `getHash160_w2_from_limbs` measured **0.8-1.3% SLOWER** on an RTX 5090 (2,209 launches a side,
   interleaved, both sides `REG 126` and 2 blocks/SM). The 5-15% estimate was wrong by two orders
@@ -1102,10 +1109,13 @@ alone, for a rewrite of the entire arithmetic layer in hand-scheduled SASS.
 
 Two things follow, and neither is "abandon it":
 
-- **P2 just became the most interesting item in this document.** If `subp[]` traffic is the
-  binding constraint, then `-DMAX_BATCH_SIZE=256` — a build flag, costing ~0.35% arithmetic — is
-  attacking the thing that actually limits this kernel, and it helps *both* implementations.
-  It should be measured before anything else, and this harness can now measure it.
+- ~~**P2 just became the most interesting item in this document.**~~ **Measured 2026-08-17, and
+  it is not.** `-DMAX_BATCH_SIZE=256` moves the frame 16 KB → 4 KB for **0.00%** and forces the
+  batch 1024 → 256 for **−0.47%**. It was the right experiment to run and the right reason to run
+  it; the answer is that `subp[]` locality is not the binding constraint. See the P2 sections
+  below. What survives is the *bandwidth* reading — bytes per key are unchanged at any batch, so
+  neither run could distinguish it — and testing that needs the round trip removed rather than
+  shortened, which is algorithmic and has no flag.
 - **The register budget is worth real money here.** Going from `REG 255` to ≤128 would give the
   hand-written kernel the second resident block and, on the evidence of the two rows above, most
   of the 5 points of lead that the deep grid gives away. That is a bigger and much cheaper win
@@ -1153,7 +1163,10 @@ Both runs also came back **EXACT 43,520 of 43,520** against the oracle on both s
 agreeing on every output limb. That is the other half of what the A/B was for — inlining ought to be
 semantically inert, and this is what says it is, rather than the transform merely looking correct.
 
-**P2 is still the experiment for the residual**, and it is a build flag on both sides.
+~~**P2 is still the experiment for the residual**, and it is a build flag on both sides.~~
+**P2 ran on 2026-08-17 and the residual survived it.** Neither the frame (0.00%) nor a 4× shorter
+`subp[]` reuse distance (−0.47%, all of it the predicted arithmetic) explains anything. The
+residual is still unexplained, and the candidate list is now shorter by its leading entry.
 
 Two things the numbers say in passing:
 
@@ -1715,6 +1728,60 @@ a mechanism behind it, and it is the last live test of *hypothesis 1* — the st
 back to the 11% measurement, that the 16 KB frame and the `subp[]` round trip are what actually
 bind this kernel. Cutting the reuse distance 4× is the direct experiment. If that is null too,
 hypothesis 1 is dead and the kernel's residual is unexplained by anything currently written down.
+
+#### Duty-cycle matched: the sign flips, and there is no locality win
+
+Same two cubins, batch 256 × **bpl 16** — 4,096 keys per thread per launch, the same as the
+1024 × 4 the P3 runs anchored:
+
+| | median | spread |
+|---|---:|---:|
+| A — frame 16,384 | 80.4540 ms | 6.3% |
+| B — frame 4,096 | 80.4228 ms | 7.2% |
+| **B/A** | **1.000** | |
+
+**The frame is null a second time**, now at a matched duty cycle and a matched launch length —
+0.04% on the median, same as the first run. That half of P2 is settled twice over.
+
+**And the batch is a LOSS, not a win: 80.4540 against the anchor's 80.0810 is +0.47%.** The
+confounded reading said 0.57% *faster*; matching the duty cycle turns it into 0.47% *slower*, so
+the confound was real and larger than the effect, exactly as suspected. Both runs are otherwise
+comparable — launch lengths 80.45 and 80.08 ms, spreads 6.3% and 6.2-6.3%.
+
+**+0.47% is what the arithmetic alone predicts, which means the locality credit is zero.** Per key,
+against ~3,914 instructions total, moving 1024 → 256 costs:
+
+| per-batch work | instrs | at 1024 | at 256 | Δ/key |
+|---|---:|---:|---:|---:|
+| `inv_mod` | 890 | 0.87 | 3.48 | +2.61 |
+| the point jump | ~727 | 0.71 | 2.84 | +2.13 |
+| the batch centre's own hash | 2,021 | 1.97 | 7.89 | +5.92 |
+| | | | | **+10.7 → +0.27%** |
+
+Predicted +0.27% from amortizing fixed per-batch work over a quarter as many keys; measured
++0.47%, the rest being loop and ladder overhead that also scales per batch. The measured cost is
+*larger* than the predicted arithmetic, not smaller — so cutting the write-to-read reuse distance
+4× returned **nothing at all**.
+
+**Hypothesis 1's locality reading is dead.** Since the 11% measurement this document has carried
+"the 16 KB frame and the `subp[]` round trip are what bind this kernel" as the leading explanation
+for why halving field-math instructions bought only 11-22%. A 4× shorter reuse distance is the
+direct test and it pays zero.
+
+**One reading of hypothesis 1 survives, and it is important not to over-claim here.** Neither
+experiment changed the *volume*: `subp[]` is written once and read once per key at any batch size,
+32 B each way, so a kernel bound by local-memory **bandwidth** rather than locality would look
+exactly like this. Distinguishing them needs the round trip removed rather than shortened, and
+that is an algorithmic change — the suffix-product ladder produces `subp[]` in decreasing index
+and the walk consumes it in increasing index, so one end always carries a full-array reuse
+distance no matter which direction the chain runs. There is no flag for it.
+
+A sharper locality test does exist if it is ever wanted: neither 8 MB nor 2 MB of live local data
+per SM fits L2, so this experiment never moved the hit rate. A batch small enough to fit — order
+64 — would, and holds at 64 × 64 keys per launch. It costs another 4× of the fixed per-batch work,
+about +1.9% predicted, so it is only worth running as a threshold test with that number as the
+null hypothesis. Note the oracle is single-threaded and does one Fermat inversion per batch per
+thread, so `bpl 64` costs roughly four times this run's post-processing.
 
 ### The throttle — and what it voids
 
