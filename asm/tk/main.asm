@@ -175,6 +175,33 @@
 // aliasing is safe in the C++ version. Hence MulR separate from MulA/MulB, and the copy
 // back into MulA after each multiply.
 //
+// THOSE COPIES ARE `inc_func Copy256`, not eight hand-written lines. There are eight of
+// them and they were eight separate transcriptions of the same alternating IMAD/MOV idiom
+// -- two pipes, so the pairs dual-issue instead of queueing. Kernel02 already ships that
+// idiom as a FUNCTION and asm/tk/inc.asm now carries it, so the kernel names it once.
+//
+// IT COSTS STALL CYCLES AT SIX OF THE EIGHT, and the number is here rather than in a commit
+// message because it is the only thing about this change that is not free. A FUNCTION body
+// carries fixed control codes, and RCAsm parameters rename register indices only -- they
+// cannot reach a stall count (compiler.py:603 rejects a parameter whose name does not start
+// with R/UR/P/C, and utils.add_offset only ever rewrites `Name<digits>`). So every site
+// takes Copy256's S05 tail:
+//
+//     :617  MulA<-MulR  S02 -> S05   suffix-product loop, 511x per batch
+//     :695  Inv <-MulR  S05 -> S05   byte-identical
+//     :740  Rinv<-InvO  S01 -> S05   walk seed, once per batch
+//     :926  Rinv<-MulR  S02 -> S05   WALK LOOP, 511x per batch
+//     :1047 Rinv<-MulR  S02 -> S05   :1049 Dxi<-Rinv  S02 -> S05   tail, once
+//     :1079 PntX<-PxN   S01 -> S05   :1080 PntY<-MulA S05 -> S05   byte-identical
+//
+// SAFE BY CONSTRUCTION IN THE DIRECTION THAT MATTERS: S05 is the longest tail any of the
+// eight had, so this only ever LENGTHENS a stall. A shortened one is what reads a stale
+// register, and none is shortened. The cost is ~3,080 stall cycles per batch, essentially
+// all of it the two 511x sites, against a batch's ~655,000 instructions -- and whether that
+// is visible at all depends on whether another warp had something to issue, which is not
+// something to reason about offline. It is an A/B, and the A side is the committed
+// TestKernel_loop.cubin.
+//
 // SubMod256 *is* alias-safe and is used that way (Ro=RFirst) to save a copy: it is a
 // straight elementwise pass in increasing index order, so instruction k writes Ro_k in
 // the same instruction that reads RFirst_k and RSecond_k, and nothing later reads either
@@ -587,14 +614,7 @@ inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
     [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
 inc_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
 // acc = MulR
-    [B------:R-:W-:-:S01]    IMAD MulA0, RZ, RZ, MulR0
-    [B------:R-:W-:-:S01]    MOV MulA1, MulR1
-    [B------:R-:W-:-:S01]    IMAD MulA2, RZ, RZ, MulR2
-    [B------:R-:W-:-:S01]    MOV MulA3, MulR3
-    [B------:R-:W-:-:S01]    IMAD MulA4, RZ, RZ, MulR4
-    [B------:R-:W-:-:S01]    MOV MulA5, MulR5
-    [B------:R-:W-:-:S01]    IMAD MulA6, RZ, RZ, MulR6
-    [B------:R-:W-:-:S02]    MOV MulA7, MulR7
+inc_func Copy256(Ri=MulR, Ro=MulA)
 // subp[j-1] = acc -- read barrier 3, waited at the loop head above.
     [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
     [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
@@ -671,16 +691,8 @@ inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
     [B0-----:R-:W-:-:S01]    UMOV uCallM0, 0x0
 inc_func MulMod256(RFirst=MulB, RSecond=MulA, Ro=MulR, Rt=Tmp, Pt=0)
 
-// Inv = MulR. Alternating IMAD/MOV is Kernel02's copy idiom -- two different pipes, so the
-// pairs dual-issue instead of queueing behind one another.
-    [B------:R-:W-:-:S01]    IMAD Inv0, RZ, RZ, MulR0
-    [B------:R-:W-:-:S01]    MOV Inv1, MulR1
-    [B------:R-:W-:-:S01]    IMAD Inv2, RZ, RZ, MulR2
-    [B------:R-:W-:-:S01]    MOV Inv3, MulR3
-    [B------:R-:W-:-:S01]    IMAD Inv4, RZ, RZ, MulR4
-    [B------:R-:W-:-:S01]    MOV Inv5, MulR5
-    [B------:R-:W-:-:S01]    IMAD Inv6, RZ, RZ, MulR6
-    [B------:R-:W-:-:S05]    MOV Inv7, MulR7
+// Inv = MulR. Ri is SPOILED by InvMod256, so this is a real copy and not bureaucracy.
+inc_func Copy256(Ri=MulR, Ro=Inv)
 
     [B------:R-:W-:-:S01]    UMOV uCallI0, `(.relN_end_InvMod256) //RCASM:CallPointF
 call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallI, 0x00") //RCASM:CallPointF
@@ -725,14 +737,7 @@ call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:
 //@@WALK_BEGIN
 // Rinv = the running inverse, seeded from InvMod256's output. A separate copy because the
 // chain rewrites it every iteration and MulMod256 cannot write its own input.
-    [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, InvO0
-    [B------:R-:W-:-:S01]    MOV Rinv1, InvO1
-    [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, InvO2
-    [B------:R-:W-:-:S01]    MOV Rinv3, InvO3
-    [B------:R-:W-:-:S01]    IMAD Rinv4, RZ, RZ, InvO4
-    [B------:R-:W-:-:S01]    MOV Rinv5, InvO5
-    [B------:R-:W-:-:S01]    IMAD Rinv6, RZ, RZ, InvO6
-    [B------:R-:W-:-:S01]    MOV Rinv7, InvO7
+inc_func Copy256(Ri=InvO, Ro=Rinv)
 // Acc = 1. THE ACCUMULATOR IS BISECT SCAFFOLDING AND IS OFF BY DEFAULT -- see PACC below.
 // It is seeded here rather than inside the loop, so its gate is separate from theirs and both
 // the walk rung (WACC/WACCT) and the pts rung (PACC/PACCM/PACCT) have to switch it on.
@@ -918,14 +923,7 @@ inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
 // inverse *= gxmi
     [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
 inc_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
-    [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, MulR0
-    [B------:R-:W-:-:S01]    MOV Rinv1, MulR1
-    [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, MulR2
-    [B------:R-:W-:-:S01]    MOV Rinv3, MulR3
-    [B------:R-:W-:-:S01]    IMAD Rinv4, RZ, RZ, MulR4
-    [B------:R-:W-:-:S01]    MOV Rinv5, MulR5
-    [B------:R-:W-:-:S01]    IMAD Rinv6, RZ, RZ, MulR6
-    [B------:R-:W-:-:S02]    MOV Rinv7, MulR7
+inc_func Copy256(Ri=MulR, Ro=Rinv)
 
     [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, 0x20, RZ
     [B------:R-:W-:Y:S13]    ISETP.NE.U32.AND P0, PT, COfs, Idx, PT
@@ -1046,23 +1044,9 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
     [B------:R-:W-:-:S01]    UMOV uCallM0, 0x0
 inc_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
-    [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, MulR0
-    [B------:R-:W-:-:S01]    MOV Rinv1, MulR1
-    [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, MulR2
-    [B------:R-:W-:-:S01]    MOV Rinv3, MulR3
-    [B------:R-:W-:-:S01]    IMAD Rinv4, RZ, RZ, MulR4
-    [B------:R-:W-:-:S01]    MOV Rinv5, MulR5
-    [B------:R-:W-:-:S01]    IMAD Rinv6, RZ, RZ, MulR6
-    [B------:R-:W-:-:S02]    MOV Rinv7, MulR7
+inc_func Copy256(Ri=MulR, Ro=Rinv)
 
-    [B------:R-:W-:-:S01]    IMAD Dxi0, RZ, RZ, Rinv0
-    [B------:R-:W-:-:S01]    MOV Dxi1, Rinv1
-    [B------:R-:W-:-:S01]    IMAD Dxi2, RZ, RZ, Rinv2
-    [B------:R-:W-:-:S01]    MOV Dxi3, Rinv3
-    [B------:R-:W-:-:S01]    IMAD Dxi4, RZ, RZ, Rinv4
-    [B------:R-:W-:-:S01]    MOV Dxi5, Rinv5
-    [B------:R-:W-:-:S01]    IMAD Dxi6, RZ, RZ, Rinv6
-    [B------:R-:W-:-:S02]    MOV Dxi7, Rinv7
+inc_func Copy256(Ri=Rinv, Ro=Dxi)
 // s = c_Jy - y1. c_Jy is at c[0x3][0x0] in the -rdc layout, c_Jx at 0x20.
     [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x0]
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x8]
@@ -1092,22 +1076,8 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 // x1 = x3 ; y1 = y3. PntY is read by the SubMod256 immediately above, so it cannot be
 // overwritten before that call returns -- which is why both copies live here and not one
 // beside each producer.
-    [B------:R-:W-:-:S01]    IMAD PntX0, RZ, RZ, PxN0
-    [B------:R-:W-:-:S01]    MOV PntX1, PxN1
-    [B------:R-:W-:-:S01]    IMAD PntX2, RZ, RZ, PxN2
-    [B------:R-:W-:-:S01]    MOV PntX3, PxN3
-    [B------:R-:W-:-:S01]    IMAD PntX4, RZ, RZ, PxN4
-    [B------:R-:W-:-:S01]    MOV PntX5, PxN5
-    [B------:R-:W-:-:S01]    IMAD PntX6, RZ, RZ, PxN6
-    [B------:R-:W-:-:S01]    MOV PntX7, PxN7
-    [B------:R-:W-:-:S01]    IMAD PntY0, RZ, RZ, MulA0
-    [B------:R-:W-:-:S01]    MOV PntY1, MulA1
-    [B------:R-:W-:-:S01]    IMAD PntY2, RZ, RZ, MulA2
-    [B------:R-:W-:-:S01]    MOV PntY3, MulA3
-    [B------:R-:W-:-:S01]    IMAD PntY4, RZ, RZ, MulA4
-    [B------:R-:W-:-:S01]    MOV PntY5, MulA5
-    [B------:R-:W-:-:S01]    IMAD PntY6, RZ, RZ, MulA6
-    [B------:R-:W-:-:S05]    MOV PntY7, MulA7
+inc_func Copy256(Ri=PxN, Ro=PntX)
+inc_func Copy256(Ri=MulA, Ro=PntY)
 //@@JUMP_END
 
 //====================================================================================
