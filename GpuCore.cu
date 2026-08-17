@@ -152,6 +152,15 @@ __global__ void TestKernel(
     // is an equally selective 32-bit filter, so this is a free choice.
     const uint32_t target_prefix = c_target_words[2];
 	
+	// rem is 256-bit here and is NOT in the hand-written asm/tk/main.asm, which guards its batch
+	// loop on `BDone < BpL` alone. That asymmetry is deliberate and it is not a missing
+	// optimization: measured, dropping rem here moves the shipped build by ZERO registers
+	// (122 either way) and 29 instructions per batch against ~1.24M, because ptxas already
+	// spills the cold limbs to the frame in the prologue and reloads them in the epilogue --
+	// outside the loop entirely. RCAsm has no allocator, which is why the same removal was worth
+	// 8 registers and a whole resident block per SM there. See DEVPLAN "rem costs the COMPILED
+	// kernel nothing". Removing it for real needs the host to own the batch budget first, or the
+	// final launch over-scans; that is the open host item, not a change to this file.
 	uint64_t x1[4], y1[4], s1[4], rem[4];
 	// GS: cache lane ????
     { const uint64_t idx = gid*4 + 0; x1[0] = Px[idx]; y1[0] = Py[idx]; s1[0] = start_scalars[idx]; rem[0] = counts256[idx]; }

@@ -1358,6 +1358,51 @@ take* above estimated ~15% from halving the field-math instruction count — hal
 instructions did not halve the time, and **8.8% is the number to plan against**. The corollary is
 that P3 is now unambiguously the highest-value item left: it is the only one touching the 57-61%.
 
+### `rem` costs the COMPILED kernel nothing — measured, 2026-08-17
+
+`GpuCore.cu` still carries the full 256-bit chain that `main.asm` dropped: `rem[4]` declared at
+`:155`, `ge256_u64(rem, B)` as half the loop guard at `:200`, `sub256_u64(rem, B)` at `:406` and
+four limbs written back at `:420-423`. The obvious inference — the SASS kernel gained 8 registers
+by dropping it, so the compiled one is carrying 8 registers of dead weight and P3 could have them
+— **is wrong, and the direct measurement says so.** Same tree, built twice, the second with `rem`
+replaced by a 64-bit batch counter:
+
+| build | registers | stack frame | spill st / ld |
+|---|---:|---:|---:|
+| shipped, with `rem` | 122 | 16,384 | 0 / 0 |
+| shipped, `rem` dropped | **122** | 16,384 | 0 / 0 |
+| `NO_HASH`, with `rem` | 128 | 16,416 | **32 / 32** |
+| `NO_HASH`, `rem` dropped | **128** | 16,384 | **0 / 0** |
+
+**Not one register moves in the shipped build**, so this does not open the headroom P3 needs and
+must not be filed as if it did. The `NO_HASH` spill is real but free: the four `STL.64` sit at
+0x1d0-0x200, *before* the batch loop's head at 0x360, and the four `LDL.LU.64` at 0x15760+, *after*
+its exit at 0x155d0. ptxas spills the 256-bit value once per launch, keeps live only the limbs the
+guard reads, and reloads the rest for the write-back. In the loop body the whole change is
+**29 instructions** — against ~1.24M dynamic per batch (1,024 keys × ~1,207 field-math
+instructions), i.e. **0.002%**.
+
+**The contrast with `main.asm` is the finding, not the coincidence.** Dropping `rem` there was
+worth 8 registers and the difference between one resident block per SM and two, because RCAsm has
+no register allocator: a name in the table occupies its registers for the whole span whether or not
+anything reads them. ptxas has one, and it had already solved this problem — spilling the cold
+limbs to the frame and rematerializing them in the epilogue is exactly the right answer. A
+hand-written kernel pays for what it declares; a compiled one pays for what is live.
+
+Two consequences:
+
+- **The A/B is not contaminated by the asymmetry.** Side A carrying `rem` and side B not is worth
+  0.002% of a batch, not any part of the measured 22.2% lead. This was worth checking rather than
+  assuming, because it is the one structural difference left between the two kernels.
+- **Removing it from `GpuCore.cu` for performance is not worth the churn**, and doing it properly
+  is not the cheap half anyway. The cheap version — a 64-bit per-thread counter — is what the table
+  above measures and buys 0.002% plus 24 bytes/thread of pinned and device memory. The version that
+  matches `main.asm` has *no* per-thread counter at all, and that one cannot be done in the kernel:
+  with `batches_done < batches_per_launch` as the only guard, every thread runs `batches_per_launch`
+  batches on every launch, so the final launch over-scans unless the host sizes it. **That is the
+  host item already filed above**, it is required for the hand-written kernel regardless of what
+  `GpuCore.cu` does, and it is the only version of "remove `rem`" with anything behind it.
+
 ### The throttle — and what it voids
 
 `GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago
