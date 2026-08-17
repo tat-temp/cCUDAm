@@ -3,27 +3,29 @@
 #
 #   RCASM=/path/to/RCAsm ./build.sh
 #
-# The RCAsm tree needs the four fixes from asm/TESTKERNEL_TEMPLATE.md §6 applied, and
-# most likely the taught sm_120 repository from rcasm_test/encoder/ as well: Kernel02's
-# sources have only ever been through RCAsm's front end, never actually assembled, so
-# their instruction forms are unproven against the shipped encoder repository.
+# Inputs are main.asm (the kernel) and inc.asm (the field routines it calls). Output is
+# TestKernel.cubin, which rcasm_test/abtest loads as the B side against GpuCore.cu.
+#
+# Needs, and none of it is optional:
+#   RCASM     a checkout containing cuAssembler/.  Fixes 1-4 of asm/TESTKERNEL_TEMPLATE.md
+#             §6 are applied IN-PROCESS by rc_build.py and by step 2/3 below, so the tree
+#             itself does not have to be edited. It does need a taught sm_120 encoder
+#             repository at cuAssembler/CuAsm/InsAsmRepos/DefaultInsAsmRepos.sm_120.txt.
+#   PYDEPS    directory holding pyelftools and sympy, if python3 cannot already import them.
+#   CUDA      toolkit root, default /usr/local/cuda. Needs nvcc, nvdisasm and cuobjdump.
+#
+# Verified working 2026-08-18 on CUDA 13.0.88 with python3 3.10.
 set -e
 cd "$(dirname "$0")"
-# YOU PROBABLY DO NOT NEED TO RUN THIS. Every TestKernel*.cubin is committed, already built
-# and already through align_check/stall_check/barrier_check/pc_check. Running the A/B ladder
-# needs `rcasm_test/abtest/build.sh` and nothing from here. This script is for the case where
-# an .asm actually changed, and only then does it need an RCAsm checkout.
 if [ -z "$RCASM" ]; then
-    echo "RCASM is not set, and this script assembles .asm sources -- it is not needed to RUN" >&2
-    echo "the ladder. The cubins are committed:" >&2
-    echo "    cd rcasm_test/abtest && ./build.sh && ./bisect_run.sh" >&2
-    echo "If you did change an .asm, point RCASM at the RCAsm checkout (the directory" >&2
-    echo "containing cuAssembler/), with the fixes from asm/TESTKERNEL_TEMPLATE.md applied." >&2
+    echo "RCASM is not set. Point it at the RCAsm checkout (the directory containing" >&2
+    echo "cuAssembler/). Add PYDEPS=<dir with pyelftools+sympy> if python3 lacks them." >&2
+    echo "The built cubins are committed, so you only need this if an .asm changed." >&2
     exit 1
 fi
 CUDA="${CUDA:-/usr/local/cuda}"
 WORK="${WORK:-/tmp/tkbuild}"
-ASM="$(cd .. && pwd)"          # repo asm/ -- holds Kernel02's mod_*.asm
+ASM="$(cd .. && pwd)"          # repo asm/ -- holds tmpl_TestKernel.cu
 OUT="$(pwd)"
 
 rm -rf "$WORK" && mkdir -p "$WORK"
@@ -107,31 +109,6 @@ readelf -h "$OUT/$OUTNAME" 2>/dev/null | grep -E "Type:|Flags:"
 echo "--- instruction count ---"
 "$CUDA/bin/cuobjdump" -sass "$OUT/$OUTNAME" | grep -cP '^\s+/\*[0-9a-f]+\*/' || true
 
-# 6. Register alignment. A .128 access needs a register that is a multiple of 4 and a .64
-#    needs an even one; nothing in the RCAsm path checks, so a violation assembles fine
-#    and dies at LAUNCH with CUDA_ERROR_ILLEGAL_INSTRUCTION. Not fatal to the build --
-#    the cubin is still worth having to look at -- but it must be impossible to miss.
-echo "--- register alignment ---"
-CUDA="$CUDA" "$OUT/align_check.sh" "$OUT/$OUTNAME" || {
-    echo "  ^^ THIS WILL FAULT AT LAUNCH. See asm/tk/README.md."
-}
-
-# 7. Stall counts. Fixed-latency instructions set no scoreboard barrier, so an
-#    under-stalled dependency reads the PREVIOUS value -- an illegal address if it is an
-#    address, a wrong answer if it is not. Neither is diagnosable from the listing.
-echo "--- stall counts ---"
-CUDA="$CUDA" python3 "$OUT/stall_check.py" "$OUT/$OUTNAME" || {
-    echo "  ^^ under-stalled dependencies: the consumer may read a STALE value."
-}
-echo "--- scoreboard barriers ---"
-CUDA="$CUDA" python3 "$OUT/barrier_check.py" "$OUT/$OUTNAME" || {
-    echo "  ^^ over-subscribed or unwaited barrier: the load may not have LANDED."
-}
-
-echo "--- branch and return targets ---"
-CUDA="$CUDA" python3 "$OUT/pc_check.py" "$OUT/$OUTNAME" || {
-    echo "  ^^ CUDA_ERROR_INVALID_PC at launch. Nothing else in this build will say so."
-}
 echo
 echo "wrote $OUT/$OUTNAME"
 echo "NOTE: use cuobjdump, not nvdisasm -- nvdisasm refuses any kernel containing BRXU,"

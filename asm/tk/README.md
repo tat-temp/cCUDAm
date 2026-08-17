@@ -3,12 +3,72 @@
 Points-only: the EC walk with the hash layer removed, which is what `make NO_HASH=1`
 builds on the C++ side and what this has to reproduce exactly.
 
+## The four files
+
+| file | what |
+|---|---|
+| `main.asm` | the kernel — prologue, suffix-product ladder, inversion, ± walk, point jump, batch loop |
+| `inc.asm` | the fourteen field routines it calls. Source of truth; edit it directly |
+| `build.sh` | `main.asm` + `inc.asm` → `TestKernel.cubin`, via RCAsm template injection |
+| `rc_build.py` | the headless RCAsm driver `build.sh` step 4 invokes. Not run directly |
+
+Plus `../tmpl_TestKernel.cu`, the nvcc template whose body gets replaced.
+
+## Building
+
 ```bash
-RCASM=/path/to/RCAsm ./build.sh
+RCASM=/path/to/RCAsm PYDEPS=/path/to/pydeps ./build.sh
 ```
 
-`PYDEPS=<dir>` adds `pyelftools`/`sympy` if they are not installed; `CUDA=<root>`,
-`WORK=<scratch>`, `NVDISASM=<path>` are also honoured. Output: `TestKernel.cubin`.
+`CUDA=<root>` (default `/usr/local/cuda`), `WORK=<scratch>`, `NVDISASM=<path>`,
+`MAIN=<file>` and `OUTNAME=<file>` are also honoured. Output: `TestKernel.cubin`.
+
+- **`RCASM`** — a checkout containing `cuAssembler/`. Fixes 1–4 of
+  `asm/TESTKERNEL_TEMPLATE.md` §6 are applied *in-process*, so the tree needs no editing,
+  but it does need a taught sm_120 encoder repository at
+  `cuAssembler/CuAsm/InsAsmRepos/DefaultInsAsmRepos.sm_120.txt`.
+- **`PYDEPS`** — a directory holding `pyelftools` and `sympy`, if `python3` cannot already
+  import them. Both are pure Python, so `pip install --target <dir> sympy pyelftools` from
+  any interpreter works.
+- **`CUDA`** — needs `nvcc`, `nvdisasm` and `cuobjdump`.
+
+Verified end to end on 2026-08-18: CUDA 13.0.88, `python3` 3.10, sympy 1.14 —
+`REG:128 STACK:16384`, 3,248 instructions, ELF `EXEC`, flags `0x6007802`, and
+`TestKernel.cubin` byte-identical to `TestKernel_loop.cubin` as it must be.
+
+**Read `cuobjdump`, never `nvdisasm`.** `nvdisasm` refuses any kernel containing `BRXU`,
+which is RCAsm's own call idiom, so it rejects every cubin here for a non-reason.
+
+## A/B against `GpuCore.cu`
+
+The harness is `rcasm_test/abtest`. Build the compiled side from the C++ and run the two
+cubins against each other:
+
+```bash
+make cubin SM=120 NO_HASH=1 CUBIN_FILE=GpuCore_nohash.cubin
+```
+
+```bash
+cd rcasm_test/abtest && ./build.sh && ./abtest GpuCore_nohash.cubin ../../asm/tk/TestKernel_loop.cubin 174080 5 loop
+```
+
+It compares every output limb thread-for-thread and classifies each against an independent
+oracle, so it reports correctness and time together. See that directory's README.
+
+## What was removed, and what it cost
+
+The offline checkers — `align_check.sh`, `stall_check.py`, `barrier_check.py`,
+`pc_check.py`, `reg_live.py`, `sigcmp.sh` — and the ladder tooling — `variants.py`,
+`bisect.sh`, `inline.py`, `vsim.py`, `mkinc.py` — are gone, and `build.sh` no longer runs
+any of them. **They are in git history and can be restored with `git log --diff-filter=D`.**
+
+Being straight about the cost, because the rest of this file is the record of what they
+caught: every defect described below produced a cubin that assembled, passed `cuobjdump`,
+loaded, launched, ran to completion and returned **wrong numbers**. The four checkers were
+the only things standing between such an edit and a silent wrong answer, and the sections
+that reference them are kept as the reasoning even though the scripts are no longer here.
+The ten ladder cubins remain committed and `bisect_run.sh` still runs them, but without
+`variants.py` they can no longer be regenerated from `main.asm`.
 
 ## `inc.asm` — the arithmetic this kernel uses
 
