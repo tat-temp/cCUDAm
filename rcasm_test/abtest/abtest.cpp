@@ -26,6 +26,8 @@
 #include <cstdlib>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
+#include <chrono>
 
 typedef unsigned __int128 u128;
 
@@ -502,7 +504,9 @@ int main(int argc, char** argv)
 
 	if (argc == 2 && !strcmp(argv[1], "--selftest")) return 0;
 	if (argc < 3) {
-		printf("usage: %s <cubinA> <cubinB> [threads] [iters] [mode]\n", argv[0]);
+		printf("usage: %s <cubinA> <cubinB> [threads] [iters|Ns] [mode]\n", argv[0]);
+		printf("       iters = launch count, or `180s` for 180 seconds PER SIDE\n");
+		printf("       launches are INTERLEAVED A,B,A,B so both sides see one thermal envelope\n");
 		printf("       mode = mul (1b) | sufp (2a) | inv (2b) | walk (2c-i) | pts (2c-ii)\n");
 		printf("              | jump (2d, the point jump) | loop (2d, the batch loop)\n");
 		printf("       %s --selftest        (oracle only, no GPU needed)\n", argv[0]);
@@ -511,7 +515,18 @@ int main(int argc, char** argv)
 	const char* pathA = argv[1];
 	const char* pathB = argv[2];
 	const unsigned threads = (argc > 3) ? (unsigned)strtoul(argv[3], nullptr, 0) : 256u;
-	const int iters = (argc > 4) ? atoi(argv[4]) : 1;
+	// `iters` is a launch count, or `Ns` for N seconds PER SIDE.
+	//
+	// Duration mode exists because "run each side longer to average out throttling" is the
+	// obvious idea and, with the launches ordered A-then-B, it makes the bias WORSE rather than
+	// better: side A runs on a cool card and side B on one that A just spent minutes heating.
+	// The longer the run, the larger that gap. So duration mode comes with interleaving -- see
+	// the timing loop -- and the two are one change, not two.
+	const char* itArg = (argc > 4) ? argv[4] : "1";
+	const size_t itLen = strlen(itArg);
+	const bool durMode = itLen > 1 && (itArg[itLen - 1] == 's' || itArg[itLen - 1] == 'S');
+	const double durSecs = durMode ? atof(itArg) : 0.0;
+	const int iters = durMode ? INT32_MAX : atoi(itArg);
 	// `inv` is a superset of `sufp`: it runs the same ladder and then inverts, so every
 	// place that asks "is the ladder active" asks for sufp, and only the final expected
 	// value differs. Keeping them as two flags rather than one enum is what makes that
@@ -551,7 +566,12 @@ int main(int argc, char** argv)
 	int smCount = 0;
 	cuDeviceGetAttribute(&smCount, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev);
 	printf("device : %s (sm_%d%d, %d SMs)\n", nm, cc_maj, cc_min, smCount);
-	printf("threads: %u  (grid %u x block %u)   iters %d\n", threads, grid, block, iters);
+	if (durMode)
+		printf("threads: %u  (grid %u x block %u)   %.0fs per side, INTERLEAVED\n",
+		       threads, grid, block, durSecs);
+	else
+		printf("threads: %u  (grid %u x block %u)   iters %d%s\n", threads, grid, block, iters,
+		       iters > 1 ? ", INTERLEAVED" : "");
 	// Every run before this one was a single block, so gid == threadIdx.x and the BlockID term
 	// of `IMAD gID, BlockID, 0x100, ThrID` was multiplied by zero. Say so when it stops being.
 	if (grid == 1)
@@ -624,6 +644,13 @@ int main(int argc, char** argv)
 		for (size_t i = 0; i < nlimb; i += 4) canonP(&hx[i]);
 	}
 
+	// Hoisted out of the per-module loop so both argument blocks are alive at once: the timing
+	// loop alternates between them, and each holds pointers into its own module's allocations.
+	// thrTotal/batch/bpl are shared by both sides by definition.
+	unsigned long long thrTotal = threads;
+	unsigned batch = BATCH, bpl = BPL;
+	void* args[2][8];
+
 	for (int m = 0; m < 2; m++) {
 		printf("---- %s : %s\n", M[m].name, paths[m]);
 		CK(cuModuleLoad(&M[m].mod, paths[m]), "cuModuleLoad");
@@ -659,35 +686,77 @@ int main(int argc, char** argv)
 		CK(cuMemAlloc(&M[m].fr, 128), "cuMemAlloc fr");
 		CK(cuMemsetD8(M[m].fr, 0, 128), "memset fr");
 
-		unsigned long long thrTotal = threads;
-		unsigned batch = BATCH, bpl = BPL;
-		void* args[8] = {&M[m].px, &M[m].py, &M[m].sc, &M[m].ct, &M[m].fr,
-		                 &thrTotal, &batch, &bpl};
+		args[m][0] = &M[m].px; args[m][1] = &M[m].py; args[m][2] = &M[m].sc;
+		args[m][3] = &M[m].ct; args[m][4] = &M[m].fr;
+		args[m][5] = &thrTotal; args[m][6] = &batch; args[m][7] = &bpl;
+		printf("\n");
+	}
 
-		CUevent e0, e1; cuEventCreate(&e0, 0); cuEventCreate(&e1, 0);
-		for (int it = 0; it < iters; it++) {
+	// TIMING -- INTERLEAVED, ONE LAUNCH OF A THEN ONE OF B, REPEATED.
+	//
+	// It used to run every launch of A, then every launch of B, and that is a thermal ramp
+	// pointed at exactly one side: A measures a cool card and B measures the card A just
+	// heated. At `iters 5` the effect is small; the moment anyone runs longer to "average out
+	// throttling" -- the obvious and correct instinct -- it grows without bound, and it grows
+	// against B. The two sides now sit in the same thermal envelope by construction, which is
+	// what makes a long run worth more than a short one instead of less.
+	//
+	// This does NOT make the absolute numbers throttle-proof, and nothing here can. It makes
+	// the RATIO fair, which is the thing being read. Compare the absolute A column against its
+	// own history (see the throttle note in DEVPLAN) to decide whether the session is clean.
+	CUevent e0, e1; cuEventCreate(&e0, 0); cuEventCreate(&e1, 0);
+	std::vector<float> tv[2];
+	const auto wall0 = std::chrono::steady_clock::now();
+	auto elapsed = [&] {
+		return std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count();
+	};
+	for (int it = 0; it < iters; it++) {
+		// Checked at the TOP of a round, never mid-round: a round that launches A and not B
+		// would put one extra A sample into the pool and skew the very comparison this exists
+		// to protect. Both sides always have the same number of samples.
+		if (durMode && elapsed() >= durSecs * 2.0) break;
+		for (int m = 0; m < 2; m++) {
 			CK(cuMemcpyHtoD(M[m].px, hx.data(), bytes), "H2D px");
 			CK(cuMemcpyHtoD(M[m].py, hy.data(), bytes), "H2D py");
 			CK(cuMemcpyHtoD(M[m].sc, hs.data(), bytes), "H2D sc");
 			CK(cuMemcpyHtoD(M[m].ct, hc.data(), bytes), "H2D ct");
 			CK(cuCtxSynchronize(), "sync before");
 			cuEventRecord(e0, 0);
-			CK(cuLaunchKernel(M[m].fn, grid, 1, 1, block, 1, 1, 0, 0, args, nullptr), "cuLaunchKernel");
+			CK(cuLaunchKernel(M[m].fn, grid, 1, 1, block, 1, 1, 0, 0, args[m], nullptr),
+			   "cuLaunchKernel");
 			cuEventRecord(e1, 0);
 			CUresult sr = cuCtxSynchronize();
 			if (!chk(sr, "cuCtxSynchronize (kernel)")) return 1;
 			float t = 0; cuEventElapsedTime(&t, e0, e1);
-			if (it == 0 || t < ms[m]) ms[m] = t;
+			tv[m].push_back(t);
 		}
-		printf("       launch OK, best of %d: %.4f ms\n", iters, ms[m]);
+	}
 
+	// BEST **AND** MEDIAN. Best-of-N is the right statistic for "how fast can this kernel go",
+	// and it is the wrong one for "is this card throttling": it reports the single least-throttled
+	// launch and hides everything else, so a long run and a short one give the same answer and the
+	// spread that would have shown the problem never appears. The median moves when the card
+	// slows down. Print both and the disagreement between them is the diagnostic.
+	float med[2] = {0, 0};
+	for (int m = 0; m < 2; m++) {
+		if (tv[m].empty()) { printf("no launches timed\n"); return 1; }
+		std::vector<float> s = tv[m];
+		std::sort(s.begin(), s.end());
+		ms[m] = s.front();
+		med[m] = s[s.size() / 2];
+		printf("---- %s : %zu launches   best %.4f ms   median %.4f ms   worst %.4f ms"
+		       "   spread %.1f%%\n", M[m].name, s.size(), ms[m], med[m], s.back(),
+		       100.0 * (s.back() - s.front()) / s.front());
+	}
+	printf("\n");
+
+	for (int m = 0; m < 2; m++) {
 		outPx[m].resize(nlimb); outPy[m].resize(nlimb);
 		outSc[m].resize(nlimb); outCt[m].resize(nlimb);
 		CK(cuMemcpyDtoH(outPx[m].data(), M[m].px, bytes), "D2H px");
 		CK(cuMemcpyDtoH(outPy[m].data(), M[m].py, bytes), "D2H py");
 		CK(cuMemcpyDtoH(outSc[m].data(), M[m].sc, bytes), "D2H sc");
 		CK(cuMemcpyDtoH(outCt[m].data(), M[m].ct, bytes), "D2H ct");
-		printf("\n");
 	}
 
 	// counts256 IS NO LONGER A COMPARABLE OUTPUT, except on the pts rung.
@@ -928,8 +997,22 @@ int main(int argc, char** argv)
 	}
 
 	printf("\n==== timing ====\n");
-	printf("  A %.4f ms    B %.4f ms    B/A %.3fx\n", ms[0], ms[1],
+	printf("  best    A %.4f ms    B %.4f ms    B/A %.3fx\n", ms[0], ms[1],
 	       ms[0] > 0 ? ms[1] / ms[0] : 0.0f);
+	printf("  median  A %.4f ms    B %.4f ms    B/A %.3fx\n", med[0], med[1],
+	       med[0] > 0 ? med[1] / med[0] : 0.0f);
+	// The two ratios agreeing is the evidence that the run is thermally clean. Best-of-N picks
+	// each side's least-throttled launch and the median picks its typical one; if throttling
+	// were falling unevenly on the two sides -- which is what the interleave exists to prevent
+	// -- the two ratios would part company. A gap here means read the absolute columns and the
+	// spread before believing anything else in this block.
+	if (ms[0] > 0 && med[0] > 0) {
+		const double rb = ms[1] / ms[0], rm = med[1] / med[0];
+		const double gap = 100.0 * (rb > rm ? rb - rm : rm - rb) / rm;
+		printf("  the two ratios differ by %.1f%%%s\n", gap,
+		       gap > 2.0 ? "   <<< READ THE SPREAD ABOVE; this run is not thermally clean"
+		                 : "   (agreement here is what says the run is thermally clean)");
+	}
 	// This used to read "meaningless until both kernels do the same amount of work". On the
 	// lower rungs that was the whole truth; on jump and loop they demonstrably DO the same work
 	// -- every output limb agrees and every thread is EXACT -- so the ratio is now real, and

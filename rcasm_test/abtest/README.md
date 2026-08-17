@@ -29,8 +29,23 @@ is the real `TestKernel` with the hash layer compiled out, and is the only hones
 *speed* number: it is the kernel this one is trying to replace. Every ratio in
 `asm/tk/README.md` has it on one side.
 
-Arguments: `<cubinA> <cubinB> [threads] [iters]`. `threads` must be a multiple of 256
-(defaults to 256); `iters` reports the best launch time of N.
+Arguments: `<cubinA> <cubinB> [threads] [iters|Ns] [mode]`. `threads` must be a multiple of 256
+(defaults to 256). `iters` is a launch count, or `180s` for **180 seconds per side**.
+
+**Launches are interleaved A,B,A,B — and that is what makes a long run worth doing.** The
+harness used to run every launch of A and then every launch of B, which is a thermal ramp
+pointed at exactly one side: A measures a cool card, B measures the card A just heated. At
+`iters 5` that is small; the moment anyone runs longer to average out throttling — the obvious
+and correct instinct — it grows without bound, and it grows against B. Interleaved, both sides
+sit in the same thermal envelope by construction.
+
+It reports **best and median** per side, with the spread. Best-of-N answers "how fast can this
+kernel go" and is the wrong statistic for "is this card throttling": it reports the single
+least-throttled launch, so a long run and a short one give the same number and the spread that
+would have shown the problem never appears. The median moves when the card slows. **The two
+ratios agreeing is the evidence the run is thermally clean**; the harness computes the gap and
+says so. None of this makes the absolute numbers throttle-proof — nothing can — it makes the
+*ratio* fair, and the absolute A column still has to be checked against its own history.
 
 ## It answers two questions, and keeps them apart
 
