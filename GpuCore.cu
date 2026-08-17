@@ -84,6 +84,12 @@ __device__ __constant__ uint64_t c_Jy[4];
 #define NO_HASH 0
 #endif
 
+// P3's second half, `make HOIST_INV_CHAIN=1`. Guarded like NO_HASH above so a command-line -D
+// cannot collide with a header define and lose, which is how H11's DEBUG_MODE went dead.
+#ifndef HOIST_INV_CHAIN
+#define HOIST_INV_CHAIN 0
+#endif
+
 #if NO_HASH
 #define HASH_CONSUME(sink, prefix, X) \
 	do { (sink) ^= (X)[0] ^ (X)[1] ^ (X)[2] ^ (X)[3] ^ (uint64_t)(prefix); } while (0)
@@ -250,7 +256,26 @@ __global__ void TestKernel(
 		for (int i = 0; i < half - 1; ++i) {
             uint64_t dx_inv_i[4];
             mul_mod(dx_inv_i, subp[i], inverse);
-			
+#if HOIST_INV_CHAIN
+            // P3, second half. `inverse` is the only loop-carried value here, so the shortest
+            // possible critical path through the iteration is the one that resolves it first.
+            // Nothing between this point and the bottom of the body reads `inverse` -- dx_inv_i
+            // above already holds the old value -- so advancing it HERE rather than at :339 lets
+            // the ~1,700 instructions of point arithmetic below overlap the recurrence instead of
+            // trailing it. Pure reordering: identical operands, identical results.
+            //
+            // It is not free, and it looks free, which is why the cost is written here. Both
+            // `inverse` and `gxmi` are now live across the whole point body, and the shipped
+            // build goes 122 -> 128 registers with 8 bytes of spill it did not have. The -rdc
+            // build (what `make cubin` emits, and what abtest measures) reaches 128 with no
+            // spill. Numbers and the four-way table are in the Makefile beside the flag.
+            {
+                uint64_t gxmi[4];
+                sub_mod(gxmi, &c_Gx[(size_t)i*4], x1);
+                mul_mod(inverse, inverse, gxmi);
+            }
+#endif
+
 			{
 				uint64_t px3[4], s[4], lam[4];
                 uint64_t px_i[4], py_i[4];
@@ -335,9 +360,11 @@ __global__ void TestKernel(
 #endif
 			}
 			
+#if !HOIST_INV_CHAIN
 			uint64_t gxmi[4];
             sub_mod(gxmi, &c_Gx[(size_t)i*4], x1);
             mul_mod(inverse, inverse, gxmi);
+#endif
 		}
 		
 		{

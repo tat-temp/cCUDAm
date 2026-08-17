@@ -42,6 +42,50 @@ ifneq ($(strip $(NO_HASH)),)
 NVCCFLAGS += -DNO_HASH=1
 endif
 
+# P3, first half. `make INLINE_HASH_W2=1` drops __noinline__ from the hot hash entry
+# getHash160_w2_from_limbs and lets ptxas decide; it decides to inline, at all four call sites.
+#
+# A flag rather than an edit, because the whole point of P3 is that it is UNMEASURED and the
+# measurement needs both sides buildable from one tree. Measured resource cost, sm_120:
+#
+#   shipped build   122 -> 128 registers, 0 spill either way, 9984 -> 15960 instructions
+#   -rdc build      126 -> 126 registers, 0 spill either way, 10080 -> 16016 instructions
+#
+# 128 is exactly the __launch_bounds__(256,2) ceiling, so occupancy does NOT change and the
+# spill cliff that hardening item 10 warned about is not reached. What DOES change is code size:
+# one 2,021-instruction body becomes four copies, and the walk streams through two of them every
+# iteration. That is the thing this trade is actually about, and it is why the flag exists rather
+# than a commit flipping the attribute.
+INLINE_HASH_W2 ?=
+ifneq ($(strip $(INLINE_HASH_W2)),)
+NVCCFLAGS += -DINLINE_HASH_W2=1
+endif
+
+# P3, second half. `make HOIST_INV_CHAIN=1` moves the walk's `inverse *= (c_Gx[i] - x1)` from the
+# bottom of the loop body to the top, immediately after the dx_inv_i that reads the old value.
+# `inverse` is the iteration's only loop-carried value, so this resolves the recurrence first and
+# lets the point arithmetic overlap it rather than trail it. Pure reordering at source level --
+# same operands, same results.
+#
+# It is NOT free, which is the opposite of what it looks like and of what this comment said
+# first. Hoisting extends the live ranges of `inverse` and `gxmi` across the entire point body,
+# so it buys scheduling freedom with register pressure and the shipped build pays:
+#
+#   config                     plain regs / spill      -rdc regs / spill
+#   (default)                     122 /  0                126 / 0
+#   INLINE_HASH_W2=1              128 /  0                126 / 0
+#   HOIST_INV_CHAIN=1             128 /  8                128 / 0
+#   both                          127 / 32                128 / 0
+#
+# Read the two shapes apart. `-rdc` -- what `make cubin` emits and therefore what every abtest
+# A/B loads -- spills in NO configuration, so the A/B measures schedule and code size cleanly.
+# The plain build is what ships, and there the hoist costs 8 bytes of spill and the pair 32. A
+# win in the cubin A/B therefore has to be re-checked against `make ptxinfo` before it is adopted.
+HOIST_INV_CHAIN ?=
+ifneq ($(strip $(HOIST_INV_CHAIN)),)
+NVCCFLAGS += -DHOIST_INV_CHAIN=1
+endif
+
 CPU_SRC := cCUDAHurricane.cpp EcInt.cpp GpuPuzzle.cpp EcPoint.cpp Ec.cpp
 GPU_SRC := GpuCore.cu GpuEc.cu
 HDRS    := $(wildcard *.h *.cuh)
@@ -80,7 +124,7 @@ CU_OBJECTS  := $(GPU_SRC:.cu=.o)
 
 TARGET := cCUDAHurricane
 
-.PHONY: all clean ptxinfo sass cubin nohash-cubin
+.PHONY: all clean ptxinfo sass cubin nohash-cubin p3-cubins
 
 all: $(TARGET)
 
@@ -119,6 +163,20 @@ endif
 # reproducible from the repo by someone who was not there when it was first built.
 nohash-cubin:
 	$(MAKE) cubin NO_HASH=1 CUBIN_FILE=GpuCore_nohash.cubin SM=$(SM_ARCHS)
+
+# P3's A/B, both sides. These are FULL kernels -- hashing included -- because P3 is the only
+# item that touches the 57-61% of wall clock that hashing costs, and a points-only build cannot
+# see it at all. Side A is the shipped kernel and must be rebuilt from the same tree as side B,
+# not carried over from an earlier session: only a same-run comparison is worth anything here.
+# Four, not two: P3's two halves have different costs and must be attributable separately. The
+# inline trades call overhead for +60% code size; the hoist trades a shorter loop-carried chain
+# for register pressure. Bundling them leaves a combined number that cannot say which half paid
+# for it -- and if they cancel, a bundled A/B reports "no effect" over two real ones.
+p3-cubins:
+	$(MAKE) cubin CUBIN_FILE=GpuCore_p3base.cubin SM=$(SM_ARCHS)
+	$(MAKE) cubin INLINE_HASH_W2=1 CUBIN_FILE=GpuCore_p3inl.cubin SM=$(SM_ARCHS)
+	$(MAKE) cubin HOIST_INV_CHAIN=1 CUBIN_FILE=GpuCore_p3hoist.cubin SM=$(SM_ARCHS)
+	$(MAKE) cubin INLINE_HASH_W2=1 HOIST_INV_CHAIN=1 CUBIN_FILE=GpuCore_p3both.cubin SM=$(SM_ARCHS)
 
 $(TARGET): $(CPP_OBJECTS) $(CU_OBJECTS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)

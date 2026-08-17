@@ -566,7 +566,28 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
 // HOT PATH. Same by-value ABI, but the result is one u32 (hash160 word 2) instead of five,
 // and the RIPEMD-160 inside is the 153-round trim. This is the ONLY hash call on the scanning
 // path; getHash160_33_from_limbs below runs only after a 32-bit filter hit (~2^-32).
-__device__ __noinline__ uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U256 x)
+//
+// __noinline__ here is P3's first half, and it is a build flag (`make INLINE_HASH_W2=1`) rather
+// than a decision baked into the source, because it is a genuine trade rather than an oversight.
+// Dropping it costs nothing in resources -- the shipped build goes 122 -> 128 registers with ZERO
+// spill, and 128 is exactly the __launch_bounds__(256,2) ceiling, so occupancy is unchanged -- but
+// it takes the kernel from 9,984 to 15,960 instructions, because one 2,021-instruction body
+// becomes four copies and the walk streams through two of them per iteration. Call overhead
+// against instruction-fetch footprint; only hardware answers that. See the Makefile and DEVPLAN.
+//
+// getHash160_33_from_limbs below keeps __noinline__ unconditionally: it runs under the 32-bit
+// filter, i.e. ~2^-32 of keys, so inlining it would spend code size and registers on a cold path.
+// Guarded, not defined outright: an unguarded define is what made DEBUG_MODE's -D collide with
+// the header and silently lose (H11). The flag only ever arrives from the command line.
+#ifndef INLINE_HASH_W2
+#define INLINE_HASH_W2 0
+#endif
+#if INLINE_HASH_W2
+#define HASH_W2_LINKAGE
+#else
+#define HASH_W2_LINKAGE __noinline__
+#endif
+__device__ HASH_W2_LINKAGE uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U256 x)
 {
     uint32_t sha_state[16];
     SHA256_33_from_limbs(prefix02_03, x.v, sha_state);

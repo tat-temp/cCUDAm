@@ -1451,6 +1451,52 @@ It cannot be removed without also removing the thing that stops nvcc deleting th
 Correctness came back clean at this duration too: 174,080 of 174,080 EXACT on both sides, every
 output limb agreeing, across 12,122 launches with no fault and no drift.
 
+### P3 started: both halves behind flags, resources measured, clock not yet — 2026-08-17
+
+P3 is two changes and they are now two build flags, `make INLINE_HASH_W2=1` and
+`make HOIST_INV_CHAIN=1`, with `make p3-cubins SM=120` emitting all four combinations. Flags
+rather than edits because the whole content of P3's entry is *unmeasured*, and a measurement needs
+both sides buildable from one tree in one session — carrying a side A over from a previous session
+is the mistake the throttle section exists to prevent.
+
+**The gate passes, and the two halves fail in different directions.** `make ptxinfo`, sm_120:
+
+| config | plain regs / spill | `-rdc` regs / spill | instrs (`-rdc`) | `CALL` |
+|---|---:|---:|---:|---:|
+| default | 122 / 0 | 126 / 0 | 10,080 | 8 |
+| `INLINE_HASH_W2=1` | **128** / 0 | 126 / 0 | **16,016** | **4** |
+| `HOIST_INV_CHAIN=1` | **128** / **8** | 128 / 0 | 10,096 | 8 |
+| both | 127 / **32** | 128 / 0 | 16,008 | 4 |
+
+- **The inline happens, at all four sites.** `CALL` 8 → 4 (the four left are the cold `_33`), and
+  under `-rdc` `getHash160_w2_from_limbs` loses its `.text` section entirely. Registers land on
+  **exactly** the `__launch_bounds__(256,2)` ceiling of 128 with **zero** spill, so occupancy does
+  not change and the cliff hardening item 10 warned about is not reached. What it costs is **code
+  size: +60%**, one 2,021-instruction body becoming four copies, of which the walk streams through
+  two every iteration. Call overhead against instruction-fetch footprint — the trade is real and
+  nothing offline decides it.
+- **The hoist is not free, which is the opposite of how it reads.** Moving `inverse *= (c_Gx[i]-x1)`
+  to the top of the iteration shortens the loop-carried chain, and pays for it by keeping `inverse`
+  and `gxmi` live across the whole point body: 122 → 128 registers and 8 bytes of spill that did
+  not exist. Paired with the inline it is 32 bytes. This was filed in the P3 entry as the cheap
+  half and it is not.
+
+**The two build shapes must be read apart, and this is the first item where it bites.** `-rdc` —
+what `make cubin` emits and therefore what every `abtest` A/B loads — spills in **no**
+configuration and stays ≤128 registers throughout, so the A/B measures schedule and code size
+cleanly. The plain build is what ships and is where the spill lives. **A win in the cubin A/B is
+therefore not adoptable on its own**; it has to be re-checked against `make ptxinfo SM=120` for
+the shape that ships. DEVPLAN has warned about `-rdc` codegen drift since the native-cubin work;
+this is the first time the two shapes disagree about something load-bearing.
+
+Verified offline: all four configurations build host+device clean, `p3-cubins` emits all four, and
+`GpuCore_p3base.cubin` is **byte-identical** to a control tree with the flag machinery removed
+outright — so both flags are inert when unset and the default kernel is unchanged.
+
+**Unmeasured, and the reason this matters more than the other P items:** hashing is 57-61% of wall
+clock and P3 is the only item that touches it. The whole hand-written SASS route is worth ~8.8%
+against the same denominator.
+
 ### The throttle — and what it voids
 
 `GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago
