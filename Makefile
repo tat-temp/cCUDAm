@@ -42,8 +42,13 @@ ifneq ($(strip $(NO_HASH)),)
 NVCCFLAGS += -DNO_HASH=1
 endif
 
-# P3, first half. `make INLINE_HASH_W2=1` drops __noinline__ from the hot hash entry
-# getHash160_w2_from_limbs and lets ptxas decide; it decides to inline, at all four call sites.
+# P3, first half -- MEASURED AND REFUTED, kept as the reproducer. `make INLINE_HASH_W2=1` drops
+# __noinline__ from the hot hash entry getHash160_w2_from_limbs and lets ptxas decide; it decides
+# to inline, at all four call sites. On an RTX 5090 that is 0.8-1.3% SLOWER (2,209 launches a
+# side, interleaved, both sides REG 126 and 2 blocks/SM, neither spilling -- so code layout is
+# the only variable). It could not have won: the recoverable overhead is 2 CALL + 2 RET per walk
+# iteration against ~5,900 instructions, i.e. 0.07%, and it buys that with +60% code size.
+# Default off. Do not re-litigate without reading the DEVPLAN section.
 #
 # A flag rather than an edit, because the whole point of P3 is that it is UNMEASURED and the
 # measurement needs both sides buildable from one tree. Measured resource cost, sm_120:

@@ -567,13 +567,17 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
 // and the RIPEMD-160 inside is the 153-round trim. This is the ONLY hash call on the scanning
 // path; getHash160_33_from_limbs below runs only after a 32-bit filter hit (~2^-32).
 //
-// __noinline__ here is P3's first half, and it is a build flag (`make INLINE_HASH_W2=1`) rather
-// than a decision baked into the source, because it is a genuine trade rather than an oversight.
-// Dropping it costs nothing in resources -- the shipped build goes 122 -> 128 registers with ZERO
-// spill, and 128 is exactly the __launch_bounds__(256,2) ceiling, so occupancy is unchanged -- but
-// it takes the kernel from 9,984 to 15,960 instructions, because one 2,021-instruction body
-// becomes four copies and the walk streams through two of them per iteration. Call overhead
-// against instruction-fetch footprint; only hardware answers that. See the Makefile and DEVPLAN.
+// __noinline__ here is P3's first half, and it is MEASURED RATHER THAN ASSUMED: dropping it is
+// 0.8-1.3% SLOWER on an RTX 5090, so the attribute stays. The flag `make INLINE_HASH_W2=1` still
+// builds the other way, as the reproducer for anyone who has the idea again.
+//
+// It could not have won, and the reason is worth knowing before reaching for __forceinline__ on
+// anything else here. Inlining recovers 2 CALL + 2 RET per walk iteration against ~5,900
+// instructions -- 0.07% -- and pays for it with +60% code size, one 2,021-instruction body
+// becoming four copies that the walk streams through two at a time. Resources are not the
+// problem: it lands exactly on the __launch_bounds__(256,2) ceiling of 128 with zero spill.
+// Instruction-fetch footprint is. The by-value ABI noted below had already taken everything the
+// call had to give.
 //
 // getHash160_33_from_limbs below keeps __noinline__ unconditionally: it runs under the 32-bit
 // filter, i.e. ~2^-32 of keys, so inlining it would spend code size and registers on a cold path.

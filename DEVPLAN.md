@@ -358,8 +358,15 @@ essentially at its floor. The headroom is in configuration, not arithmetic.
 - **P2 — `subp` local frame.** 16 KB/thread, sized by `MAX_BATCH_SIZE` regardless of the runtime
   batch. *Not the dominant cost* — traffic is 32 B/key. Its real cost is a **4.28 GB driver-side
   local reservation**. Cheapest fix: build `-DMAX_BATCH_SIZE=256` (≈ +0.35% arithmetic).
-- **P3 — drop `__noinline__`** on the hot `getHash160_w2_from_limbs` and hoist the inverse-chain
-  update. 5-15%, unmeasured. **Gate on `make ptxinfo SM=120`.**
+- **P3 — first half REFUTED, second half open.** Dropping `__noinline__` from the hot
+  `getHash160_w2_from_limbs` measured **0.8-1.3% SLOWER** on an RTX 5090 (2,209 launches a side,
+  interleaved, both sides `REG 126` and 2 blocks/SM). The 5-15% estimate was wrong by two orders
+  of magnitude: the recoverable call overhead is 2 `CALL` + 2 `RET` per walk iteration against
+  ~5,900 instructions, i.e. **0.07%**, so the change could never have paid for the +60% code size
+  it costs. Kept as `make INLINE_HASH_W2=1`, default off, as the reproducer. Hoisting the
+  inverse-chain update is `make HOIST_INV_CHAIN=1` and is still unmeasured — note it is *not* the
+  free half either: 122 → 128 registers and 8 bytes of spill in the shipped build. See the
+  measured section below.
 - **P4 — template the kernel on batch size.** 2-5%; composes with P2/P3.
 - **P5 — setup kernel** does ~200-380 affine inversions per thread. ~30-70 ms one-time; fixing P1
   shrinks it 12-24× for free.
@@ -1496,6 +1503,53 @@ outright — so both flags are inert when unset and the default kernel is unchan
 **Unmeasured, and the reason this matters more than the other P items:** hashing is 57-61% of wall
 clock and P3 is the only item that touches it. The whole hand-written SASS route is worth ~8.8%
 against the same denominator.
+
+### P3's first half is refuted: the calls were never the cost — RTX 5090, 2026-08-17
+
+`GpuCore_p3base` against `GpuCore_p3inl`, 174,080 threads, **2,209 launches per side**,
+interleaved:
+
+| | best | median | worst | spread |
+|---|---:|---:|---:|---:|
+| A — `__noinline__` kept | 75.5450 ms | 80.0835 ms | 80.3213 ms | 6.3% |
+| B — inlined | 76.1528 ms | 81.1046 ms | 81.3452 ms | 6.8% |
+| **B/A** | **1.008** | **1.013** | | |
+
+**Inlining the hot hash makes the kernel 0.8-1.3% slower.** The two ratios agree to 0.5%, so the
+run is thermally clean, and both sides came back 174,080 of 174,080 EXACT with every output limb
+agreeing.
+
+**This is the cleanest isolation available in this project, and that is what makes it decisive.**
+Both sides are `REG 126`, both get 2 resident blocks per SM, both are `-rdc`, neither spills, and
+the local frame is 16,384 on both. Occupancy, registers, spill and frame are all held equal by the
+measurement rather than by argument — the *only* difference between the two binaries is code
+layout. Every previous timing result in this document had at least one of those varying.
+
+**The arithmetic says it could never have won.** What inlining recovers is 2 `CALL.REL.NOINC` plus
+2 `RET` per walk iteration. The iteration costs about 1,862 instructions of field math plus two
+2,021-instruction hash bodies, ~5,900 in all, so the recoverable overhead is **4 instructions in
+5,900 — 0.07%**. Against that it pays +60% code size: one hash body becomes four copies, ~255 KB
+of kernel, and the walk streams through two of the copies every iteration. A ceiling of 0.07%
+against a real instruction-fetch cost is a trade with no winning side, and it lost by about what
+that footprint would predict. **P3's 5-15% for this half was wrong by two orders of magnitude.**
+
+**The `__noinline__` was already the right answer, and the source said so.** `CUDAHash.cuh` records
+that the by-value ABI was the measured win and that "the CALL is kept, only its ABI changed". With
+the ABI already down to one register out, there was nothing left in the call for inlining to take.
+The estimate came from the general heuristic that inlining a hot callee is good; the heuristic does
+not survive a callee this large.
+
+Kept as a flag rather than reverted. A refuted optimization with a one-command reproducer is worth
+more than a deleted branch, and the next person to have this idea should be able to re-run it in
+six minutes rather than re-derive it.
+
+**Two things the run gives away for free.** The full kernel sustains **80.08 ms** at grid 680
+against a 75.55 ms best — a 6% derate, *half* the 12% the points-only kernel showed. Denser
+dependent work draws less power and holds its clock better, which is the same latency-versus-issue
+split that shows up everywhere else in this document. And with sustained numbers on both,
+hashing is (80.08 − 32.39)/80.08 = **59.6%** of wall clock — inside the 57-61% band measured
+another way — which puts the hand-written SASS route at 7.34 ms of 80.08, i.e. **9.2%** rather
+than the 8.8% projected from cold-card figures.
 
 ### The throttle — and what it voids
 
