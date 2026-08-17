@@ -264,11 +264,15 @@ __global__ void TestKernel(
             // the ~1,700 instructions of point arithmetic below overlap the recurrence instead of
             // trailing it. Pure reordering: identical operands, identical results.
             //
-            // It is not free, and it looks free, which is why the cost is written here. Both
-            // `inverse` and `gxmi` are now live across the whole point body, and the shipped
-            // build goes 122 -> 128 registers with 8 bytes of spill it did not have. The -rdc
-            // build (what `make cubin` emits, and what abtest measures) reaches 128 with no
-            // spill. Numbers and the four-way table are in the Makefile beside the flag.
+            // MEASURED AND NULL on an RTX 5090 -- 80.0834 against 80.0915 ms, B/A 1.000 over
+            // 2,219 launches a side. ptxas schedules against the dependence graph of this basic
+            // block, so the source order of two independent operations is not a constraint it
+            // inherits; there was never anything here for a source-level hoist to win.
+            //
+            // And it is not free, which is why the flag defaults off rather than on-for-free.
+            // Both `inverse` and `gxmi` become live across the whole point body: the shipped
+            // build goes 122 -> 128 registers with 8 bytes of spill it did not have. Numbers and
+            // the four-way table are in the Makefile beside the flag.
             {
                 uint64_t gxmi[4];
                 sub_mod(gxmi, &c_Gx[(size_t)i*4], x1);

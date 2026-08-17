@@ -72,8 +72,13 @@ endif
 # lets the point arithmetic overlap it rather than trail it. Pure reordering at source level --
 # same operands, same results.
 #
-# It is NOT free, which is the opposite of what it looks like and of what this comment said
-# first. Hoisting extends the live ranges of `inverse` and `gxmi` across the entire point body,
+# MEASURED AND NULL, kept as the reproducer. On an RTX 5090 it is exactly nothing: medians
+# 80.0834 against 80.0915 ms over 2,219 launches a side, B/A 1.000. ptxas schedules against the
+# dependence graph of the basic block, so the source order of two independent operations is not
+# a constraint it inherits -- a source-level reordering is a hint to a compiler that already has
+# the information. Default off, because it is not free even at zero benefit:
+#
+# Hoisting extends the live ranges of `inverse` and `gxmi` across the entire point body,
 # so it buys scheduling freedom with register pressure and the shipped build pays:
 #
 #   config                     plain regs / spill      -rdc regs / spill

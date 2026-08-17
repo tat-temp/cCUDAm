@@ -1219,11 +1219,13 @@ is hypothesis 1 arriving from a direction that has nothing to do with instructio
 
 Two consequences, and they point in opposite directions from where this document has been looking:
 
-- **P3 is now the highest-value performance item in the project, by a wide margin.** 57-61% of wall
-  clock is hashing, and P3 — dropping `__noinline__` on the hot `getHash160_w2_from_limbs` and
-  hoisting the inverse-chain update — is the only item that touches it. It is filed at 5-15%
-  unmeasured, against a share of the clock more than half again the size of what the entire SASS
-  rewrite addresses.
+- ~~**P3 is now the highest-value performance item in the project, by a wide margin.**~~
+  **Refuted on hardware 2026-08-17 — both halves, see the section below.** The reasoning was sound
+  and the conclusion was wrong: 57-61% of wall clock *is* hashing and P3 *was* the only filed item
+  touching it, but neither half of P3 actually touches it in a way that pays. Inlining the hot hash
+  is 1% slower and hoisting the inverse chain is exactly nothing. **The correct reading of the same
+  measurement is the opposite one: the hash layer is at its floor, so the 59.6% is not addressable
+  at all, and every remaining win has to come out of the other 40%.**
 - **`REG 255` is worse for the hand-written kernel than the raw occupancy argument suggested.** The
   part it replaces is precisely the part that gains from a second resident block, and it is the part
   that cannot have one.
@@ -1550,6 +1552,46 @@ split that shows up everywhere else in this document. And with sustained numbers
 hashing is (80.08 − 32.39)/80.08 = **59.6%** of wall clock — inside the 57-61% band measured
 another way — which puts the hand-written SASS route at 7.34 ms of 80.08, i.e. **9.2%** rather
 than the 8.8% projected from cold-card figures.
+
+### P3's second half is null, and P3 is finished — RTX 5090, 2026-08-17
+
+`GpuCore_p3base` against `GpuCore_p3hoist`, 174,080 threads, **2,219 launches per side**:
+
+| | best | median | worst | spread |
+|---|---:|---:|---:|---:|
+| A — chain updated at the bottom | 75.6482 ms | 80.0915 ms | 80.3478 ms | 6.2% |
+| B — hoisted to the top | 75.8502 ms | **80.0834 ms** | 80.3316 ms | 5.9% |
+| **B/A** | 1.003 | **1.000** | | |
+
+**Zero.** The medians are 0.01% apart — B is nominally the faster of the two — and the ratios agree
+to 0.3%. Both sides 174,080 of 174,080 EXACT, every limb agreeing.
+
+**Why: ptxas did not need the help, and could not have.** The hoist moves a statement inside a
+single basic block. ptxas builds the dependence graph for that block and schedules against it; the
+source order of two independent operations is not a constraint it inherits. The only thing the
+source change actually achieved was a different register allocation — 126 → 128 under `-rdc`,
+free at this occupancy, and 122 → 128 with 8 bytes of spill in the shipped build, which is *worse*
+for nothing. **A source-level reordering is a hint to a compiler that already has the information.**
+That generalizes past this item and is the reason to stop looking for more of them here.
+
+**So P3 is done, and it is a double negative:** the inline half costs 1%, the hoist half costs
+nothing and gains nothing. Filed at 5-15%; delivered −1% to 0%. Both flags stay, default off, with
+the numbers at the flag.
+
+**What that does to the shape of the project is the important part.** P3 was the only item pointed
+at the 59.6% of wall clock that hashing costs, and the hash layer is recorded here as
+machine-checked and at its floor — the 153-round RIPEMD-160 trim is provably minimal, the schedule
+is validated against `hashlib`, and there are no memory instructions in either body at all. With
+P3 refuted, **that 59.6% should be treated as fixed cost.** Every remaining performance win has to
+come out of the other 40%: P2's local-memory traffic, P4's batch-size templating, and the
+hand-written SASS route at a measured 9.2%.
+
+**One methodological gain, and it sharpens a rule this document got half-right.** Side A here is
+the same binary as the previous section's side A, run in a separate six-minute invocation: medians
+**80.0835** and **80.0915**, best 75.5450 and 75.6482. That is 0.01% and 0.14% apart. So
+cross-run comparison is not inherently invalid — it is valid exactly when the absolute anchor
+reproduces, which is what the throttle section asked for and what this pair of runs demonstrates
+rather than assumes.
 
 ### The throttle — and what it voids
 
