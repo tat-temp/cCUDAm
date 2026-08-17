@@ -1606,6 +1606,59 @@ when the absolute anchor reproduces**. The anchor was always the right check; wh
 evidence of how tight it is when the machine is healthy. It is tight to a thirtieth of a percent,
 and the bad session was 2.4× off. Those are not close calls, and nothing in between has been seen.
 
+### P2 set up: it is two changes, not one, and one run separates them — 2026-08-17
+
+P2 is filed as "build `-DMAX_BATCH_SIZE=256`", which reads like a single flag and is not.
+`MAX_BATCH_SIZE` is **both** the size of `subp[]` and the ceiling on the run-time batch, so
+building at 256 forces the batch to 256 as well — and the two have different mechanisms, different
+costs, and no reason to have the same sign:
+
+| | what it changes | cost | expected |
+|---|---|---|---|
+| **the frame** (compile-time) | what is **allocated**: 16 KB → 4 KB per thread, and the driver's local reservation with it | none | **nil on the clock** |
+| **the batch** (run-time argument) | what is **touched**: 16 KB → 4 KB rounded between the ladder and the walk per batch, i.e. the write-to-read reuse distance | one `inv_mod` per batch goes from 0.87 to 3.5 instructions per key | the half with a mechanism |
+
+**Neither half reduces traffic.** `subp[]` is written once and read once per key either way, 32
+B/key. A bandwidth win is the wrong thing to expect here; the claim under test is cache locality.
+
+**The frame is expected to be worth nothing, and that prediction is the reason to measure it.**
+At a fixed batch both cubins write and read the same `subp[0..127]` — the touched footprint is
+identical and only the unused tail of the allocation differs. What is actually being asked is
+whether that tail costs anything anyway (page-table reach, a different stride through L2). This
+session has already had two offline predictions about P3 come out backwards, so the prediction is
+written down and then tested rather than substituted for the test.
+
+**One run answers both**, because the two questions share a side A:
+
+```
+./abtest GpuCore_b1024.cubin GpuCore_b256.cubin 174080 180s loop 256
+```
+
+- **B vs A** — both at batch 256, so the frame is the only variable.
+- **A against 80.07-80.09 ms** — side A is byte-identical to `GpuCore_p3base` (checked, not
+  assumed), which the four P3 runs put at that median at batch **1024** with a spread of 0.031%.
+  So side A's own number here *is* the batch-size effect. This is the first time the project has
+  cashed in that reproducibility rather than merely noting it, and it is worth more than the P3
+  result it came from.
+
+Built: `make p2-cubins SM=120`. Verified offline — the frame goes 16,384 → 4,096 bytes, `c_Gx`
+and `c_Gy` shrink 16,384 → 4,096 each (they are sized by `MAX_BATCH_SIZE` too, which the P2 entry
+did not mention), `GpuCore_b1024.cubin` is byte-identical to the P3 baseline, and the harness
+compiles clean with its oracle passing 14 cases.
+
+`abtest` gained a `[batch]` argument for this, shared by both sides deliberately: a per-side batch
+would have the two kernels computing different points and would cost the A-vs-B limb diff, which
+is worth more than that comparison. It rejects odd, zero and >1024 — a batch above the compiled
+`MAX_BATCH_SIZE` makes **every** kernel bail at the `B > MAX_BATCH_SIZE` guard and report a clean
+pass over two kernels that did nothing, which is this project's signature failure mode.
+
+**What P2 cannot do here, and it is the half worth more.** The original entry's complaint is a
+**4.28 GB driver-side local reservation**, and hardening item 11 records that the matching
+`BYTES_PER_THREAD` over-estimate "is the only thing bounding thread count today". That is a host
+sizing question, it interacts with a real `threadsTotal` cap, and `abtest` cannot see it at all —
+the harness sets its own grid. Whatever this run says about the clock, the reservation half of P2
+remains open and is not answered by it.
+
 ### The throttle — and what it voids
 
 `GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago

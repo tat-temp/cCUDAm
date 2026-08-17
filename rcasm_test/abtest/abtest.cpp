@@ -504,11 +504,14 @@ int main(int argc, char** argv)
 
 	if (argc == 2 && !strcmp(argv[1], "--selftest")) return 0;
 	if (argc < 3) {
-		printf("usage: %s <cubinA> <cubinB> [threads] [iters|Ns] [mode]\n", argv[0]);
+		printf("usage: %s <cubinA> <cubinB> [threads] [iters|Ns] [mode] [batch]\n", argv[0]);
 		printf("       iters = launch count, or `180s` for 180 seconds PER SIDE\n");
 		printf("       launches are INTERLEAVED A,B,A,B so both sides see one thermal envelope\n");
 		printf("       mode = mul (1b) | sufp (2a) | inv (2b) | walk (2c-i) | pts (2c-ii)\n");
 		printf("              | jump (2d, the point jump) | loop (2d, the batch loop)\n");
+		printf("       batch = keys per batch, even, 2..1024 (default 1024). BOTH sides get the\n");
+		printf("               same value -- P2 compares two FRAME sizes at one batch size, and\n");
+		printf("               a per-side batch would make the A/B limb diff meaningless.\n");
 		printf("       %s --selftest        (oracle only, no GPU needed)\n", argv[0]);
 		return 1;
 	}
@@ -546,6 +549,20 @@ int main(int argc, char** argv)
 		       argv[5]);
 		return 1;
 	}
+	// P2's variable. The kernel's subp[] frame is sized by the COMPILE-time MAX_BATCH_SIZE while
+	// the work is done at the RUN-time batch, so the two can be moved independently -- which is
+	// the only way to ask whether the frame costs anything on its own. Give both sides the same
+	// value and vary only which cubin they are: a per-side batch would have the two kernels
+	// computing different points, and the A-vs-B limb diff is worth more than that comparison.
+	//
+	// 1024 is the cap because it is the default MAX_BATCH_SIZE; a larger value makes every
+	// kernel bail at `B > MAX_BATCH_SIZE` and report a clean pass over two kernels that did
+	// nothing, which is this project's signature failure.
+	const unsigned batchArg = (argc > 6) ? (unsigned)strtoul(argv[6], nullptr, 0) : 1024u;
+	if (batchArg < 2 || batchArg > 1024 || (batchArg & 1)) {
+		printf("batch must be even and in 2..1024 (got %u)\n", batchArg);
+		return 1;
+	}
 	printf("mode   : %s\n", loopm ? "loop (stage 2d -- the outer batch loop)"
 	                      : jumpm ? "jump (stage 2d -- the point jump)"
 	                       : ptsm ? "pts  (stage 2c-ii -- the +/- point arithmetic)"
@@ -572,6 +589,11 @@ int main(int argc, char** argv)
 	else
 		printf("threads: %u  (grid %u x block %u)   iters %d%s\n", threads, grid, block, iters,
 		       iters > 1 ? ", INTERLEAVED" : "");
+	// The batch size is a property of the run, not of either cubin, and the whole of P2 is that
+	// it can differ from the frame the cubin was compiled for. Print it beside the threads so no
+	// result can be quoted without it.
+	printf("batch  : %u keys/batch  (half %u)   subp[] TOUCHED per batch: %u B/thread\n",
+	       batchArg, batchArg >> 1, (batchArg >> 1) * 32u);
 	// Every run before this one was a single block, so gid == threadIdx.x and the BlockID term
 	// of `IMAD gID, BlockID, 0x100, ThrID` was multiplied by zero. Say so when it stops being.
 	if (grid == 1)
@@ -617,10 +639,12 @@ int main(int argc, char** argv)
 	// One definition. The kernels derive half = batch_size >> 1 and index subp[] and
 	// c_Gx[] by it, the oracle's trip count is half-1, and the tables are sized half*4 --
 	// three places that silently produce a plausible wrong answer if they disagree.
-	const unsigned BATCH = 1024;
+	const unsigned BATCH = batchArg;
 	const unsigned half = BATCH >> 1;
-	// Four batches on the loop rung, one everywhere else. rem is seeded at 0x4000 = 16*B, so
-	// four is comfortably inside the range and still exercises the guard, the back edge and
+	// Four batches on the loop rung, one everywhere else. rem is seeded at 0x4000 keys, which is
+	// 16 batches at the largest permitted batch and more at any smaller one, so the guard is
+	// exercised without ever being the limiter -- four is comfortably inside the range at every
+	// batch size this harness accepts, and still exercises the guard, the back edge and
 	// three re-entries into the ladder with a point the previous batch produced. One would
 	// run the loop body once and prove only that the branch was taken. Declared beside BATCH
 	// because the oracle and the launch must agree on it -- the same reason BATCH is.

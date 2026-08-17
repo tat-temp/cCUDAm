@@ -102,6 +102,38 @@ ifneq ($(strip $(HOIST_INV_CHAIN)),)
 NVCCFLAGS += -DHOIST_INV_CHAIN=1
 endif
 
+# P2. `make MAX_BATCH=256` sizes the kernel for a 256-key batch instead of 1024, which shrinks
+# TestKernel's subp[] local frame 16 KB -> 4 KB per thread and the c_Gx/c_Gy constant tables
+# 16 KB -> 4 KB each. Defs.h guards the default with #ifndef, so this is the whole of the change.
+#
+# P2 as filed BUNDLES TWO CHANGES, and they have to be separated or the result cannot be read.
+# MAX_BATCH_SIZE is both the size of the frame and the ceiling on the run-time batch, so building
+# at 256 forces the batch to 256 as well -- but the frame is compile-time and the batch is the
+# `batch_size` kernel argument, so they move independently and can be measured apart:
+#
+#   the FRAME  changes what is ALLOCATED: 16 KB -> 4 KB per thread, and with it the driver's
+#              local reservation, which is P2's original complaint (4.28 GB) and a capacity
+#              matter rather than a speed one. At a FIXED batch it does not change which bytes
+#              the kernel touches -- both cubins at batch 256 write and read the same subp[0..127]
+#              -- so the honest prediction is that it is worth nothing on the clock, and what is
+#              actually being tested is whether the unused tail of the allocation costs anything
+#              anyway (page-table reach, a different stride through L2). Predicting nil and
+#              measuring it is the point; this session has already had two offline predictions
+#              about P3 come out backwards.
+#
+#   the BATCH  changes what is TOUCHED: at 1024 a thread rounds 16 KB of local memory between the
+#              ladder and the walk, and 512 resident threads per SM make that 8 MB of live local
+#              data; at 256 it is 2 MB. That is the reuse-distance claim, and it is the half with
+#              a mechanism behind it. It is not free -- one inv_mod (890 instructions) per batch
+#              is 0.87 instructions per key at 1024 and 3.5 at 256.
+#
+# Neither half reduces TRAFFIC: subp[] is written once and read once per key either way, 32 B/key.
+# Anyone expecting a bandwidth win here is expecting the wrong thing.
+MAX_BATCH ?=
+ifneq ($(strip $(MAX_BATCH)),)
+NVCCFLAGS += -DMAX_BATCH_SIZE=$(MAX_BATCH)
+endif
+
 CPU_SRC := cCUDAHurricane.cpp EcInt.cpp GpuPuzzle.cpp EcPoint.cpp Ec.cpp
 GPU_SRC := GpuCore.cu GpuEc.cu
 HDRS    := $(wildcard *.h *.cuh)
@@ -140,7 +172,7 @@ CU_OBJECTS  := $(GPU_SRC:.cu=.o)
 
 TARGET := cCUDAHurricane
 
-.PHONY: all clean ptxinfo sass cubin nohash-cubin p3-cubins
+.PHONY: all clean ptxinfo sass cubin nohash-cubin p2-cubins p3-cubins
 
 all: $(TARGET)
 
@@ -188,6 +220,24 @@ nohash-cubin:
 # inline trades call overhead for +60% code size; the hoist trades a shorter loop-carried chain
 # for register pressure. Bundling them leaves a combined number that cannot say which half paid
 # for it -- and if they cancel, a bundled A/B reports "no effect" over two real ones.
+# P2's A/B, and ONE run answers both of its questions.
+#
+#   ./abtest GpuCore_b1024.cubin GpuCore_b256.cubin 174080 180s loop 256
+#
+#   B vs A in that run    -- both at batch 256, so the FRAME is the only variable.
+#   A vs 80.07-80.09 ms   -- side A is byte-identical to GpuCore_p3base, which four P3 runs put
+#                            at that median at batch 1024 with a spread of 0.031%. So side A's
+#                            own number here IS the batch-size effect, measured against an anchor
+#                            tighter than anything the effect could plausibly be.
+#
+# That second comparison is why the four P3 runs were worth their wall clock beyond P3 itself,
+# and it is the first time this project has cashed in the reproducibility rather than just noting
+# it. GpuCore_b1024 is built under its own name rather than reusing GpuCore_p3base because a
+# measurement whose side A is named after a different experiment is one someone will mis-cite.
+p2-cubins:
+	$(MAKE) cubin CUBIN_FILE=GpuCore_b1024.cubin SM=$(SM_ARCHS)
+	$(MAKE) cubin MAX_BATCH=256 CUBIN_FILE=GpuCore_b256.cubin SM=$(SM_ARCHS)
+
 p3-cubins:
 	$(MAKE) cubin CUBIN_FILE=GpuCore_p3base.cubin SM=$(SM_ARCHS)
 	$(MAKE) cubin INLINE_HASH_W2=1 CUBIN_FILE=GpuCore_p3inl.cubin SM=$(SM_ARCHS)
