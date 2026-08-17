@@ -264,10 +264,11 @@ __global__ void TestKernel(
             // the ~1,700 instructions of point arithmetic below overlap the recurrence instead of
             // trailing it. Pure reordering: identical operands, identical results.
             //
-            // MEASURED AND NULL on an RTX 5090 -- 80.0834 against 80.0915 ms, B/A 1.000 over
-            // 2,219 launches a side. ptxas schedules against the dependence graph of this basic
-            // block, so the source order of two independent operations is not a constraint it
-            // inherits; there was never anything here for a source-level hoist to win.
+            // MEASURED AND NULL on an RTX 5090, twice: B/A 1.000 on the median in two independent
+            // runs of ~2,200 launches a side, and zero in combination with INLINE_HASH_W2 as well.
+            // ptxas schedules against the dependence graph of this basic block, so the source
+            // order of two independent operations is not a constraint it inherits; there was
+            // never anything here for a source-level hoist to win.
             //
             // And it is not free, which is why the flag defaults off rather than on-for-free.
             // Both `inverse` and `gxmi` become live across the whole point body: the shipped

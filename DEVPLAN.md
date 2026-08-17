@@ -1555,16 +1555,28 @@ than the 8.8% projected from cold-card figures.
 
 ### P3's second half is null, and P3 is finished — RTX 5090, 2026-08-17
 
-`GpuCore_p3base` against `GpuCore_p3hoist`, 174,080 threads, **2,219 launches per side**:
+Four runs against one fixed side A, 174,080 threads, ~2,200 launches per side each, interleaved.
+**All four thermally clean** (the best and median ratios agree to ≤0.5% in every one) and all
+eight sides 174,080 of 174,080 EXACT with every output limb agreeing:
 
-| | best | median | worst | spread |
-|---|---:|---:|---:|---:|
-| A — chain updated at the bottom | 75.6482 ms | 80.0915 ms | 80.3478 ms | 6.2% |
-| B — hoisted to the top | 75.8502 ms | **80.0834 ms** | 80.3316 ms | 5.9% |
-| **B/A** | 1.003 | **1.000** | | |
+| B | `-rdc` REG | best B/A | median B/A | verdict |
+|---|---:|---:|---:|---|
+| `p3inl` — hash inlined | 126 | 1.008 | **1.013** | **−1.3%** |
+| `p3hoist` — chain hoisted | 128 | 1.003 | **1.000** | **0** |
+| `p3hoist` — *re-run* | 128 | 1.000 | **1.000** | **0** |
+| `p3both` | 128 | 1.017 | **1.012** | **−1.2%** |
 
-**Zero.** The medians are 0.01% apart — B is nominally the faster of the two — and the ratios agree
-to 0.3%. Both sides 174,080 of 174,080 EXACT, every limb agreeing.
+**The hoist is zero alone and zero in combination.** `both` at −1.2% is indistinguishable from
+`inl` at −1.3% on the median, so the hoist adds nothing even where register pressure is already
+higher. And it was re-run: 1.000 twice, the second time with the two ratios agreeing to 0.0%.
+
+**The null is a measured zero, not a shrug, and this is what says so.** Side A is the same binary
+in all four runs, executed in four separate six-minute invocations. Its medians came out
+**80.0835, 80.0915, 80.0667, 80.0824 ms** — a total spread of **0.031%**. The harness therefore
+resolves differences an order of magnitude below the smallest effect it was asked about here, so
+"0%" means zero rather than "too small to see", and the −1.2%/−1.3% results sit forty times above
+the noise floor. Every ratio in this document is retroactively better supported by that number
+than by any argument made for one.
 
 **Why: ptxas did not need the help, and could not have.** The hoist moves a statement inside a
 single basic block. ptxas builds the dependence graph for that block and schedules against it; the
@@ -1574,9 +1586,9 @@ free at this occupancy, and 122 → 128 with 8 bytes of spill in the shipped bui
 for nothing. **A source-level reordering is a hint to a compiler that already has the information.**
 That generalizes past this item and is the reason to stop looking for more of them here.
 
-**So P3 is done, and it is a double negative:** the inline half costs 1%, the hoist half costs
-nothing and gains nothing. Filed at 5-15%; delivered −1% to 0%. Both flags stay, default off, with
-the numbers at the flag.
+**So P3 is done, and it is a double negative:** the inline half costs 1.3%, the hoist half costs
+nothing and gains nothing, and together they cost what the inline costs alone. Filed at 5-15%;
+delivered −1.3% to 0%. Both flags stay, default off, with the numbers at the flag.
 
 **What that does to the shape of the project is the important part.** P3 was the only item pointed
 at the 59.6% of wall clock that hashing costs, and the hash layer is recorded here as
@@ -1586,12 +1598,13 @@ P3 refuted, **that 59.6% should be treated as fixed cost.** Every remaining perf
 come out of the other 40%: P2's local-memory traffic, P4's batch-size templating, and the
 hand-written SASS route at a measured 9.2%.
 
-**One methodological gain, and it sharpens a rule this document got half-right.** Side A here is
-the same binary as the previous section's side A, run in a separate six-minute invocation: medians
-**80.0835** and **80.0915**, best 75.5450 and 75.6482. That is 0.01% and 0.14% apart. So
-cross-run comparison is not inherently invalid — it is valid exactly when the absolute anchor
-reproduces, which is what the throttle section asked for and what this pair of runs demonstrates
-rather than assumes.
+**One methodological gain, and it sharpens a rule this document got half-right.** The throttle
+section says a wall-clock number is comparable only to one taken in the same run. That is too
+strong. Side A's median reproduced to **0.031%** across four separate invocations of this harness,
+and its best to 0.14% — so cross-run comparison is not inherently invalid, it is valid **exactly
+when the absolute anchor reproduces**. The anchor was always the right check; what was missing was
+evidence of how tight it is when the machine is healthy. It is tight to a thirtieth of a percent,
+and the bad session was 2.4× off. Those are not close calls, and nothing in between has been seen.
 
 ### The throttle — and what it voids
 

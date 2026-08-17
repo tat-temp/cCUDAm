@@ -72,11 +72,17 @@ endif
 # lets the point arithmetic overlap it rather than trail it. Pure reordering at source level --
 # same operands, same results.
 #
-# MEASURED AND NULL, kept as the reproducer. On an RTX 5090 it is exactly nothing: medians
-# 80.0834 against 80.0915 ms over 2,219 launches a side, B/A 1.000. ptxas schedules against the
-# dependence graph of the basic block, so the source order of two independent operations is not
-# a constraint it inherits -- a source-level reordering is a hint to a compiler that already has
-# the information. Default off, because it is not free even at zero benefit:
+# MEASURED AND NULL, twice, kept as the reproducer. On an RTX 5090 it is exactly nothing: B/A
+# 1.000 on the median in two independent runs of ~2,200 launches a side, and 1.000 on the best in
+# the second. It is zero in combination with INLINE_HASH_W2 too -- both together cost what the
+# inline costs alone. ptxas schedules against the dependence graph of the basic block, so the
+# source order of two independent operations is not a constraint it inherits; a source-level
+# reordering is a hint to a compiler that already has the information.
+#
+# The zero is measured, not assumed: side A's median reproduced to 0.031% across four separate
+# invocations of the harness, so it resolves far below the effect being asked about.
+#
+# Default off, because it is not free even at zero benefit:
 #
 # Hoisting extends the live ranges of `inverse` and `gxmi` across the entire point body,
 # so it buys scheduling freedom with register pressure and the shipped build pays:
