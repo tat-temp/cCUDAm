@@ -16,11 +16,24 @@ perfectly correct in each case:
      is still ours. Getting that backwards is how stage 2c-ii's unwaited y1 was dismissed as
      "8 in the vendored FUNCTION bodies -- expected".
 
-  2. A STORE WHOSE DATA REGISTERS ARE REWRITTEN LATER, with no READ barrier. A store does
-     not read its data at issue: the LSU reads it later, and `R-` means nothing says when.
-     Overwrite the register before that read happens and the store writes the NEW value.
-     This is a WAR hazard, and the read barrier is the only thing that closes it -- `R3` on
-     the store arms it, and a wait on 3 before the overwrite is what makes the read done.
+  2. A MEMORY OP WHOSE SOURCE REGISTERS ARE REWRITTEN LATER, with no READ barrier. Such an
+     instruction does not read its operands at issue: the LSU reads them later, and `R-`
+     means nothing says when. Overwrite the register before that read happens and the
+     instruction uses the NEW value. This is a WAR hazard, and the read barrier is the only
+     thing that closes it -- `R3` on the op arms it, and a wait on 3 before the overwrite is
+     what makes the read done.
+
+     SOURCES, NOT DATA. This check read only a store's DATA operand until 2026-08-17, and
+     the gap cost a wrong answer: the ADDRESS operand of a LOAD is read exactly as late.
+     The prologue's twelve LDGs carried `R-` and the write-back rebuilds AddrX/AddrY/AddrS
+     into the very registers they addressed through, so on the shortest rung -- `id`, 56
+     instructions, three of them between the last Scal load and the LDC that overwrote its
+     address -- the loads read a rewritten address and start_scalars came back wrong on 255
+     of 256 threads. `local` is the same kernel plus five instructions in that gap and it
+     passed; every larger rung has thousands there and passed. A hazard that only the
+     shortest rung is short enough to expose is exactly the kind this file exists to catch
+     statically, and this one walked past the checker because the checker looked at half of
+     each instruction.
 
      This is what made the stage-2a ladder's subp[half-1] wrong AFTER the loop was fixed.
      Px was exact, because the accumulator never leaves registers -- but Py, which is the
@@ -74,6 +87,15 @@ the right bias for a build gate -- it under-reports rather than crying wolf -- b
 a clean run is not a proof. Like stall_check.py, only the kernel body can fail; the
 appended FUNCTION bodies are vendored and are reported as a note.
 
+The approximation costs exactly one false positive over the whole compiled corpus, recorded
+here so the next person does not have to rediscover that it is not a real defect:
+ab_compiled_inv.cubin, `LDL.128 R20, [R2]` at 0x55c0 against `IADD3.X R2` at 0x57a0. A
+`BSSY.RECONVERGENT` opens three instructions after the load and the rewrite is inside the
+divergent region, so the two are not on one straight path. Four of the five compiled kernels
+come out clean and all ten hand-written rungs do. THE CHECK IS NOT TUNED TO SWALLOW THIS ONE:
+a threshold moved to make a known-good input pass is a threshold that stops meaning anything,
+and this directory has already had two of those falsified by looking at a larger corpus.
+
 Exit 1 if anything in the KERNEL BODY is flagged, so it can gate a build.
 """
 import re, subprocess, sys, os
@@ -86,6 +108,7 @@ WORD2 = re.compile(r"^\s*/\* (0x[0-9a-f]+) \*/\s*$")
 
 
 STORES = ("STL", "STG", "STS", "ST", "RED", "ATOM", "ATOMG", "ATOMS")
+LOADS = ("LDL", "LDG", "LDS", "LDC", "LDCU", "LD", "LDGSTS")
 
 
 def ctrl(w):
@@ -107,16 +130,30 @@ def opcode(text):
     return re.sub(r"^@!?\w+\s+", "", text).split()[0]
 
 
-def store_data(text):
-    """A store's DATA operand -- the last register named -- widened by the access size."""
+def mem_sources(text):
+    """Every register a variable-latency memory op reads LATE, as (prefix, number) pairs.
+
+    For a store that is the DATA operand (the last register named, widened by the access
+    size) and the ADDRESS; for a load it is the address alone. Both are the same hazard --
+    `R-` says nothing about when the LSU reads the operand, so an overwrite before that read
+    substitutes a different value: a different datum for a store, a different ADDRESS for a
+    load, which is the half this function used to miss.
+
+    An address inside `[...]` is a register PAIR when it carries `.64` (global and the
+    descriptor form) and a single register otherwise (local and shared)."""
     t = re.sub(r"^@!?\w+\s+", "", text)
-    if opcode(t).split(".")[0] not in STORES:
+    op = opcode(t).split(".")[0]
+    src = set()
+    if op in STORES:
+        nums = re.findall(r"\bR(\d+)\b", t)
+        if nums and int(nums[-1]) != 255:
+            k = int(nums[-1])
+            src |= {("R", k + i) for i in range(width(t))}
+    elif op not in LOADS:
         return set()
-    nums = re.findall(r"\bR(\d+)\b", t)
-    if not nums or int(nums[-1]) == 255:
-        return set()
-    k = int(nums[-1])
-    return {("R", k + i) for i in range(width(t))}
+    for m in re.finditer(r"\[(U?R)(\d+)(\.64)?", t):
+        src |= {(m.group(1), int(m.group(2)) + i) for i in range(2 if m.group(3) else 1)}
+    return src
 
 
 def dst(text):
@@ -196,11 +233,11 @@ def check(path):
         if m and int(m.group(1), 16) < int(r[0], 16) and int(m.group(1), 16) in at:
             backedges.append((i, at[int(m.group(1), 16)]))
 
-    # Pass 1 -- stores whose data registers are rewritten later (see item 2 in the
+    # Pass 1 -- memory ops whose SOURCE registers are rewritten later (see item 2 in the
     # docstring). Only the kernel body is walked; the vendored FUNCTION bodies below the
     # last EXIT reuse the same numbers and would produce nothing but false positives.
     for k, (addr, text, wbar, rbar, wait) in enumerate(rows[:kend + 1]):
-        data = store_data(text)
+        data = mem_sources(text)
         if not data:
             continue
         window = list(range(k + 1, kend + 1))
@@ -218,8 +255,16 @@ def check(path):
             continue
         window = window[:window.index(hit) + 1]
         j_text, j_addr = rows[hit][1], rows[hit][0]
+        # A WAIT ON THE WRITE BARRIER CLEARS IT TOO, and leaving that out is what made the
+        # first version of this check fail ptxas's own output. If the data has come back, the
+        # address was necessarily read: waiting the barrier the load armed for its DESTINATION
+        # is a stronger guarantee than the read barrier, not a weaker one. Measured over the
+        # compiled corpus -- 54 LDC, 12 LDG and 8 LDL rewrite a source with no read barrier
+        # anywhere, and every one of them waits the write barrier first.
+        if wbar != 7 and any(rows[i][4] & (1 << wbar) for i in window):
+            continue
         if rbar == 7:
-            flag(k, "        /*%s*/ stores %s with NO read barrier, and /*%s*/ rewrites it\n"
+            flag(k, "        /*%s*/ reads %s late with NO read barrier, and /*%s*/ rewrites it\n"
                     "            %s\n"
                     "            rewritten by: %s" % (
                         addr, ",".join("%s%d" % r for r in sorted(data, key=lambda x: x[1])),
@@ -227,7 +272,7 @@ def check(path):
             continue
         if not any(rows[i][4] & (1 << rbar) for i in window):
             flag(k, "        /*%s*/ arms read barrier %d but nothing waits it before\n"
-                    "            /*%s*/ rewrites the data register\n"
+                    "            /*%s*/ rewrites the source register\n"
                     "            %s\n"
                     "            rewritten by: %s"
                     % (addr, rbar, j_addr, text, j_text))

@@ -1271,6 +1271,55 @@ H4, and it has its own test surface. `GpuCore.cu` is unchanged and still writes 
 what the harness proves, taken deliberately: `rem` was an identity copy plus a subtract, and what
 carries the walk, the jump and the back edge is `Px`/`Py` after the batch completes.
 
+### The register work on hardware — two defects, neither of them the allocation — 2026-08-17
+
+The ladder run the section above was waiting for. **Eight of ten rungs pass, including `jump` and
+`loop`** — the production kernel, at 128 registers and two resident blocks per SM, agreeing with
+the compiled reference on every output limb and EXACT on all 256 threads. So the allocation, the
+three overlays, the corrected `Ro`=9 / `Rt`=73 contracts and dropping `rem` are all confirmed on a
+device. The two failures were elsewhere, and both are instrument defects rather than kernel ones:
+
+**1. `walk` and `pts` faulted with `ILLEGAL_INSTRUCTION` — the headroom rule again, in the one
+file that carries its own register count.** `variants.py` raises `regcnt` for the accumulator
+rungs and had it at `ACC_TOP + 1` = 136 with R135 used: headroom 1. Every other rung has 4 or
+more and every other rung passed. This is the same defect `9455fde` fixed in `main.asm`, written
+before the rule existed and surviving in a second file. `reg_live.py` reported OK throughout,
+because it checked headroom against the *source table* — where the production top is R124 at a
+declared 128 — and the table does not contain the number `variants.py` substitutes. It now checks
+headroom **per cubin, from `-res-usage`**, which needs no knowledge of where the count came from
+and is the check that would have caught this. `ACC_REGCNT` is `ACC_TOP + 4`.
+
+**2. `id` returned wrong scalars on 255 of 256 threads — a load's ADDRESS is read as late as a
+store's data, and the checker only knew about the store.** The prologue's twelve `LDG`s carried
+`R-`, and overlay A is reused by everything below: the ladder's `Rinv` sits on R32..R39 and the
+write-back rebuilds `AddrX`/`AddrY`/`AddrS` from scratch, which is what pays for the register
+count. On `id` — 56 instructions, the shortest rung — **three** instructions separate the last
+`Scal` load from the `LDC` that overwrites its address, and the loads resolved against an address
+written after they issued. `local` is the identical kernel plus five instructions in that gap and
+passed. Every longer rung has thousands there and passed. Fixed with a read barrier on all twelve
+and one `NOP` draining it, placed outside every region marker so no variant can cut it; the drain
+is nearly free, since a read barrier signals when operands were *collected*, not when data returns.
+
+Two things about widening `barrier_check.py` to cover it are worth keeping:
+
+- **A wait on the WRITE barrier clears the hazard too**, and omitting that made the widened check
+  fail ptxas's own output on its first run. If the data came back, the address was read. Measured:
+  54 `LDC`, 12 `LDG` and 8 `LDL` in the compiled corpus rewrite a source with no read barrier
+  anywhere, and every one waits the write barrier first.
+- **Distance is not the discriminator**, which was the obvious hypothesis and is refuted by the
+  corpus: unprotected loads go down to **6 cycles / 4 instructions** and protected ones up to
+  **117**. The populations overlap almost entirely. Stores remain the unambiguous case at 28 of 28.
+
+One residual false positive is recorded rather than tuned away — `ab_compiled_inv.cubin`, an `LDL`
+whose rewrite sits inside a `BSSY.RECONVERGENT` region three instructions later, i.e. the linear
+walk crediting a path it never takes. Four of five compiled kernels and all ten hand-written rungs
+come out clean.
+
+**The remaining `id`/`local` "A and B DISAGREE" is by construction and not a defect**: those rungs
+compute an identity copy while side A computes `a*b mod P`, and `bisect_run.sh` has always said the
+only thing read on them is whether the launch completes. What was *not* by construction was the
+scalar identity sub-check, which is what caught defect 2 — the one rung short enough to expose it.
+
 ### The throttle — and what it voids
 
 `GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago

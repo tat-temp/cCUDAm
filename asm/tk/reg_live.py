@@ -146,6 +146,22 @@ def check_table(regcnt, alloc):
         bad.append("regcnt %d leaves only %d above R%d; needs %d -- this FAULTS at launch "
                    "with ILLEGAL_INSTRUCTION and every other checker passes"
                    % (regcnt, regcnt - prod, prod, REG_HEADROOM))
+    # THE ACC VARIANTS TOO. variants.py raises regcnt for the accumulator rungs, and that
+    # number was set to top+1 before the headroom rule existed -- so walk and pts faulted at
+    # launch on the same run that confirmed the production kernel at 128, with this script
+    # reporting OK because it only ever looked at the production top.
+    try:
+        acc = int(re.search(r"ACC_REGCNT\s*=\s*ACC_TOP\s*\+\s*(\d+)",
+                            open("variants.py").read()).group(1)) + top
+    except Exception:                           # noqa: BLE001 -- absent or restructured
+        acc = None
+    if acc is not None:
+        print("acc-variant regcnt           : %d  (headroom %d above R%d)"
+              % (acc, acc - top, top))
+        if acc - top < REG_HEADROOM:
+            bad.append("variants.py raises regcnt to %d for the acc rungs, only %d above R%d; "
+                       "needs %d -- walk and pts FAULT at launch" % (acc, acc - top, top,
+                                                                     REG_HEADROOM))
     print("blocks/SM at 256 threads     : %d  (needs regcnt <= 128)" % (65536 // (regcnt * 256)))
     return bad
 
@@ -174,11 +190,22 @@ def check_cubin(path, _unused_regcnt):
         return ["%s: no REG in -res-usage -- cannot check" % path]
     used = {int(x) for x in re.findall(r"\bR(\d+)\b", sass)}
     over = sorted(r for r in used if r >= declared)
-    print("%-28s max R%-4d declared %-4d %2d blk/SM  %s"
-          % (path, max(used), declared, 65536 // (declared * 256),
-             "OK" if not over else "OVER: " + str(over)))
+    # HEADROOM AGAINST THE CUBIN'S OWN NUMBERS, not against the source table. This is the
+    # check that does not need to know where the count came from -- main.asm's KERNEL line,
+    # variants.py's ACC_REGCNT, or a sweep script's sed -- and it is the one that would have
+    # caught the walk/pts fault. Everything the table check knows can be true while the cubin
+    # that actually launches is built at a different number.
+    head = declared - max(used)
+    print("%-28s max R%-4d declared %-4d headroom %-3d %2d blk/SM  %s"
+          % (path, max(used), declared, head, 65536 // (declared * 256),
+             "OK" if not over and head >= REG_HEADROOM else
+             "OVER: " + str(over) if over else "HEADROOM %d" % head))
     if over:
         return ["%s names %s at or above its declared regcnt %d" % (path, over, declared)]
+    if head < REG_HEADROOM:
+        return ["%s declares %d with R%d used -- headroom %d, needs %d. This LOADS, "
+                "DISASSEMBLES and FAULTS at launch with ILLEGAL_INSTRUCTION"
+                % (path, declared, max(used), head, REG_HEADROOM)]
     return []
 
 

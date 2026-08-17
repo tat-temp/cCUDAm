@@ -118,8 +118,20 @@ def region(lines, name):
 # So: enabling any of these raises regcnt. Getting this wrong is not a build error, it is a
 # kernel that runs and corrupts a neighbour, which is why it is derived from the region list
 # rather than set per variant by hand.
+#
+# THE +1 WAS WRONG AND IT FAULTED. This read `ACC_REGCNT = 136  # R135 is the top of Acc, +1`
+# and it was written before the rule existed: the declared count must clear the highest
+# register used by MORE THAN ONE. At 136 the walk and pts rungs ran with a headroom of 1 and
+# both died with CUDA_ERROR_ILLEGAL_INSTRUCTION, while every other rung -- headroom 4 or more
+# -- passed, on the very run that confirmed the production kernel at 128. Same defect as the
+# one 9455fde fixed in main.asm, in the one place reg_live.py was not looking.
+#
+# 139 gives the same headroom of 4 the production allocation runs at, which is the value
+# actually measured to pass. These two rungs are instruments and already sit above the
+# 128-register occupancy cliff, so the margin costs nothing here.
 ACC_REGIONS = {"ACCINIT", "PACC", "PACCM", "PACCT", "WACC", "WACCT"}
-ACC_REGCNT = 136                          # R135 is the top of Acc, +1
+ACC_TOP = 135                             # the top of Acc
+ACC_REGCNT = ACC_TOP + 4                  # + headroom, NOT + 1 -- see above
 
 
 def build(cut, on):

@@ -333,18 +333,48 @@ KERNEL TestKernel(regcnt=128, \
 // landed. It happens to work -- the LDCU is fifteen instructions back -- which is exactly
 // what makes it worth writing down rather than leaving to luck. Barrier 2 is re-armed by
 // the Scal loads immediately below and drained again at the Scal write-back.
-    [B--2---:R-:W0:-:S01]    LDG.E.64 PntX0, desc[uDesc][AddrX.64]
-    [B------:R-:W0:-:S01]    LDG.E.64 PntX2, desc[uDesc][AddrX.64+0x8]
-    [B------:R-:W0:-:S01]    LDG.E.64 PntX4, desc[uDesc][AddrX.64+0x10]
-    [B------:R-:W0:-:S01]    LDG.E.64 PntX6, desc[uDesc][AddrX.64+0x18]
-    [B------:R-:W1:-:S01]    LDG.E.64 PntY0, desc[uDesc][AddrY.64]
-    [B------:R-:W1:-:S01]    LDG.E.64 PntY2, desc[uDesc][AddrY.64+0x8]
-    [B------:R-:W1:-:S01]    LDG.E.64 PntY4, desc[uDesc][AddrY.64+0x10]
-    [B------:R-:W1:-:S01]    LDG.E.64 PntY6, desc[uDesc][AddrY.64+0x18]
-    [B------:R-:W2:-:S01]    LDG.E.64 Scal0, desc[uDesc][AddrS.64]
-    [B------:R-:W2:-:S01]    LDG.E.64 Scal2, desc[uDesc][AddrS.64+0x8]
-    [B------:R-:W2:-:S01]    LDG.E.64 Scal4, desc[uDesc][AddrS.64+0x10]
-    [B------:R-:W2:-:S01]    LDG.E.64 Scal6, desc[uDesc][AddrS.64+0x18]
+//
+// R4 ON ALL TWELVE, AND IT IS THE SAME RULE AS THE STORE READ BARRIER -- APPLIED TO THE
+// ADDRESS INSTEAD OF THE DATA. An LDG does not read its address register at issue any more
+// than an STG reads its data register at issue: the LSU reads both later, and `R-` says
+// nothing about when. AddrX/AddrY/AddrS are overlay A, and everything below reuses that span
+// -- the ladder's Rinv sits on R32..R39 and the write-back rebuilds all three from scratch --
+// so without this the loads can resolve against an address written after they issued.
+//
+// IT IS NOT THEORETICAL. This cost a wrong answer on 2026-08-17: `id`, the shortest rung, has
+// exactly three instructions between the last Scal load and the LDC that rebuilds AddrS, and
+// start_scalars came back wrong on 255 of 256 threads. `local` is the identical kernel plus
+// five instructions in that gap and it passed; every longer rung has thousands there and
+// passed. A hazard visible only on the shortest rung of the ladder is the strongest possible
+// argument for a static checker, and barrier_check.py had been reading a store's data operand
+// while ignoring a load's address one.
+//
+// Barrier 4 was the only one free: 0/1/2 carry these loads' data, 3 the address LDCs, 5 the
+// batch-loop constants. One read barrier for all twelve is right rather than one per group --
+// a barrier is a counter, the wait drains all twelve, and the twelve are one group by any
+// reading. ptxas puts twelve LDGs on one barrier in the stage-2d kernels.
+    [B--2---:R4:W0:-:S01]    LDG.E.64 PntX0, desc[uDesc][AddrX.64]
+    [B------:R4:W0:-:S01]    LDG.E.64 PntX2, desc[uDesc][AddrX.64+0x8]
+    [B------:R4:W0:-:S01]    LDG.E.64 PntX4, desc[uDesc][AddrX.64+0x10]
+    [B------:R4:W0:-:S01]    LDG.E.64 PntX6, desc[uDesc][AddrX.64+0x18]
+    [B------:R4:W1:-:S01]    LDG.E.64 PntY0, desc[uDesc][AddrY.64]
+    [B------:R4:W1:-:S01]    LDG.E.64 PntY2, desc[uDesc][AddrY.64+0x8]
+    [B------:R4:W1:-:S01]    LDG.E.64 PntY4, desc[uDesc][AddrY.64+0x10]
+    [B------:R4:W1:-:S01]    LDG.E.64 PntY6, desc[uDesc][AddrY.64+0x18]
+    [B------:R4:W2:-:S01]    LDG.E.64 Scal0, desc[uDesc][AddrS.64]
+    [B------:R4:W2:-:S01]    LDG.E.64 Scal2, desc[uDesc][AddrS.64+0x8]
+    [B------:R4:W2:-:S01]    LDG.E.64 Scal4, desc[uDesc][AddrS.64+0x10]
+    [B------:R4:W2:-:S01]    LDG.E.64 Scal6, desc[uDesc][AddrS.64+0x18]
+// The drain, and it has to live HERE rather than at each of the places that clobber overlay A.
+// Those differ per variant -- the write-back for the four rungs with no body, the ladder's
+// first Rinv write for the six with one -- and a rule enforced in six places is a rule with
+// six chances to be forgotten. One wait immediately after the group covers every variant, and
+// it is OUTSIDE every region marker so no variant can cut it.
+//
+// It is also nearly free, which is the part worth stating: a READ barrier signals when the
+// operands were collected, not when the data returns. This waits for twelve addresses to be
+// read, once per kernel launch -- not for twelve loads to complete.
+    [B----4-:R-:W-:-:S01]    NOP
 
 //---- rem is gone, and the `if (rem == 0) return` with it --------------------------
 // GpuCore.cu:162 bails on a zero count and :200 makes `ge256_u64(rem, B)` half the loop

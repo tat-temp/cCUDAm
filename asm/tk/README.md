@@ -98,9 +98,17 @@ python3 reg_live.py main.asm TestKernel*.cubin
 ```
 
 It reports the allocation, then fails on: two names overlapping **within one overlay** (or
-against `persistent`, which is live everywhere), a multi-register name on an odd base, and any
+against `persistent`, which is live everywhere), a multi-register name on an odd base, any
 cubin naming a register at or above **its own** declared count — read from `-res-usage`, not from
-`main.asm`, because `variants.py` legitimately raises `regcnt` to 136 for the accumulator rungs.
+`main.asm`, because `variants.py` legitimately raises `regcnt` for the accumulator rungs — and
+**headroom below 3 on that same per-cubin basis**.
+
+That last check exists because the first version did not have it and the ladder faulted anyway.
+It checked headroom against the *table*, where the production top is R124 at a declared 128, and
+reported OK — while `variants.py` was building `walk` and `pts` at 136 with R135 used, headroom
+1, and both died at launch with `ILLEGAL_INSTRUCTION` on the run that confirmed everything else.
+A check that reads the source table cannot see a count the source table does not contain. **The
+cubin carries the number the driver acts on; check that one.**
 
 Widths are **declared, not inferred from the distance to the next name**. Inferring is precisely
 what hid the `Ro8` bug: the table said eight, and the table was the thing being checked.
@@ -111,12 +119,19 @@ diagnosis.
 
 ### `Acc` sits above `regcnt` on purpose
 
-The bisect accumulator lives at R128..R135, outside the declared 127. That is safe only because
+The bisect accumulator lives at R128..R135, outside the declared 128. That is safe only because
 it is named exclusively inside gated regions, so the production kernel never touches it;
-`variants.py` raises `regcnt` to 136 for the rungs that switch those regions on, derived from the
-region list rather than set by hand. Keeping it inside 127 is arithmetically impossible —
+`variants.py` raises `regcnt` to **139** for the rungs that switch those regions on, derived from
+the region list rather than set by hand. Keeping it inside 128 is arithmetically impossible —
 persistent 34 + 9 + 9 + 73 + 8 already exceeds it — and deleting the instrument to hit a number
 would be trading a check for a benchmark.
+
+**139, not 136, and the 3 is the whole point.** That constant read `ACC_TOP + 1` because it was
+written before the headroom rule existed, and it is what made `walk` and `pts` the only two rungs
+to fault on 2026-08-17 — the same defect as the production kernel's, surviving in the one file
+that carries its own register count. It is now `ACC_TOP + 4`, matching the headroom the
+production allocation actually runs at. These two rungs are instruments and already sit above the
+128-register occupancy cliff, so the margin costs nothing.
 
 ## Speed — RTX 5090, 170 SMs
 
@@ -512,8 +527,9 @@ validation-only, and `__updateSymtab` copies `st_info` verbatim from the source 
   was happy, `cuobjdump` disassembled it cleanly, and alignment, stalls and barriers all
   passed. Every instruction was right; a register was uninitialised. `./pc_check.py` is
   that rule.
-- **A store needs a READ barrier if its data registers are rewritten later.** A store does
-  not read its data at issue — the LSU reads it later, and `R-` says nothing about when.
+- **A memory op needs a READ barrier if its SOURCE registers are rewritten later — a store's
+  data *and* a load's address.** Neither is read at issue — the LSU reads them later, and
+  `R-` says nothing about when.
   Rewrite the register first and the store writes the *new* value. This is the one that
   broke the ladder after the loop was fixed, and the shape of the failure is worth keeping:
   `Px` was **exact** while `Py` was wrong, because the accumulator never leaves registers
@@ -526,6 +542,24 @@ validation-only, and `__updateSymtab` copies `st_info` verbatim from the source 
   rewritten later and which carries none. Enforced by `./barrier_check.py`, which also
   found the same omission in the **passing** `local` variant, where the `LDL` pair rewrites
   the registers the `STL` pair is storing.
+
+  **The load half cost a wrong answer before the rule was widened to cover it.** The prologue's
+  twelve `LDG`s carried `R-`, and everything below reuses overlay A — the ladder's `Rinv` sits
+  on R32..R39 and the write-back rebuilds `AddrX`/`AddrY`/`AddrS` from scratch. On `id`, the
+  shortest rung, exactly **three** instructions separate the last `Scal` load from the `LDC`
+  that overwrites its address, and `start_scalars` came back wrong on **255 of 256** threads.
+  `local` is the identical kernel plus five instructions in that gap and passed; every longer
+  rung has thousands there and passed. A hazard only the shortest rung is short enough to expose
+  is the argument for static checking, and the checker had been reading a store's data operand
+  while ignoring a load's address one. Fixed with `R4` on all twelve and one `NOP` draining it.
+
+  **A wait on the WRITE barrier clears it too**, and leaving that out is what made the widened
+  check fail ptxas's own output on its first run: if the data has come back, the address was
+  necessarily read. Measured over the compiled corpus — 54 `LDC`, 12 `LDG` and 8 `LDL` rewrite a
+  source with no read barrier anywhere, and every one waits the write barrier first. What the
+  corpus does *not* support is a distance threshold: unprotected loads go down to **6 cycles**
+  and protected ones up to **117**, so the two populations overlap and proximity is not the
+  discriminator. Stores are the unambiguous case — 28 of 28 carry a read barrier.
 - **A guarded branch needs THIRTEEN cycles after its predicate is written.** Not the five
   an ALU consumer needs — a branch reads its guard far earlier in the pipeline. Measured,
   and about as clean as evidence gets here: across 41 predicate-producer → guarded-branch
