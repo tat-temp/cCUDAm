@@ -1403,6 +1403,54 @@ Two consequences:
   host item already filed above**, it is required for the hand-written kernel regardless of what
   `GpuCore.cu` does, and it is the only version of "remove `rem`" with anything behind it.
 
+### Three minutes a side, interleaved — the lead holds, the absolutes do not — 2026-08-17
+
+The long run. 174,080 threads, `loop` mode, **6,061 launches per side**, A and B alternating so
+both sit in one thermal envelope:
+
+| | best | median | worst | spread |
+|---|---:|---:|---:|---:|
+| A — `GpuCore_nohash` | 28.9480 ms | 32.3882 ms | 32.6581 ms | 12.8% |
+| B — `TestKernel_loop` | 22.7273 ms | 25.0508 ms | 25.2532 ms | 11.1% |
+| **B/A** | **0.785** | **0.773** | | |
+
+**The lead is confirmed and is now the best-supported number in this document.** 21.5% on best,
+22.7% on median, the two ratios 1.5% apart — inside the harness's own 2% threshold, which is what
+says the run was thermally clean. The previous best-of-5 gave 0.778, dead centre between them.
+Both sides also pass the absolute anchor the throttle section demands: A best 28.95 against 29.42
+a session ago, B 22.73 against 22.89 — 1.6% and 0.7%. Same card, same state, not a repeat of the
+bad session.
+
+**But the distribution is the finding, and it costs every absolute number in this document ~12%.**
+On both sides the median sits ~11% *above* best and within 1% of *worst*. That is not noise around
+a central value — it is a card that runs at its peak clock for the first handful of launches and
+then settles, for the remaining ~6,000, at a sustained clock about 12% lower. Best-of-N reports the
+transient. So `28.95 ms` is what this kernel does on a cold card and `32.39 ms` is what it does in
+a real run, and every wall-clock figure recorded above — 8.03, 22.84, 29.14, 74.02 — is a cold-card
+peak of the same kind. **The ratios are unaffected; the absolutes are optimistic by about an
+eighth.**
+
+**Why the ratio survived a 12% clock drop when the throttled session's did not.** There the two
+sides differed in what bound them (calls and branches against memory), so slowing the core while
+memory kept its pace changed the *mix* and compressed the difference to less than half its size.
+Here both sides are the same points-only work at `REG 128` and 2 blocks/SM, bound by the same
+thing, and they lose 11.9% and 10.2% respectively — near-equal, so the ratio holds. That is the
+condition under which "measured back to back" is worth something, stated properly at last: not
+*same run*, but *same binding constraint*. B losing slightly less also means the lead grows a
+little under sustained load rather than shrinking, 21.5% → 22.7%.
+
+**The whole-program projection is unchanged at ~8.8%**, because numerator and denominator scale
+together: 7.34 ms saved on a full kernel that, at the same ~12% derate, sustains ~83 ms rather
+than the 74.02 recorded.
+
+**One bias worth naming, and it runs against A.** `NO_HASH` folds every candidate x-coordinate
+into a sink — five XOR per point, ~5,100 instructions per batch against ~1.24M — which the
+hand-written kernel does not carry. That is ~0.4%, so the honest lead is nearer **21%** than 21.5%.
+It cannot be removed without also removing the thing that stops nvcc deleting the walk.
+
+Correctness came back clean at this duration too: 174,080 of 174,080 EXACT on both sides, every
+output limb agreeing, across 12,122 launches with no fault and no drift.
+
 ### The throttle — and what it voids
 
 `GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago
