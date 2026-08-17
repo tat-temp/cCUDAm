@@ -133,6 +133,24 @@ that carries its own register count. It is now `ACC_TOP + 4`, matching the headr
 production allocation actually runs at. These two rungs are instruments and already sit above the
 128-register occupancy cliff, so the margin costs nothing.
 
+## `TestKernel_occ255.cubin` — the occupancy control
+
+`TestKernel_loop.cubin` with `regcnt` 255 and **nothing else changed**: same 3278 instructions,
+byte-identical stream, only the declared count. That is the one thing standing between 1 and 2
+resident blocks per SM, so A/B-ing the two isolates the occupancy payoff from instruction count,
+scheduling and session drift at once.
+
+```bash
+./abtest ../../asm/tk/TestKernel_occ255.cubin ../../asm/tk/TestKernel_loop.cubin 174080 5 loop
+```
+
+**It has to be run at a grid of at least 340 blocks or it measures nothing.** At grid 170 on a
+170-SM card one block lands per SM whichever build it is — `BLOCKS/SM` in the harness is
+*capacity*, not occupancy, and the second slot is never populated. The first occupancy-matched
+run was done at 43520 threads for exactly this reason and could not have shown a difference:
+B moved +1.0% against the previous session's 255-register build and A moved +2.2%, i.e. session
+drift on both. 174080 threads is 680 blocks — two waves at 2 blk/SM against four at 1.
+
 ## Speed — RTX 5090, 170 SMs
 
 Measured once the accumulator was out, `loop` mode, four batches, best of five launches, verified
