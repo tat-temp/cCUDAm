@@ -504,7 +504,7 @@ int main(int argc, char** argv)
 
 	if (argc == 2 && !strcmp(argv[1], "--selftest")) return 0;
 	if (argc < 3) {
-		printf("usage: %s <cubinA> <cubinB> [threads] [iters|Ns] [mode] [batch]\n", argv[0]);
+		printf("usage: %s <cubinA> <cubinB> [threads] [iters|Ns] [mode] [batch] [bpl]\n", argv[0]);
 		printf("       iters = launch count, or `180s` for 180 seconds PER SIDE\n");
 		printf("       launches are INTERLEAVED A,B,A,B so both sides see one thermal envelope\n");
 		printf("       mode = mul (1b) | sufp (2a) | inv (2b) | walk (2c-i) | pts (2c-ii)\n");
@@ -512,6 +512,9 @@ int main(int argc, char** argv)
 		printf("       batch = keys per batch, even, 2..1024 (default 1024). BOTH sides get the\n");
 		printf("               same value -- P2 compares two FRAME sizes at one batch size, and\n");
 		printf("               a per-side batch would make the A/B limb diff meaningless.\n");
+		printf("       bpl   = batches per launch, `loop` mode only (default 4). Hold batch*bpl\n");
+		printf("               fixed when comparing batch sizes: a shorter launch leaves the card\n");
+		printf("               idle for more of each round and therefore cooler.\n");
 		printf("       %s --selftest        (oracle only, no GPU needed)\n", argv[0]);
 		return 1;
 	}
@@ -563,6 +566,21 @@ int main(int argc, char** argv)
 		printf("batch must be even and in 2..1024 (got %u)\n", batchArg);
 		return 1;
 	}
+	// Batches per launch, `loop` mode only. Exists so batch*BPL -- the work a launch does, and
+	// therefore how much of each round the card spends idle between H2D copies -- can be held
+	// fixed while the batch varies. See where BPL is used.
+	const unsigned bplArg = (argc > 7) ? (unsigned)strtoul(argv[7], nullptr, 0) : 4u;
+	if (bplArg < 1) { printf("bpl must be at least 1\n"); return 1; }
+	// Checked HERE rather than beside BPL's declaration, because that sits after cuInit and an
+	// argument error should not need a driver to be reported. rem is seeded at 0x4000 keys; ask
+	// for more than that per launch and rem, not bpl, decides the trip count -- so the run would
+	// quietly measure a different number of batches than the one on the command line.
+	if ((uint64_t)batchArg * bplArg > 0x4000ull) {
+		printf("batch * bpl = %llu exceeds the 0x4000-key rem seed, so rem would become the "
+		       "loop limiter instead of bpl\n",
+		       (unsigned long long)batchArg * bplArg);
+		return 1;
+	}
 	printf("mode   : %s\n", loopm ? "loop (stage 2d -- the outer batch loop)"
 	                      : jumpm ? "jump (stage 2d -- the point jump)"
 	                       : ptsm ? "pts  (stage 2c-ii -- the +/- point arithmetic)"
@@ -594,6 +612,9 @@ int main(int argc, char** argv)
 	// result can be quoted without it.
 	printf("batch  : %u keys/batch  (half %u)   subp[] TOUCHED per batch: %u B/thread\n",
 	       batchArg, batchArg >> 1, (batchArg >> 1) * 32u);
+	if (loopm)
+		printf("         %u batches/launch -> %u keys/thread/launch  (hold this fixed when "
+		       "comparing batch sizes)\n", bplArg, batchArg * bplArg);
 	// Every run before this one was a single block, so gid == threadIdx.x and the BlockID term
 	// of `IMAD gID, BlockID, 0x100, ThrID` was multiplied by zero. Say so when it stops being.
 	if (grid == 1)
@@ -648,7 +669,14 @@ int main(int argc, char** argv)
 	// three re-entries into the ladder with a point the previous batch produced. One would
 	// run the loop body once and prove only that the branch was taken. Declared beside BATCH
 	// because the oracle and the launch must agree on it -- the same reason BATCH is.
-	const unsigned BPL = loopm ? 4u : 1u;
+	const unsigned BPL = loopm ? bplArg : 1u;
+	// A launch's DURATION is batch * BPL, and it is not a free parameter: the harness re-uploads
+	// four 5.6 MB buffers between rounds, so a short launch spends a larger fraction of the round
+	// with the card idle and therefore cooler. At batch 1024 x 4 that idle share is ~3%; at
+	// batch 256 x 4 it is ~10%, which moves the clock by more than any effect worth measuring
+	// here. Comparing two batch sizes therefore means holding batch*BPL fixed -- 256 x 16 against
+	// 1024 x 4 -- and the whole reason BPL is an argument is to make that possible.
+	// (batch*bpl is bounds-checked against the rem seed up with the other argument validation.)
 
 	std::vector<uint64_t> gx(half * 4), gy(half * 4);
 	for (size_t i = 0; i < gx.size(); i++) { gx[i] = rnd64(); gy[i] = rnd64(); }

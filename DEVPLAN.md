@@ -1659,6 +1659,63 @@ sizing question, it interacts with a real `threadsTotal` cap, and `abtest` canno
 the harness sets its own grid. Whatever this run says about the clock, the reservation half of P2
 remains open and is not answered by it.
 
+### P2's frame half is null, and the batch half was measured wrong — RTX 5090, 2026-08-17
+
+`GpuCore_b1024` against `GpuCore_b256`, **both at batch 256**, 174,080 threads, 8,616 launches
+per side:
+
+| | `LOCAL` | best | median | worst | spread |
+|---|---:|---:|---:|---:|---:|
+| A — frame sized for 1024 | 16,384 | 18.6074 ms | 19.9069 ms | 20.0918 ms | 8.0% |
+| B — frame sized for 256 | **4,096** | 18.7128 ms | **19.8996 ms** | 20.0294 ms | 7.0% |
+| **B/A** | | 1.006 | **1.000** | | |
+
+**The frame is worth exactly nothing on the clock, as predicted.** A 4× smaller local allocation —
+16 KB → 4 KB per thread — moves the median by 0.04%, inside a noise floor measured at 0.031%. Both
+sides 174,080 of 174,080 EXACT, every limb agreeing. So the unused tail of the allocation costs
+nothing: no page-table reach effect, no stride effect through L2. **P2's speed case, as filed, is
+answered and it is a no.** What remains of P2 is the reservation, which is a capacity matter and is
+not measurable here at all.
+
+**The batch half is a different question and this run does not answer it — the comparison I set up
+was confounded.** Per key it looks like a win: 80.0824 ms over 713.0M keys at batch 1024 against
+19.9069 over 178.3M at batch 256 is 1.1231e-7 versus 1.1167e-7 ms/key, i.e. **0.57% faster** at the
+smaller batch, where the arithmetic predicts ~0.1% *slower* from amortizing one `inv_mod` and the
+tail block over a quarter as many keys. That would be a real locality win of ~0.7%.
+
+**It is not safe to read it that way, because launch duration is not a free variable.** The harness
+re-uploads four 5.6 MB buffers between rounds, ~2.2 ms, and the card is idle for that. At
+batch 1024 × 4 the launch is 80 ms and the idle share of a round is ~3%; at batch 256 × 4 the
+launch is 19.9 ms and it is ~10%. Seven points more idle means a cooler card and a higher clock,
+and it runs in **exactly the direction of the result**. The measured effect is 0.57% and the
+confound is plausibly larger than that. The duty cycle is visible in the output that was already
+there: spread 8.0% here against 6.2-6.3% in the batch-1024 runs.
+
+This is the same class of error the throttle section records, in a new costume — there the bias
+came from run order, here from launch length — and the general form is worth stating once:
+**anything that changes how hard the card is worked changes the clock, so it is a variable and has
+to be held fixed like any other.** Batch size changes work per launch; therefore batch size cannot
+be varied alone.
+
+**Fixed rather than caveated.** `abtest` gained a `[bpl]` argument, so `batch × bpl` — the work a
+launch does — can be held constant while the batch varies:
+
+```
+./abtest GpuCore_b1024.cubin GpuCore_b256.cubin 174080 180s loop 256 16
+```
+
+256 × 16 is 4,096 keys per thread per launch, the same as the 1024 × 4 the four P3 runs measured,
+so side A's median becomes directly comparable to the 80.07-80.09 ms anchor with the duty cycle
+matched. It is bounds-checked against the 0x4000-key `rem` seed before `cuInit`, because past that
+point `rem` rather than `bpl` decides the trip count and the run would quietly measure a different
+number of batches than the command line asked for.
+
+**Why it is worth another six minutes rather than a shrug.** The batch is the only half of P2 with
+a mechanism behind it, and it is the last live test of *hypothesis 1* — the standing claim, going
+back to the 11% measurement, that the 16 KB frame and the `subp[]` round trip are what actually
+bind this kernel. Cutting the reuse distance 4× is the direct experiment. If that is null too,
+hypothesis 1 is dead and the kernel's residual is unexplained by anything currently written down.
+
 ### The throttle — and what it voids
 
 `GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago
