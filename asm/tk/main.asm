@@ -187,12 +187,11 @@
 // -- two pipes, so the pairs dual-issue instead of queueing. Kernel02 already ships that
 // idiom as a FUNCTION and asm/tk/inc.asm now carries it, so the kernel names it once.
 //
-// IT COSTS STALL CYCLES AT SIX OF THE EIGHT, and the number is here rather than in a commit
-// message because it is the only thing about this change that is not free. A FUNCTION body
-// carries fixed control codes, and RCAsm parameters rename register indices only -- they
-// cannot reach a stall count (compiler.py:603 rejects a parameter whose name does not start
-// with R/UR/P/C, and utils.add_offset only ever rewrites `Name<digits>`). So every site
-// takes Copy256's S05 tail:
+// IT COSTS STALL CYCLES AT SIX OF THE EIGHT -- AND MEASURED, THOSE CYCLES ARE FREE (below).
+// A FUNCTION body carries fixed control codes, and RCAsm parameters rename register indices
+// only -- they cannot reach a stall count (compiler.py:603 rejects a parameter whose name
+// does not start with R/UR/P/C, and utils.add_offset only ever rewrites `Name<digits>`).
+// So every site takes Copy256's S05 tail:
 //
 //     :617  MulA<-MulR  S02 -> S05   suffix-product loop, 511x per batch
 //     :695  Inv <-MulR  S05 -> S05   byte-identical
@@ -203,11 +202,28 @@
 //
 // SAFE BY CONSTRUCTION IN THE DIRECTION THAT MATTERS: S05 is the longest tail any of the
 // eight had, so this only ever LENGTHENS a stall. A shortened one is what reads a stale
-// register, and none is shortened. The cost is ~3,080 stall cycles per batch, essentially
-// all of it the two 511x sites, against a batch's ~655,000 instructions -- and whether that
-// is visible at all depends on whether another warp had something to issue, which is not
-// something to reason about offline. It is an A/B, and the A side is the committed
-// TestKernel_loop.cubin.
+// register, and none is shortened.
+//
+// THE COST, MEASURED -- RTX 5090, 174,080 threads, 180 launches a side, 2026-08-18. The
+// control was a build of this file with the eight sites expanded back to their original
+// tails: 3,248 instructions both, ZERO instruction-text differences, and exactly six
+// encoded differences all six in the control word's stall field. Nothing else could move.
+//
+//     A  original per-site stalls    median 23.8689 ms    best 22.8018 ms
+//     B  Copy256 (this file)         median 23.8797 ms    best 22.5626 ms
+//                                    B/A 1.000 on the median, 0.990 on the best
+//
+// ~3,080 added stall cycles per batch, and the two estimators disagree by more than the
+// effect -- it is inside a 6.5% run-to-run spread and cannot be resolved. Both sides came
+// back 174,080/174,080 EXACT with every output limb agreeing, which is the other half of
+// what the A/B was for: the eight substitutions are semantically inert ON HARDWARE and not
+// merely by inspection of the emitted stream. The null is what this kernel's other
+// measurements predict -- at 2 blocks/SM another warp had something to issue, and halving
+// the field-math instruction count bought only 11%.
+//
+// SO DO NOT HAND-EXPAND THESE BACK to recover the stalls. It buys nothing measurable and it
+// restores eight separate transcriptions of one hand-scheduled idiom, which is the exact
+// shape of three of the four defects in asm/tk/README.md.
 //
 // SubMod256 *is* alias-safe and is used that way (Ro=RFirst) to save a copy: it is a
 // straight elementwise pass in increasing index order, so instruction k writes Ro_k in

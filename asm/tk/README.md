@@ -89,13 +89,35 @@ passed every offline checker, loaded, ran, and returned wrong numbers.
 `main.asm` had eight open-coded 8-word copy blocks — the same alternating `IMAD`/`MOV` idiom
 written out eight times. They are now `inc_func Copy256(Ri=…, Ro=…)`.
 
-**Six of the eight gained stall cycles and it is not free.** A `FUNCTION` body carries fixed
-control codes and RCAsm parameters rename register indices only — they cannot reach a stall
-count (`compiler.py:603` rejects a parameter whose name does not begin `R`/`UR`/`P`/`C`, and
+**Six of the eight gained stall cycles.** A `FUNCTION` body carries fixed control codes and
+RCAsm parameters rename register indices only — they cannot reach a stall count
+(`compiler.py:603` rejects a parameter whose name does not begin `R`/`UR`/`P`/`C`, and
 `utils.add_offset` only rewrites `Name<digits>`). So every site takes `Copy256`'s `S05` tail,
 which was the longest of the eight: **no stall is shortened**, which is the direction that
 reads a stale register. Two of the six sit in 511×-per-batch loops, for ~3,080 added stall
 cycles per batch against a batch's ~655,000 instructions.
+
+**And measured, they cost nothing** — RTX 5090, 174,080 threads, 180 launches a side,
+2026-08-18. The control was this file's kernel with the eight sites expanded back to their
+original tails: **3,248 instructions both, zero instruction-text differences, and exactly six
+encoded differences, all six in the control word's stall field.** Nothing else could move.
+
+| | median | best |
+|---|---:|---:|
+| A — original per-site stalls | 23.8689 ms | 22.8018 ms |
+| B — `Copy256` | 23.8797 ms | 22.5626 ms |
+| **B/A** | **1.000** | **0.990** |
+
+The two estimators disagree by more than the effect, so it is inside a 6.5% run-to-run spread
+and unresolvable — which is the answer this kernel's other measurements predict: at 2 blocks/SM
+another warp had something to issue, and halving the field-math instruction count bought only
+11%. Both sides came back **174,080/174,080 EXACT with every output limb agreeing**, which is
+the other half of what the A/B was for — the eight substitutions are semantically inert *on
+hardware*, not merely in the emitted stream.
+
+So `Copy256` stays, and the control is deleted rather than carried. Do not hand-expand these
+back to recover the stalls: it buys nothing measurable and it restores eight transcriptions of
+one hand-scheduled idiom, which is the exact shape of three of the four defects below.
 
 ### Verified without a GPU, and this is the whole of the evidence
 
@@ -123,14 +145,12 @@ The `InvMod256_6` → `InvMod256_8` relabelling that shows up in the raw diff is
 per-expansion counter, bumped by the two `Copy256` expansions that now precede the call site.
 It renames labels and no code.
 
-> **Six of the ten committed `TestKernel*.cubin` are older than `main.asm` and must be
-> rebuilt** — `sufp`, `inv`, `walk`, `pts`, `jump`, `loop`, plus `TestKernel.cubin` and
-> `TestKernel_occ255.cubin`, which derive from `loop`. They carry the six shorter stalls.
-> They are still *correct* — they are the exact images that passed on hardware — but they are
-> no longer what `main.asm` says, so the ladder currently tests the old code. Rebuild through
-> `variants.py` + `build.sh`, re-run the four checkers, and re-run the ladder before quoting
-> a result or a time. **`id`, `local`, `call` and `full` are unaffected**: those stages
-> contain no copy block, and their streams came out identical.
+**All twelve committed cubins were rebuilt from this source** on 2026-08-18, so the ladder
+tests what `main.asm` says. `TestKernel.cubin` came out byte-identical to
+`TestKernel_loop.cubin`, which is the internal check that the default build and the `loop`
+rung are the same kernel. Anything edited here afterwards has been comment-only; the moment a
+line of code changes, they are stale again and `variants.py` is no longer in the tree to
+regenerate the nine ladder rungs — `git log --diff-filter=D` is where it lives now.
 
 ## Status
 
