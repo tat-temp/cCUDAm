@@ -1802,16 +1802,15 @@ otherwise use, and **C8 now has a local file to land in.** `MulMod256`/`SqrMod25
 conditional subtract has to be fixed before the hash layer returns, and it was previously a change
 to a vendored source shared with Kernel02.
 
-**`main.asm`'s eight open-coded copy blocks are now `inc_func Copy256`** — 64 lines to 8. Six of the
-eight gained stall cycles: a `FUNCTION` body carries fixed control codes, and RCAsm parameters
-rename register indices only — they cannot reach a stall count (`compiler.py:603` rejects a
-parameter whose name does not begin `R`/`UR`/`P`/`C`, and `utils.add_offset` only rewrites
-`Name<digits>`). So every site takes `Copy256`'s `S05` tail. **`S05` was the longest of the eight,
-so no stall is shortened** — a shortened one is what reads a stale register. Two of the six sit in
-511×-per-batch loops: ~3,080 added stall cycles per batch against ~655,000 instructions, and
-whether that is visible depends on whether another warp had something to issue, which is not
-answerable offline. **It was answered on hardware and the answer is no** — see *The Copy256 stalls
-are free* below.
+**`main.asm`'s eight open-coded copy blocks became `inc_func Copy256`** — 64 lines to 8 — **and
+were put back two commits later.** Six of the eight gained stall cycles: a `FUNCTION` body carries
+fixed control codes, and RCAsm parameters rename register indices only — they cannot reach a stall
+count (`compiler.py:603` rejects a parameter whose name does not begin `R`/`UR`/`P`/`C`, and
+`utils.add_offset` only rewrites `Name<digits>`). So every site takes `Copy256`'s `S05` tail.
+**`S05` was the longest of the eight, so no stall is shortened** — a shortened one is what reads a
+stale register, which is what makes this a cost question rather than a correctness one. Two of the
+six sit in 511×-per-batch loops: ~3,080 added stall cycles per batch. See *The `Copy256` stalls
+could not be measured* below for what that turned out to be worth and why the sharing was reverted.
 
 **Verified without a GPU, and completely.** `compile_code(liness, is_inject=False)` returns at
 `compiler.py:201` — after `check_code`, `get_units` and `compile_kernel`, before anything needing
@@ -1862,7 +1861,16 @@ control codes, and `uCallM` left the KERNEL parameter list. Deleting 25 instruct
 producer→consumer distances, so the guard was a full violation-set comparison by instruction text
 rather than by address: **278 violations on both sides, identical multiset, zero new, zero gone.**
 
-### The `Copy256` stalls are free — RTX 5090, 2026-08-18
+### The `Copy256` stalls could not be measured — RTX 5090, 2026-08-18
+
+> **This section first read "the `Copy256` stalls are free" and that was over-claimed.** The
+> measurement is null; the effect is not zero. The predicted effect was **0.19%** and the harness's
+> own output shows a noise floor around **1.1%**, so the experiment could not have detected it even
+> if it were exactly as predicted — which should have been computed before the GPU time was spent,
+> not after. The sharing was reverted on that basis: a cost bounded at 0.19% that buys nothing is
+> not worth carrying, and that is a different statement from "it was free". Corrected below; the
+> A/B numbers and the correctness result are unchanged.
+
 
 The A/B the section above called for, and the cleanest isolation this project has managed. The
 control is `main.asm` with the eight `inc_func Copy256` expanded back to open-coded blocks carrying
@@ -1879,19 +1887,48 @@ identical everywhere else. Sharper than the `occ255` control, which at least cha
 | B — `Copy256` | 23.8797 ms | 22.5626 ms | 6.5% |
 | **B/A** | **1.000** | **0.990** | |
 
-**Null.** ~3,080 added stall cycles per batch, and the two estimators disagree by more than the
-effect — it sits inside the run-to-run spread and cannot be resolved. Both sides came back
-**174,080/174,080 EXACT with every output limb agreeing**, which is the other half of what the A/B
-was for: the eight substitutions are semantically inert *on hardware*, not merely in the emitted
-stream I had diffed offline. `Copy256` stays; the control was deleted rather than carried.
+**Null — and under-powered.** The two estimators disagree by 1.1%, and they disagree *in sign*:
+adding stalls cannot make a kernel faster, so the `best` column's −1.05% is noise showing its own
+size. Against that floor, here is what was actually being looked for:
 
-**The null is what this kernel's other measurements predict**, which is worth saying because it
-makes this the fourth item in a row to land the same way. At 2 blocks/SM another warp had something
-to issue; halving the field-math instruction count bought 11%; removing 36 indirect branches per
-walk iteration bought 4.9%; P3's two halves and P2's frame half were both null. **This kernel is
-latency-bound, and static issue-side accounting keeps predicting effects the clock does not show.**
-Six stalls out of 3,248 instructions was never going to be the exception, and the value of running
-it was the correctness half plus closing the question rather than carrying it as a doubt.
+| | |
+|---|---:|
+| mean stall over the cubin (measured from the control words) | 2.51 cycles/instr |
+| warp issue-timeline per batch | ~1.65M cycles |
+| added by the six stalls | 3,080 cycles |
+| **predicted effect** | **0.19%** |
+
+and 0.19% is an *upper* bound, reached only if the SM were issue-bound. It is not: a warp needs
+~6.6M issue cycles across a launch it is resident for ~28.6M, so **~77% of a warp's residency goes
+on something other than its own stall counts.** So the experiment could not have resolved the
+effect under any outcome. That is a design error, and a cheap one to avoid — the whole calculation
+above is twenty lines of Python over the cubin, and it belongs *before* the run.
+
+**How to measure it properly, if it ever matters: dose-response, not more iterations.** +1 stall on
+every instruction of the walk body is ~578,000 cycles per batch, a predicted ~35%, far above the
+floor; measure that and interpolate down. Raising the six sites to `S15` only reaches ~0.8% and is
+still under the floor, so that variant is not worth building.
+
+**What the run did establish is not statistical and stands:** both sides **174,080/174,080 EXACT
+with every output limb agreeing**. That is what says the substitution — in either direction — is
+semantically inert *on hardware* and not merely in the emitted stream. It is also what let the
+revert ship without a new GPU run: the rebuilt `TestKernel.cubin` is byte-identical to the `nocopy`
+side of this A/B.
+
+**The null is still what this kernel's other measurements predict**, which is worth saying because
+it makes this the fourth item in a row to land the same way. At 2 blocks/SM another warp had
+something to issue; halving the field-math instruction count bought 11%; removing 36 indirect
+branches per walk iteration bought 4.9%; P3's two halves and P2's frame half were both null. **This
+kernel is latency-bound, and static issue-side accounting keeps predicting effects the clock does
+not show.** The lesson this one adds is the other half of that: *check whether the harness can see
+the effect before spending a run on it.*
+
+**Reverted, 2026-08-18.** `Copy256` is out of `inc.asm` (thirteen `FUNCTION`s now, not fourteen)
+and the eight copies are open-coded again, each with its own tail. Exactly six instructions moved —
+four `S05`→`S02`, two `S05`→`S01`, 3,248 instructions on both sides — and `REG:128 STACK:16384` is
+unchanged. The reason to have *wanted* the shared version is untouched by any of this and is not
+about speed: eight separate transcriptions of one hand-scheduled idiom is the shape of three of the
+four defects in `asm/tk/README.md`. These eight are generated by an expander, not retyped.
 
 **The compiled-kernel lead reproduced in the same session**, against `GpuCore_nohash.cubin` at the
 same grid: 29.3359 ms best / 31.0296 median against 22.9679 / 24.0911 — **21.7% on the best, 22.4%

@@ -182,48 +182,48 @@
 // aliasing is safe in the C++ version. Hence MulR separate from MulA/MulB, and the copy
 // back into MulA after each multiply.
 //
-// THOSE COPIES ARE `inc_func Copy256`, not eight hand-written lines. There are eight of
-// them and they were eight separate transcriptions of the same alternating IMAD/MOV idiom
-// -- two pipes, so the pairs dual-issue instead of queueing. Kernel02 already ships that
-// idiom as a FUNCTION and asm/tk/inc.asm now carries it, so the kernel names it once.
+// THOSE COPIES ARE OPEN-CODED, eight blocks of the same alternating IMAD/MOV idiom -- two
+// pipes, so the pairs dual-issue instead of queueing. EACH ONE CARRIES ITS OWN TAIL STALL,
+// and that is the whole reason they are not a FUNCTION:
 //
-// IT COSTS STALL CYCLES AT SIX OF THE EIGHT -- AND MEASURED, THOSE CYCLES ARE FREE (below).
-// A FUNCTION body carries fixed control codes, and RCAsm parameters rename register indices
-// only -- they cannot reach a stall count (compiler.py:603 rejects a parameter whose name
-// does not start with R/UR/P/C, and utils.add_offset only ever rewrites `Name<digits>`).
-// So every site takes Copy256's S05 tail:
+//     :617  MulA<-MulR  S02   suffix-product loop, 511x per batch
+//     :695  Inv <-MulR  S05   before InvMod256
+//     :740  Rinv<-InvO  S01   walk seed, once per batch
+//     :926  Rinv<-MulR  S02   WALK LOOP, 511x per batch
+//     :1047 Rinv<-MulR  S02   :1049 Dxi<-Rinv  S02   tail, once
+//     :1079 PntX<-PxN   S01   :1080 PntY<-MulA S05
 //
-//     :617  MulA<-MulR  S02 -> S05   suffix-product loop, 511x per batch
-//     :695  Inv <-MulR  S05 -> S05   byte-identical
-//     :740  Rinv<-InvO  S01 -> S05   walk seed, once per batch
-//     :926  Rinv<-MulR  S02 -> S05   WALK LOOP, 511x per batch
-//     :1047 Rinv<-MulR  S02 -> S05   :1049 Dxi<-Rinv  S02 -> S05   tail, once
-//     :1079 PntX<-PxN   S01 -> S05   :1080 PntY<-MulA S05 -> S05   byte-identical
+// THEY WERE `inc_func Copy256` FOR ONE COMMIT AND CAME BACK OUT. A FUNCTION body carries
+// fixed control codes, and RCAsm parameters rename register indices only -- they cannot
+// reach a stall count (compiler.py:603 rejects a parameter whose name does not start with
+// R/UR/P/C, and utils.add_offset only ever rewrites `Name<digits>`). So a shared Copy256
+// forces its own S05 tail on every site, lengthening six of the eight -- including both
+// 511x-per-batch sites, which is ~3,080 added stall cycles per batch.
 //
-// SAFE BY CONSTRUCTION IN THE DIRECTION THAT MATTERS: S05 is the longest tail any of the
-// eight had, so this only ever LENGTHENS a stall. A shortened one is what reads a stale
-// register, and none is shortened.
+// THE DIRECTION IS SAFE EITHER WAY, which is why this is a cost question and not a
+// correctness one: S05 was the longest tail of the eight, so sharing only ever LENGTHENED a
+// stall, and a SHORTENED one is what reads a stale register. Going back to the per-site
+// values restores exactly what ran on hardware before, not something new.
 //
-// THE COST, MEASURED -- RTX 5090, 174,080 threads, 180 launches a side, 2026-08-18. The
-// control was a build of this file with the eight sites expanded back to their original
-// tails: 3,248 instructions both, ZERO instruction-text differences, and exactly six
-// encoded differences all six in the control word's stall field. Nothing else could move.
+// WHAT THE COST ACTUALLY IS, AND WHAT IS NOT KNOWN. Mean stall over this cubin is 2.52
+// cycles/instruction, so a warp's issue timeline is ~1.65M cycles per batch and 3,080 is
+// 0.19% of it -- an upper bound, reached only if the SM were issue-bound, which it is not
+// (a warp needs ~6.6M issue cycles across a launch it is resident for ~28.6M, so ~77% of
+// its residency is spent waiting on something else). An A/B on 2026-08-18 could not resolve
+// it: 174,080 threads, 180 launches a side, B/A 1.000 on the median and 0.990 on the best
+// -- the two estimators disagreeing by 1.1% is the noise floor, and 0.19% cannot be seen
+// through it. So THE MEASUREMENT IS NULL, NOT ZERO, and open-coding is not a measured win.
+// It removes a cost bounded at 0.19% that had no upside, and that is the whole claim.
 //
-//     A  original per-site stalls    median 23.8689 ms    best 22.8018 ms
-//     B  Copy256 (this file)         median 23.8797 ms    best 22.5626 ms
-//                                    B/A 1.000 on the median, 0.990 on the best
+// To actually put a number on it, do dose-response rather than more iterations: +1 stall on
+// every instruction of the walk body is ~578,000 cycles per batch, a predicted ~35%, far
+// above the floor -- measure that and interpolate. Raising these six to S15 only reaches
+// ~0.8% and is still under the floor, so it is not worth a run.
 //
-// ~3,080 added stall cycles per batch, and the two estimators disagree by more than the
-// effect -- it is inside a 6.5% run-to-run spread and cannot be resolved. Both sides came
-// back 174,080/174,080 EXACT with every output limb agreeing, which is the other half of
-// what the A/B was for: the eight substitutions are semantically inert ON HARDWARE and not
-// merely by inspection of the emitted stream. The null is what this kernel's other
-// measurements predict -- at 2 blocks/SM another warp had something to issue, and halving
-// the field-math instruction count bought only 11%.
-//
-// SO DO NOT HAND-EXPAND THESE BACK to recover the stalls. It buys nothing measurable and it
-// restores eight separate transcriptions of one hand-scheduled idiom, which is the exact
-// shape of three of the four defects in asm/tk/README.md.
+// THE REASON TO PREFER THE SHARED VERSION STILL STANDS AND IS NOT ABOUT SPEED: eight
+// separate transcriptions of one hand-scheduled idiom is the exact shape of three of the
+// four defects in asm/tk/README.md. These eight are generated, not retyped -- see the note
+// in the commit that reintroduced them -- and they must stay that way.
 //
 // SubMod256 *is* alias-safe and is used that way (Ro=RFirst) to save a copy: it is a
 // straight elementwise pass in increasing index order, so instruction k writes Ro_k in
@@ -639,7 +639,14 @@ inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
 // reading its inputs.
 inc_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
 // acc = MulR
-inc_func Copy256(Ri=MulR, Ro=MulA)
+    [B------:R-:W-:-:S01]    IMAD MulA0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV MulA1, MulR1
+    [B------:R-:W-:-:S01]    IMAD MulA2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV MulA3, MulR3
+    [B------:R-:W-:-:S01]    IMAD MulA4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV MulA5, MulR5
+    [B------:R-:W-:-:S01]    IMAD MulA6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S02]    MOV MulA7, MulR7
 // subp[j-1] = acc -- read barrier 3, waited at the loop head above.
     [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
     [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
@@ -720,7 +727,14 @@ inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
 inc_func MulMod256(RFirst=MulB, RSecond=MulA, Ro=MulR, Rt=Tmp, Pt=0)
 
 // Inv = MulR. Ri is SPOILED by InvMod256, so this is a real copy and not bureaucracy.
-inc_func Copy256(Ri=MulR, Ro=Inv)
+    [B------:R-:W-:-:S01]    IMAD Inv0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV Inv1, MulR1
+    [B------:R-:W-:-:S01]    IMAD Inv2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV Inv3, MulR3
+    [B------:R-:W-:-:S01]    IMAD Inv4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV Inv5, MulR5
+    [B------:R-:W-:-:S01]    IMAD Inv6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S05]    MOV Inv7, MulR7
 
     [B------:R-:W-:-:S01]    UMOV uCallI0, `(.relN_end_InvMod256) //RCASM:CallPointF
 call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:W-:-:S01] BRXU.U uCallI, 0x00") //RCASM:CallPointF
@@ -765,7 +779,14 @@ call_func InvMod256(Ri=Inv, Ro=InvO, Rt=InvT, URt=uInvT, Pt=0, Ret="[B------:R-:
 //@@WALK_BEGIN
 // Rinv = the running inverse, seeded from InvMod256's output. A separate copy because the
 // chain rewrites it every iteration and MulMod256 cannot write its own input.
-inc_func Copy256(Ri=InvO, Ro=Rinv)
+    [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, InvO0
+    [B------:R-:W-:-:S01]    MOV Rinv1, InvO1
+    [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, InvO2
+    [B------:R-:W-:-:S01]    MOV Rinv3, InvO3
+    [B------:R-:W-:-:S01]    IMAD Rinv4, RZ, RZ, InvO4
+    [B------:R-:W-:-:S01]    MOV Rinv5, InvO5
+    [B------:R-:W-:-:S01]    IMAD Rinv6, RZ, RZ, InvO6
+    [B------:R-:W-:-:S01]    MOV Rinv7, InvO7
 // Acc = 1. THE ACCUMULATOR IS BISECT SCAFFOLDING AND IS OFF BY DEFAULT -- see PACC below.
 // It is seeded here rather than inside the loop, so its gate is separate from theirs and both
 // the walk rung (WACC/WACCT) and the pts rung (PACC/PACCM/PACCT) have to switch it on.
@@ -936,7 +957,14 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
 // inverse *= gxmi
 inc_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
-inc_func Copy256(Ri=MulR, Ro=Rinv)
+    [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV Rinv1, MulR1
+    [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV Rinv3, MulR3
+    [B------:R-:W-:-:S01]    IMAD Rinv4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV Rinv5, MulR5
+    [B------:R-:W-:-:S01]    IMAD Rinv6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S02]    MOV Rinv7, MulR7
 
     [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, 0x20, RZ
     [B------:R-:W-:Y:S13]    ISETP.NE.U32.AND P0, PT, COfs, Idx, PT
@@ -1050,9 +1078,23 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B----4-:R-:W-:-:S01]    NOP
 inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)
 inc_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
-inc_func Copy256(Ri=MulR, Ro=Rinv)
+    [B------:R-:W-:-:S01]    IMAD Rinv0, RZ, RZ, MulR0
+    [B------:R-:W-:-:S01]    MOV Rinv1, MulR1
+    [B------:R-:W-:-:S01]    IMAD Rinv2, RZ, RZ, MulR2
+    [B------:R-:W-:-:S01]    MOV Rinv3, MulR3
+    [B------:R-:W-:-:S01]    IMAD Rinv4, RZ, RZ, MulR4
+    [B------:R-:W-:-:S01]    MOV Rinv5, MulR5
+    [B------:R-:W-:-:S01]    IMAD Rinv6, RZ, RZ, MulR6
+    [B------:R-:W-:-:S02]    MOV Rinv7, MulR7
 
-inc_func Copy256(Ri=Rinv, Ro=Dxi)
+    [B------:R-:W-:-:S01]    IMAD Dxi0, RZ, RZ, Rinv0
+    [B------:R-:W-:-:S01]    MOV Dxi1, Rinv1
+    [B------:R-:W-:-:S01]    IMAD Dxi2, RZ, RZ, Rinv2
+    [B------:R-:W-:-:S01]    MOV Dxi3, Rinv3
+    [B------:R-:W-:-:S01]    IMAD Dxi4, RZ, RZ, Rinv4
+    [B------:R-:W-:-:S01]    MOV Dxi5, Rinv5
+    [B------:R-:W-:-:S01]    IMAD Dxi6, RZ, RZ, Rinv6
+    [B------:R-:W-:-:S02]    MOV Dxi7, Rinv7
 // s = c_Jy - y1. c_Jy is at c[0x3][0x0] in the -rdc layout, c_Jx at 0x20.
     [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x0]
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x8]
@@ -1077,8 +1119,22 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 // x1 = x3 ; y1 = y3. PntY is read by the SubMod256 immediately above, so it cannot be
 // overwritten before that call returns -- which is why both copies live here and not one
 // beside each producer.
-inc_func Copy256(Ri=PxN, Ro=PntX)
-inc_func Copy256(Ri=MulA, Ro=PntY)
+    [B------:R-:W-:-:S01]    IMAD PntX0, RZ, RZ, PxN0
+    [B------:R-:W-:-:S01]    MOV PntX1, PxN1
+    [B------:R-:W-:-:S01]    IMAD PntX2, RZ, RZ, PxN2
+    [B------:R-:W-:-:S01]    MOV PntX3, PxN3
+    [B------:R-:W-:-:S01]    IMAD PntX4, RZ, RZ, PxN4
+    [B------:R-:W-:-:S01]    MOV PntX5, PxN5
+    [B------:R-:W-:-:S01]    IMAD PntX6, RZ, RZ, PxN6
+    [B------:R-:W-:-:S01]    MOV PntX7, PxN7
+    [B------:R-:W-:-:S01]    IMAD PntY0, RZ, RZ, MulA0
+    [B------:R-:W-:-:S01]    MOV PntY1, MulA1
+    [B------:R-:W-:-:S01]    IMAD PntY2, RZ, RZ, MulA2
+    [B------:R-:W-:-:S01]    MOV PntY3, MulA3
+    [B------:R-:W-:-:S01]    IMAD PntY4, RZ, RZ, MulA4
+    [B------:R-:W-:-:S01]    MOV PntY5, MulA5
+    [B------:R-:W-:-:S01]    IMAD PntY6, RZ, RZ, MulA6
+    [B------:R-:W-:-:S05]    MOV PntY7, MulA7
 //@@JUMP_END
 
 //====================================================================================

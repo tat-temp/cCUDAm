@@ -17,7 +17,6 @@
 //
 // WHAT IS HERE AND WHAT IS NOT. Exactly the transitive closure of what main.asm calls:
 //
-//     Copy256                      every 256-bit copy in main.asm goes through this
 //     SubMod256  SubMod256_3  NegMod256
 //     MulMod256  SqrMod256
 //     InvMod256  + its seven _-prefixed helpers, all of which it uses
@@ -28,9 +27,12 @@
 // nothing else. Anything main.asm adds a call to has to be added HERE, or the build stops at
 // "failed to calc FUNCTION" -- which is the good failure mode: loud, and before the GPU.
 //
-// Copy256's tail is S05, and that is load-bearing rather than incidental: it is the longest
-// tail of the eight hand-written copy blocks it replaced, so every substitution LENGTHENED a
-// stall or left it alone. Shortening one is what reads a stale register. See README.md.
+// Copy256 WAS HERE and is gone with the same reasoning. main.asm's eight 256-bit copies went
+// through it for one commit; a FUNCTION body carries fixed control codes and an RCAsm
+// parameter cannot reach a stall count, so sharing forced Copy256's S05 tail onto six sites
+// that wanted S01 or S02 -- two of them 511x per batch. The copies are open-coded again,
+// each with its own tail, and nothing names Copy256 any more. main.asm's ABI note carries
+// the numbers and what the A/B could and could not resolve.
 //
 // THE PRECONDITIONS TRAVEL WITH THE CODE, and two of them are not in the headers below:
 //
@@ -48,19 +50,6 @@
 // the points-only kernel, which consumes no parity, and it is NOT fine once the hash layer
 // returns, because the compressed-pubkey prefix is derived from bit 0 and P is odd. Fixing
 // it is a change to THIS file, and the point at which these bodies stop matching Kernel02's.
-
-//---- Copy256  <- asm/mod_sub.asm --------------------------------------------------
-FUNCTION Copy256()
-{
-    [B------:R-:W-:-:S01]    IMAD Ro0, RZ, RZ, Ri0
-    [B------:R-:W-:-:S01]    MOV Ro1, Ri1
-    [B------:R-:W-:-:S01]    IMAD Ro2, RZ, RZ, Ri2
-    [B------:R-:W-:-:S01]    MOV Ro3, Ri3
-    [B------:R-:W-:-:S01]    IMAD Ro4, RZ, RZ, Ri4
-    [B------:R-:W-:-:S01]    MOV Ro5, Ri5
-    [B------:R-:W-:-:S01]    IMAD Ro6, RZ, RZ, Ri6
-    [B------:R-:W-:-:S05]    MOV Ro7, Ri7
-}
 
 //---- SubMod256  <- asm/mod_sub.asm ------------------------------------------------
 FUNCTION SubMod256()
