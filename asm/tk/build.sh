@@ -41,11 +41,14 @@ rm -rf "$WORK" && mkdir -p "$WORK"
 # unused routines lighter. Two things follow: the build no longer depends on a tree this
 # kernel does not otherwise use, and a change to the arithmetic (C8's conditional subtract
 # is the one on the list) has a local file to land in.
-cp "$OUT/inc.asm" "$WORK"/
-# MAIN selects the kernel source (variants.py generates a bisect ladder); OUTNAME names
-# the resulting cubin. Defaults reproduce the committed TestKernel.cubin.
+# MAIN selects the kernel source (variants.py generates a bisect ladder), INC the arithmetic
+# it calls, OUTNAME the resulting cubin. Defaults reproduce the committed TestKernel.cubin.
+# INC exists because a variant that perturbs the FUNCTION bodies -- a stall calibration, and
+# C8's conditional subtract when it lands -- cannot use the committed inc.asm.
 MAIN="${MAIN:-$OUT/main.asm}"
+INC="${INC:-$OUT/inc.asm}"
 OUTNAME="${OUTNAME:-TestKernel.cubin}"
+cp "$INC" "$WORK"/inc.asm
 cp "$MAIN" "$WORK"/main.asm
 echo "project: $(cd "$WORK" && ls *.asm | tr '\n' ' ')   (kernel from $MAIN)"
 

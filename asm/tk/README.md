@@ -120,9 +120,8 @@ is invisible through it.
 
 > **The measurement is null, not zero, and open-coding is not a measured win.** It removes a
 > cost bounded at 0.19% that bought nothing. To get a real number, use dose-response rather
-> than more iterations: +1 stall on every instruction of the walk body is ~578,000 cycles per
-> batch — a predicted ~35%, far above the floor — so measure that and interpolate. Raising
-> these six to `S15` only reaches ~0.8% and is still under the floor.
+> than more iterations — see below; the pair is built. Raising these six to `S15` only reaches
+> ~0.8% and is still under the floor, which is why that variant was not worth building.
 
 What the A/B *did* establish is not statistical and stands: **174,080/174,080 EXACT on both
 sides with every output limb agreeing.** That is what says the substitution — in either
@@ -133,6 +132,47 @@ current `TestKernel.cubin` is byte-identical to the `nocopy` side of that run.
 separate transcriptions of one hand-scheduled idiom is the exact shape of three of the four
 defects below. These eight are *generated*, not retyped — see `git log` for the expander —
 and any future edit to them should be too.
+
+### The stall calibration — `TestKernel_dose1` / `TestKernel_dose2`
+
+Two cubins that exist to make an unmeasurable effect measurable **once**, so every later
+scheduling question is arithmetic instead of a GPU run. Each is this kernel with **+1 (resp.
++2) cycles added to every stall count** and nothing else changed:
+
+| | instructions | text diffs vs baseline | REG / STACK | total stall cycles | mean |
+|---|---:|---:|---|---:|---:|
+| `TestKernel.cubin` | 3,248 | — | 128 / 16384 | 8,155 | 2.511 |
+| `TestKernel_dose1` | 3,248 | **0** | 128 / 16384 | 11,401 | 3.510 |
+| `TestKernel_dose2` | 3,248 | **0** | 128 / 16384 | 14,647 | 4.510 |
+
+3,246 of 3,248 instructions shift by exactly the dose; the two that don't are RCAsm-emitted
+glue with no source control code. The histogram moves up by exactly one bucket per dose.
+
+**Correct by construction, and slower on purpose.** Every edit *lengthens* a stall, and a
+shortened one is what reads a stale register — the same argument that made the `Copy256`
+substitution safe in both directions. Both sides must still come back EXACT.
+
+```bash
+cd rcasm_test/abtest && ./abtest ../../asm/tk/TestKernel.cubin ../../asm/tk/TestKernel_dose1.cubin 174080 180 loop
+```
+
+```bash
+cd rcasm_test/abtest && ./abtest ../../asm/tk/TestKernel.cubin ../../asm/tk/TestKernel_dose2.cubin 174080 180 loop
+```
+
+**Reading the result.** `+1` raises the stall budget by `1/2.511` = **+39.8%**, `+2` by
+**+79.7%**. Call the measured slowdown `W₁`. Then:
+
+| question | answer |
+|---|---|
+| is the response linear? | `W₂ ≈ 2·W₁`. If `W₂ < 2·W₁` the curve is concave, so the slope near zero is *steeper* than `W₁/39.8` and everything below is a **lower** bound — the safe direction |
+| what is retuning stalls worth? | `W₁ × 12.1/39.8` = **`W₁ × 0.30`** (12.1% is the dependency-graph headroom for the current instruction order) |
+| what did `Copy256` cost? | `W₁ × 0.19/39.8` = **`W₁ × 0.005`** |
+| are stall counts worth touching at all? | if `W₁` is small — say under 3% — then stall cycles are being hidden by other warps and **no scheduling work on this kernel is worth doing**, which is the most useful outcome available |
+
+Expected range is `W₁ ≈ 9–13%` if stalls are 22–32% of the warp critical path, which is what
+the offline decomposition says. A result far below that refutes the decomposition, and that
+is worth more than confirming it.
 
 ### Verified without a GPU, and this is the whole of the evidence
 
