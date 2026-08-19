@@ -133,46 +133,54 @@ separate transcriptions of one hand-scheduled idiom is the exact shape of three 
 defects below. These eight are *generated*, not retyped — see `git log` for the expander —
 and any future edit to them should be too.
 
-### The stall calibration — `TestKernel_dose1` / `TestKernel_dose2`
+### The stall calibration — measured, RTX 5090, 2026-08-19
 
-Two cubins that exist to make an unmeasurable effect measurable **once**, so every later
-scheduling question is arithmetic instead of a GPU run. Each is this kernel with **+1 (resp.
-+2) cycles added to every stall count** and nothing else changed:
+**1% of the stall budget = 0.046% of wall clock.** Price any stall change against that and
+stop guessing.
 
-| | instructions | text diffs vs baseline | REG / STACK | total stall cycles | mean |
-|---|---:|---:|---|---:|---:|
-| `TestKernel.cubin` | 3,248 | — | 128 / 16384 | 8,155 | 2.511 |
-| `TestKernel_dose1` | 3,248 | **0** | 128 / 16384 | 11,401 | 3.510 |
-| `TestKernel_dose2` | 3,248 | **0** | 128 / 16384 | 14,647 | 4.510 |
+Two cubins were built for this, each the kernel with **+1 (resp. +2) cycles on every stall
+count** and nothing else — 3,248 instructions, **zero instruction-text differences**,
+`REG:128 STACK:16384`, identical file size. 3,246 of 3,248 shifted by exactly the dose (the
+two that didn't are RCAsm glue with no source control code) and the histogram moved up by
+exactly one bucket. Slower on purpose and correct by construction: every edit *lengthens* a
+stall, and a shortened one is what reads a stale register. Both sides came back EXACT.
 
-3,246 of 3,248 instructions shift by exactly the dose; the two that don't are RCAsm-emitted
-glue with no source control code. The histogram moves up by exactly one bucket per dose.
+| | stall budget | mean stall | **wall clock** | slope |
+|---|---:|---:|---:|---:|
+| baseline | 8,155 cycles | 2.511 | — | — |
+| `+1` | 11,401 | 3.510 | **+1.5% / +2.0%** | 0.038 / 0.051 |
+| `+2` | 14,647 | 4.510 | **+3.7% / +3.8%** | 0.046 / 0.048 |
 
-**Correct by construction, and slower on purpose.** Every edit *lengthens* a stall, and a
-shortened one is what reads a stale register — the same argument that made the `Copy256`
-substitution safe in both directions. Both sides must still come back EXACT.
+(median / best; 174,080 threads, 180 launches a side, interleaved. Both runs thermally clean
+— the two estimators agreed to 0.4% and 0.1%.) The estimators disagree on the *direction* of
+curvature, so curvature is not resolvable and the response is **linear within error**: least
+squares through the origin over all four points gives **0.0463**.
 
-```bash
-cd rcasm_test/abtest && ./abtest ../../asm/tk/TestKernel.cubin ../../asm/tk/TestKernel_dose1.cubin 174080 180 loop
-```
+**What that prices:**
 
-```bash
-cd rcasm_test/abtest && ./abtest ../../asm/tk/TestKernel.cubin ../../asm/tk/TestKernel_dose2.cubin 174080 180 loop
-```
+| | stall budget | wall clock |
+|---|---:|---:|
+| retuning stalls, current instruction order | −12.1% | **−0.56%** |
+| perfect scheduling, incl. arbitrary reordering (to the 3,248-cycle floor) | −60.2% | **−2.8%** |
+| what `Copy256` cost | +0.19% | **+0.009%** |
 
-**Reading the result.** `+1` raises the stall budget by `1/2.511` = **+39.8%**, `+2` by
-**+79.7%**. Call the measured slowdown `W₁`. Then:
+> **So stall scheduling on this kernel is not worth doing.** Retuning buys half a percent —
+> under what one A/B run can resolve — for the edit class three of the four defects below came
+> from. Even perfect reordering of hand-scheduled carry chains caps at 2.8%. The 12.1% is the
+> dependency-graph headroom for the current order (longest path 7,167 cycles against 8,155
+> scheduled, binding on the `P0`/`P4`/`P1` carry chains).
 
-| question | answer |
-|---|---|
-| is the response linear? | `W₂ ≈ 2·W₁`. If `W₂ < 2·W₁` the curve is concave, so the slope near zero is *steeper* than `W₁/39.8` and everything below is a **lower** bound — the safe direction |
-| what is retuning stalls worth? | `W₁ × 12.1/39.8` = **`W₁ × 0.30`** (12.1% is the dependency-graph headroom for the current instruction order) |
-| what did `Copy256` cost? | `W₁ × 0.19/39.8` = **`W₁ × 0.005`** |
-| are stall counts worth touching at all? | if `W₁` is small — say under 3% — then stall cycles are being hidden by other warps and **no scheduling work on this kernel is worth doing**, which is the most useful outcome available |
+**The general number, which is worth more than the stall answer.** Stall cycles are ~23% of a
+warp's own issue timeline but only **4.6%** of wall clock, so roughly **five sixths of any
+issue-side gain is absorbed** by the other three warps on the scheduler. That factor is not
+specific to stalls, and it retrodicts the rest of this project: halving the field-math
+instruction count bought 11% rather than ~50%, and deleting 36 indirect branches per walk
+iteration bought 4.9%. **Divide any static instruction-count argument by about five before
+believing it.** This kernel is memory-bound; the issue side keeps not mattering.
 
-Expected range is `W₁ ≈ 9–13%` if stalls are 22–32% of the warp critical path, which is what
-the offline decomposition says. A result far below that refutes the decomposition, and that
-is worth more than confirming it.
+The dose cubins are deleted — the coefficient is the durable artifact. To rebuild them: add N
+to every `:S\d\d]` in `main.asm` and `inc.asm`, then `MAIN=… INC=… OUTNAME=… ./build.sh`.
+Check that nothing exceeds `S15` and that nothing *lands* on `S13` without the yield bit.
 
 ### Verified without a GPU, and this is the whole of the evidence
 

@@ -1904,10 +1904,10 @@ on something other than its own stall counts.** So the experiment could not have
 effect under any outcome. That is a design error, and a cheap one to avoid — the whole calculation
 above is twenty lines of Python over the cubin, and it belongs *before* the run.
 
-**How to measure it properly, if it ever matters: dose-response, not more iterations.** +1 stall on
-every instruction of the walk body is ~578,000 cycles per batch, a predicted ~35%, far above the
-floor; measure that and interpolate down. Raising the six sites to `S15` only reaches ~0.8% and is
-still under the floor, so that variant is not worth building.
+**How to measure it properly: dose-response, not more iterations.** Done the next day — see *The
+stall calibration* below. The answer is that `Copy256` cost **0.009%**, i.e. it really was free,
+the original claim was substantively right and only its evidence was inadequate, and the revert
+bought nothing measurable. The code-quality case for per-site stalls stands on its own.
 
 **What the run did establish is not statistical and stands:** both sides **174,080/174,080 EXACT
 with every output limb agreeing**. That is what says the substitution — in either direction — is
@@ -1938,6 +1938,61 @@ is a clean reproduction, and the absolute anchor this document demands is presen
 and `TestKernel_loop` 22.89 / 22.97. Nothing resembling the 2.4× excursion of the throttled session.
 Whole-program that is still ~8.8%, since this kernel is points-only and hashing is 57-61% of the
 full kernel's wall clock.
+
+### The stall calibration, and the absorption factor — RTX 5090, 2026-08-19
+
+**1% of the stall budget = 0.046% of wall clock.** One measurement, and every future scheduling
+question on this kernel is arithmetic. It exists because the `Copy256` A/B above was under-powered
+by construction and nobody noticed until afterwards.
+
+Method: two cubins, each the kernel with **+1 (resp. +2) cycles on every stall count** and nothing
+else — 3,248 instructions, zero instruction-text differences, `REG:128 STACK:16384`, identical file
+size, histogram shifted by exactly one bucket. Slower on purpose and correct by construction, since
+every edit lengthens a stall and only a *shortened* one reads a stale register. Both sides came
+back 174,080/174,080 EXACT.
+
+| | stall budget | wall clock (median / best) | slope |
+|---|---:|---:|---:|
+| `+1` | +39.8% | +1.5% / +2.0% | 0.038 / 0.051 |
+| `+2` | +79.7% | +3.7% / +3.8% | 0.046 / 0.048 |
+
+Both runs thermally clean (estimators agreeing to 0.4% and 0.1%). The two estimators disagree on
+the *direction* of curvature, so curvature is unresolvable and the response is linear within error;
+least squares through the origin over all four points gives **0.0463**.
+
+**What it prices, and it closes two open questions:**
+
+| | stall budget | wall clock |
+|---|---:|---:|
+| retuning stalls, current instruction order | −12.1% | **−0.56%** |
+| perfect scheduling incl. arbitrary reordering | −60.2% | **−2.8%** |
+| `Copy256` | +0.19% | **+0.009%** |
+
+So **stall scheduling on this kernel is not worth doing** — half a percent for the edit class that
+produced three of the four defects in `asm/tk/README.md`, and 2.8% even for the unreachable case.
+And **`Copy256` really was free**: the sharing cost 0.009%, 25× below what the harness could see.
+The original "the stalls are free" claim was substantively right and only its *evidence* was
+inadequate; the revert bought nothing measurable and rests on the code-quality argument alone.
+
+**The absorption factor is the durable result, not the stall answer.** Stall cycles are ~23% of a
+warp's own issue timeline but only **4.6%** of wall clock, so about **five sixths of any issue-side
+gain is absorbed** by the other three warps on the scheduler. That is not specific to stalls, and
+it retrodicts this document: halving the field-math instruction count bought 11% rather than ~50%,
+deleting 36 indirect branches per walk iteration bought 4.9%, and P3's two halves, P2's frame half
+and the `Copy256` stalls were all null. **Divide any static instruction-count argument by about
+five before believing it.**
+
+That also settles the `.64` → `.128` question raised alongside this one, without a run. The hot
+traffic is already `.128` — `subp[]` uses `LDL.128`/`STL.128` at exactly the compiled kernel's
+counts (6 and 4). The only `.64`s in a loop are 52 `LDC.64` constant reads worth ~0.3% of the
+instruction stream, which the absorption factor turns into ~0.06%; `LDC.128` appears zero times in
+the corpus that taught the encoder, and rule 1 would force a 4-aligned destination through the
+register table. Not worth it.
+
+**Where this leaves the performance work.** Nothing issue-side is left that is worth its risk. The
+remaining levers are the ones that change what the kernel *waits* on — the 16 KB frame and the
+`subp[]` round trip — plus P3 on the hash layer, which is 57-61% of the full kernel's wall clock
+and the only item touching it.
 
 ### The throttle — and what it voids
 
