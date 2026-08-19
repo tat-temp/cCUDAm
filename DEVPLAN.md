@@ -1863,12 +1863,12 @@ rather than by address: **278 violations on both sides, identical multiset, zero
 
 ### The `Copy256` stalls could not be measured — RTX 5090, 2026-08-18
 
-> **This section first read "the `Copy256` stalls are free" and that was over-claimed.** The
-> measurement is null; the effect is not zero. The predicted effect was **0.19%** and the harness's
-> own output shows a noise floor around **1.1%**, so the experiment could not have detected it even
-> if it were exactly as predicted — which should have been computed before the GPU time was spent,
-> not after. The sharing was reverted on that basis: a cost bounded at 0.19% that buys nothing is
-> not worth carrying, and that is a different statement from "it was free". Corrected below; the
+> **This section first read "the `Copy256` stalls are free", which was over-claimed on the evidence
+> then available — and which the calibration a day later showed to be true anyway.** The stalls
+> cost **0.009%**. What was wrong was the reasoning, not the verdict: the experiment could not have
+> detected an effect that size, and that was computable before the GPU time was spent rather than
+> after. The sharing was reverted on the strength of a 0.19% *upper bound* which turned out to be
+> 20× too pessimistic, so the revert rests on the code-quality argument alone. Corrected below; the
 > A/B numbers and the correctness result are unchanged.
 
 
@@ -1887,9 +1887,11 @@ identical everywhere else. Sharper than the `occ255` control, which at least cha
 | B — `Copy256` | 23.8797 ms | 22.5626 ms | 6.5% |
 | **B/A** | **1.000** | **0.990** | |
 
-**Null — and under-powered.** The two estimators disagree by 1.1%, and they disagree *in sign*:
-adding stalls cannot make a kernel faster, so the `best` column's −1.05% is noise showing its own
-size. Against that floor, here is what was actually being looked for:
+**Null — and under-powered.** The two estimators disagree *in sign*: adding stalls cannot make a
+kernel faster, so the `best` column's −1.05% is noise. (`best` is a minimum-order statistic and is
+the noisier of the two on this harness — see the calibration section, which measures the median's
+replication at 0.05% and retires the "read the best column" advice.) Here is what was actually
+being looked for:
 
 | | |
 |---|---:|
@@ -1953,12 +1955,27 @@ back 174,080/174,080 EXACT.
 
 | | stall budget | wall clock (median / best) | slope |
 |---|---:|---:|---:|
-| `+1` | +39.8% | +1.5% / +2.0% | 0.038 / 0.051 |
+| `+1` | +39.8% | +1.5% / +2.0% | 0.038 / 0.049 |
 | `+2` | +79.7% | +3.7% / +3.8% | 0.046 / 0.048 |
+| `+2`, replicated | +79.7% | +3.8% / +3.6% | 0.047 / 0.046 |
 
-Both runs thermally clean (estimators agreeing to 0.4% and 0.1%). The two estimators disagree on
-the *direction* of curvature, so curvature is unresolvable and the response is linear within error;
-least squares through the origin over all four points gives **0.0463**.
+The estimators disagree on the *direction* of curvature, so curvature is unresolvable and the
+response is linear within error. The four `+2` slopes cluster at **0.0466 ± 0.001**.
+
+**And the replication is worth more than the coefficient.** Running the `+2` comparison twice put
+the A side — the same binary, separate invocations — at **22.6297 and 22.6176 ms**, i.e. the median
+of 180 interleaved launches reproduces to **0.05%**. This document previously put the floor near
+1%, which was wrong; that figure came from best-vs-median disagreement in a session whose
+distribution happened to be wide. Three rules replace it:
+
+- **Trust the median, not the best.** `best` is a minimum-order statistic over 180 samples and is
+  the noisier of the two — it is what produced the "B is faster" reading in the `Copy256` run. The
+  earlier advice under *The throttle* to prefer an absolute `best` anchor is right about anchoring
+  and wrong about which statistic to compare.
+- **Replicate instead of reasoning from within-run agreement.** Two invocations cost two minutes
+  and give a real error bar; the internal-agreement proxy misled twice.
+- **Cross-session drift is still several percent** — the same kernel medianed 23.87 ms one day and
+  22.62 ms the next — so absolute anchors remain mandatory. Only the within-session floor moved.
 
 **What it prices, and it closes two open questions:**
 

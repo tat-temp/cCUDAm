@@ -115,8 +115,8 @@ it. That is an upper bound, reached only if the SM were issue-bound: a warp need
 cycles across a launch it is resident for ~28.6M, so ~77% of its residency goes on something
 else. The A/B run on 2026-08-18 could not resolve it — 174,080 threads, 180 launches a side,
 `B/A` **1.000** on the median and **0.990** on the best. Adding stalls cannot make a kernel
-faster, so that 1.1% disagreement between the two estimators *is* the noise floor, and 0.19%
-is invisible through it.
+faster, so the best column was reading noise. The calibration below priced it at **0.009%**,
+which is ~5× under what one run resolves, so the run was under-powered by construction.
 
 > **The measurement is null, not zero, and open-coding is not a measured win.** It removes a
 > cost bounded at 0.19% that bought nothing. To get a real number, use dose-response rather
@@ -148,13 +148,37 @@ stall, and a shortened one is what reads a stale register. Both sides came back 
 | | stall budget | mean stall | **wall clock** | slope |
 |---|---:|---:|---:|---:|
 | baseline | 8,155 cycles | 2.511 | — | — |
-| `+1` | 11,401 | 3.510 | **+1.5% / +2.0%** | 0.038 / 0.051 |
+| `+1` | 11,401 | 3.510 | **+1.5% / +2.0%** | 0.038 / 0.049 |
 | `+2` | 14,647 | 4.510 | **+3.7% / +3.8%** | 0.046 / 0.048 |
+| `+2`, replicated | | | **+3.8% / +3.6%** | 0.047 / 0.046 |
 
-(median / best; 174,080 threads, 180 launches a side, interleaved. Both runs thermally clean
-— the two estimators agreed to 0.4% and 0.1%.) The estimators disagree on the *direction* of
-curvature, so curvature is not resolvable and the response is **linear within error**: least
-squares through the origin over all four points gives **0.0463**.
+(median / best; 174,080 threads, 180 launches a side, interleaved.) The response is **linear
+within error** — the estimators disagree on the *direction* of curvature, so curvature is not
+resolvable. The four `+2` slopes cluster at **0.0466 ± 0.001**, and that is the number to use;
+`+1`'s two estimators straddle it more widely because the effect is smaller relative to noise.
+
+**How well this harness actually resolves, which is worth more than the coefficient.** The
+`+2` comparison was run twice, and the A side — the same binary, separate invocations —
+came back **22.6297 and 22.6176 ms**:
+
+| | run 1 | run 2 | apart |
+|---|---:|---:|---:|
+| A median | 22.6297 | 22.6176 | **0.05%** |
+| B median | 23.4584 | 23.4676 | **0.04%** |
+| B/A median | 1.0366 | 1.0376 | 0.10% |
+
+So **the median of 180 interleaved launches replicates to ~0.05% back to back** — far better
+than the ~1% this document previously claimed, which was wrong: that figure came from the
+best-vs-median disagreement in a session whose distribution happened to be wide. Three rules
+follow, and they supersede what the `Copy256` section says about reading a run:
+
+- **Trust the median, not the best.** `best` is a minimum-order statistic over 180 samples and
+  is the *noisier* of the two here — it is what produced the "B is faster" nonsense in the
+  `Copy256` run. The earlier advice to prefer it was backwards.
+- **Replicate rather than reasoning from within-run agreement.** Two invocations cost two
+  minutes and give a real error bar; best/median agreement gives a proxy that misled twice.
+- **Cross-session drift is still several percent** and none of the above touches it — the same
+  kernel medianed 23.87 ms one day and 22.62 ms the next. Absolute anchors stay mandatory.
 
 **What that prices:**
 

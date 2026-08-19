@@ -210,15 +210,13 @@
 // 0.19% of it -- an upper bound, reached only if the SM were issue-bound, which it is not
 // (a warp needs ~6.6M issue cycles across a launch it is resident for ~28.6M, so ~77% of
 // its residency is spent waiting on something else). An A/B on 2026-08-18 could not resolve
-// it: 174,080 threads, 180 launches a side, B/A 1.000 on the median and 0.990 on the best
-// -- the two estimators disagreeing by 1.1% is the noise floor, and 0.19% cannot be seen
-// through it. So THE MEASUREMENT IS NULL, NOT ZERO, and open-coding is not a measured win.
-// It removes a cost bounded at 0.19% that had no upside, and that is the whole claim.
+// it: 174,080 threads, 180 launches a side, B/A 1.000 on the median and 0.990 on the best.
 //
-// To actually put a number on it, do dose-response rather than more iterations: +1 stall on
-// every instruction of the walk body is ~578,000 cycles per batch, a predicted ~35%, far
-// above the floor -- measure that and interpolate. Raising these six to S15 only reaches
-// ~0.8% and is still under the floor, so it is not worth a run.
+// A DOSE-RESPONSE CALIBRATION THE NEXT DAY PRICED IT AT 0.009% -- see asm/tk/README.md.
+// 1% of the stall budget is 0.046% of wall clock, these six stalls are 0.19% of the budget,
+// and that is 5x below what one run can resolve. So the sharing really was free, and open-
+// coding is NOT a measured win: it removes a cost of 0.009% that had no upside. The reason
+// to keep it open-coded is the per-site stall values themselves, not speed.
 //
 // THE REASON TO PREFER THE SHARED VERSION STILL STANDS AND IS NOT ABOUT SPEED: eight
 // separate transcriptions of one hand-scheduled idiom is the exact shape of three of the
