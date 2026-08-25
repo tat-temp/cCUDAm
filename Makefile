@@ -172,7 +172,7 @@ CU_OBJECTS  := $(GPU_SRC:.cu=.o)
 
 TARGET := cCUDAHurricane
 
-.PHONY: all clean ptxinfo sass cubin nohash-cubin p2-cubins p3-cubins
+.PHONY: all clean ptxinfo sass cubin nohash-cubin p2-cubins p3-cubins rdc-cubins
 
 all: $(TARGET)
 
@@ -243,6 +243,46 @@ p3-cubins:
 	$(MAKE) cubin INLINE_HASH_W2=1 CUBIN_FILE=GpuCore_p3inl.cubin SM=$(SM_ARCHS)
 	$(MAKE) cubin HOIST_INV_CHAIN=1 CUBIN_FILE=GpuCore_p3hoist.cubin SM=$(SM_ARCHS)
 	$(MAKE) cubin INLINE_HASH_W2=1 HOIST_INV_CHAIN=1 CUBIN_FILE=GpuCore_p3both.cubin SM=$(SM_ARCHS)
+
+# What -rdc=true costs the SHIPPED kernel, measured instead of asserted.
+#
+#   ./abtest ../../GpuCore_rdc.cubin ../../GpuCore_plain.cubin 174080 180s loop
+#
+# A is `make cubin` verbatim -- the status quo, and what NATIVE_CUBIN loads. B is the same
+# source through a plain `-cubin`. B/A < 1 means -rdc costs (1 - B/A).
+#
+# THIS COMPARISON WAS NOT BUILDABLE UNTIL NOW, and the reason is circular: -rdc's only
+# purpose here is to give the five __constant__ tables GLOBAL binding, so the cheaper build
+# is exactly the one the harness cannot load. cubin_globalize.py breaks the circle by
+# flipping the binding nibble after the fact -- 10 bytes, 5 symbols x 2 symbol tables,
+# verified to leave all 19,968 encoded SASS words untouched. See that file for why not
+# reordering the symbol table is correct rather than merely convenient.
+#
+# What actually differs between the two sides, from `cuobjdump` on both:
+#
+#   A  -rdc   REG 126   .text.TestKernel 6,000 instr + two hash sections   10,080 total
+#   B  plain  REG 122   .text.TestKernel 9,984 instr, hash bodies inside    9,984 total
+#
+# So it is +4 registers and +96 instructions, but the interesting variable is CODE LAYOUT:
+# -rdc moves getHash160_33/_w2 out of the kernel's own section. Both are under the
+# __launch_bounds__(256,2) ceiling of 128 and neither spills, so occupancy is held equal by
+# construction and layout is most of what is left.
+#
+# NO NOISE-FLOOR RUN IS NEEDED -- it is already banked four times. Side A is byte-identical
+# to GpuCore_p3base, whose median came out 80.0835 / 80.0915 / 80.0667 / 80.0824 ms across
+# four separate six-minute invocations, a spread of 0.031%. So: side A here must land in
+# 80.07-80.09 ms or the session is not clean and the ratio should be discarded, and any
+# effect above ~0.1% is real. Same grid, same batch, same duration as those four runs --
+# change any of them and the anchor stops applying.
+#
+# Both sides must come back 174,080 of 174,080 EXACT. That is not a formality on this pair:
+# it is the only thing that proves the patched symbols actually fed the kernel, since a
+# cubin whose constant tables were never filled still loads, still launches and still runs
+# at full speed. A cuModuleGetGlobal that fails is caught earlier and louder by abtest.
+rdc-cubins:
+	$(MAKE) cubin CUBIN_FILE=GpuCore_rdc.cubin SM=$(SM_ARCHS)
+	$(NVCC) $(NVCCFLAGS) -cubin -o GpuCore_plain.cubin GpuCore.cu
+	python3 cubin_globalize.py GpuCore_plain.cubin c_Gx c_Gy c_Jx c_Jy c_target_words
 
 $(TARGET): $(CPP_OBJECTS) $(CU_OBJECTS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)
