@@ -134,6 +134,11 @@ __device__ __constant__ uint64_t c_Jy[4];
 #define SUBP_IDX(i) (i)
 #endif
 
+// P6's cost half. See the long note at the loop it guards, inside the batch body.
+#ifndef SUBP_PASSES
+#define SUBP_PASSES 0
+#endif
+
 #if NO_HASH
 #define HASH_CONSUME(sink, prefix, X) \
 	do { (sink) ^= (X)[0] ^ (X)[1] ^ (X)[2] ^ (X)[3] ^ (uint64_t)(prefix); } while (0)
@@ -291,6 +296,61 @@ __global__ void TestKernel(
             subp[SUBP_IDX(i)][0] = acc[0]; subp[SUBP_IDX(i)][1] = acc[1];
             subp[SUBP_IDX(i)][2] = acc[2]; subp[SUBP_IDX(i)][3] = acc[3];
         }
+
+#if SUBP_PASSES
+        // P6's COST half -- `make SUBP_PASSES=n`, NO_HASH builds only (it escapes through sink).
+        //
+        // SUBP_WRAP priced the BENEFIT of a smaller subp[]: 0.5% at 340 MB, 9.5% at 85 MB, 14.1%
+        // at 21 MB. Nothing gets that for free, though. Multi-level batch inversion buys the
+        // smaller buffer by computing chunk products in an extra forward pass and recomputing the
+        // suffix products from them, so its price is one extra pass per level.
+        //
+        // This is that pass, and it is a faithful cost model rather than a guess: a chunk-product
+        // accumulation IS the ladder's arithmetic with the stores removed -- same sub_mod, same
+        // mul_mod, same trip count, and NO memory traffic. Set it alongside SUBP_WRAP and the pair
+        // reproduces both halves of the trade at once, so the wall clock of a multi-level kernel
+        // is measurable BEFORE the (correct, and much harder) arithmetic is written:
+        //
+        //   two-level    48 slots, ~128 MB    SUBP_WRAP=32 SUBP_PASSES=1
+        //   three-level  24 slots,  ~64 MB    SUBP_WRAP=32 SUBP_PASSES=2
+        //
+        // Both are still WRONG by construction and both will still report EXACT, for the reason
+        // the wrap series already established: loop mode checks the jumped point, which rides the
+        // inverse chain and never reads subp[]. Timing is the whole signal.
+        //
+        // The `sink` escape is not optional. Without it nvcc deletes the entire pass -- cacc is
+        // dead -- and the build measures nothing while looking like it measured something. Same
+        // reason NO_HASH carries a sink at all (see the note at its definition).
+        // WRITTEN OUT RATHER THAN LOOPED OVER p, and both halves of that are load-bearing.
+        //
+        // A `for (p...)` loop let nvcc keep ONE body and a trip counter: SUBP_PASSES=2 came out
+        // +280 instructions against +272 for one pass, so the static count could not distinguish
+        // "two passes" from "one pass plus loop control", and the rung would have been unreadable
+        // either way. Explicit blocks make the count say exactly how many passes are in there.
+        // A per-block seed is needed too -- with identical seeds every pass computes the same
+        // cacc, `sink ^= cacc` an even number of times cancels to zero, and the whole thing is
+        // hoistable. Distinct seeds are also the more faithful model: real chunk products differ.
+        {
+            uint64_t cacc[4], ctmp[4];
+            sub_mod(cacc, &c_Gx[0], x1);
+            for (int i = half - 2; i >= 0; --i) {
+                sub_mod(ctmp, &c_Gx[(size_t)(i + 1) * 4], x1);
+                mul_mod(cacc, cacc, ctmp);
+            }
+            sink ^= cacc[0] ^ cacc[1] ^ cacc[2] ^ cacc[3];
+        }
+#if SUBP_PASSES >= 2
+        {
+            uint64_t cacc[4], ctmp[4];
+            sub_mod(cacc, &c_Gx[4], x1);
+            for (int i = half - 2; i >= 0; --i) {
+                sub_mod(ctmp, &c_Gx[(size_t)(i + 1) * 4], x1);
+                mul_mod(cacc, cacc, ctmp);
+            }
+            sink ^= cacc[0] ^ cacc[1] ^ cacc[2] ^ cacc[3];
+        }
+#endif
+#endif
 
 		uint64_t inverse[5];
 		sub_mod((uint64_t*)inverse, &c_Gx[0], x1);      // d0 = c_Gx[0] - x1, straight into inverse[0..3]

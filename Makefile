@@ -144,6 +144,15 @@ ifneq ($(strip $(SUBP_WRAP)),)
 NVCCFLAGS += -DSUBP_WRAP=$(SUBP_WRAP)
 endif
 
+# P6's cost half. `make SUBP_PASSES=2` adds two extra chunk-product passes -- the ladder's
+# arithmetic with the stores removed, which is exactly what multi-level batch inversion pays for
+# its smaller buffer. NO_HASH only (it escapes through that build's sink). Paired with SUBP_WRAP
+# it simulates a multi-level kernel's wall clock before the real arithmetic is written.
+SUBP_PASSES ?=
+ifneq ($(strip $(SUBP_PASSES)),)
+NVCCFLAGS += -DSUBP_PASSES=$(SUBP_PASSES)
+endif
+
 CPU_SRC := cCUDAHurricane.cpp EcInt.cpp GpuPuzzle.cpp EcPoint.cpp Ec.cpp
 GPU_SRC := GpuCore.cu GpuEc.cu
 HDRS    := $(wildcard *.h *.cuh)
@@ -182,7 +191,7 @@ CU_OBJECTS  := $(GPU_SRC:.cu=.o)
 
 TARGET := cCUDAHurricane
 
-.PHONY: all clean ptxinfo sass cubin nohash-cubin p2-cubins p3-cubins rdc-cubins subp-cubins
+.PHONY: all clean ptxinfo sass cubin nohash-cubin p2-cubins p3-cubins rdc-cubins subp-cubins ml-cubins
 
 all: $(TARGET)
 
@@ -353,6 +362,47 @@ subp-cubins:
 	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=128 CUBIN_FILE=GpuCore_w128.cubin SM=$(SM_ARCHS)
 	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=32  CUBIN_FILE=GpuCore_w32.cubin  SM=$(SM_ARCHS)
 	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=8   CUBIN_FILE=GpuCore_w8.cubin   SM=$(SM_ARCHS)
+
+# P6, the whole trade in one run. MEASURED 2026-08-27: the wrap series priced the BENEFIT at
+# 0.5% (340 MB) / 9.5% (85 MB) / 14.1% (21 MB) on the median, side A holding to 0.58% across
+# the three. Multi-level batch inversion is how you would actually reach those footprints, and
+# it is not free -- one extra chunk-product pass per level. These two rungs carry BOTH halves,
+# so the net is measurable before the real arithmetic is written:
+#
+#   ./abtest ../../GpuCore_w512.cubin ../../GpuCore_ml2.cubin 174080 180s loop
+#   ./abtest ../../GpuCore_w512.cubin ../../GpuCore_ml3.cubin 174080 180s loop
+#
+#   ml2   one extra pass    +272 static, +11.2% dynamic    wrap 32 -> 85 MB
+#   ml3   two extra passes  +544 static, +22.4% dynamic    wrap 32 -> 85 MB
+#
+# ml2 IS THE ANSWER RUNG, and ml3 is a stress bound -- which is the opposite of how the names
+# read, so: a real three-level scheme does NOT pay two full passes. Its level-1 recompute is
+# 448 multiplies and its level-2 recompute only 56, so three-level costs about ONE extra pass
+# plus a rounding error, the same as two-level. ml3 doubles the expensive pass and is therefore
+# a pessimistic ceiling on both schemes, not a model of either.
+#
+# Footprint is pessimistic too. Both rungs are held at wrap 32 (85 MB, where the benefit
+# measured 9.5%) because the probe cannot express a non-power-of-two mask, while the real
+# schemes need 48 slots (~128 MB) and 24 slots (~64 MB). Three-level's true footprint is
+# SMALLER than what ml2 simulates, so its benefit is understated here by roughly 1.5 points.
+#
+# Both errors point the same way -- against the change -- so a win on ml2 is a floor.
+#
+# VERIFIED OFFLINE: ml2 +272 and ml3 +544 instructions, exactly 2x, both REG:128 STACK:16384
+# with no spill and 6 LDL / 4 STL identical to w512, so occupancy and memory-op count are held
+# and the added work is pure ALU. The passes are written out rather than looped: under a
+# `for (p...)` nvcc kept one body and a trip counter (+280 for two passes against +272 for one)
+# and the static count could not tell two passes from one.
+#
+# Same reading rules as the wrap series: both report EXACT and it means nothing, timing is the
+# whole signal, and side A must hold near its 34.57-34.78 ms band from the first three runs.
+# B/A < 1 means the trade nets out and multi-level is worth building. B/A > 1 kills it, and
+# kills it BEFORE anyone rewrites the one part of this kernel that took a ten-rung ladder to
+# verify.
+ml-cubins:
+	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=512 CUBIN_FILE=GpuCore_w512.cubin SM=$(SM_ARCHS)
+	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=32 SUBP_PASSES=1 CUBIN_FILE=GpuCore_ml2.cubin SM=$(SM_ARCHS)
+	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=32 SUBP_PASSES=2 CUBIN_FILE=GpuCore_ml3.cubin SM=$(SM_ARCHS)
 
 $(TARGET): $(CPP_OBJECTS) $(CU_OBJECTS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)
