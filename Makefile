@@ -184,11 +184,19 @@ all: $(TARGET)
 # every __device__/__constant__ variable internal linkage and cuModuleGetGlobal
 # cannot find the constant tables.
 #
-# It is not free. -rdc stops getHash160_33/_w2 being emitted inside
-# .text.TestKernel and gives them their own sections, so the device code is NOT the
-# same as the default build: .text.TestKernel 0x27000 -> 0x17700 plus 0x8080 +
-# 0x7e80 of hash, i.e. 159744 -> 161280 bytes total (+96 instructions, +0.96%).
-# Diff against `make sass` before treating a timing difference as a real one.
+# It is not free, and as of 2026-08-26 the price is measured rather than counted:
+# 0.38% of wall clock sustained (1.36% at peak clock) -- see `rdc-cubins` below.
+# -rdc stops getHash160_33/_w2 being emitted inside .text.TestKernel and gives them
+# their own sections, so the device code is NOT the same as the default build:
+# .text.TestKernel 0x27000 -> 0x17700 plus 0x8080 + 0x7e80 of hash, i.e.
+# 159744 -> 161280 bytes total (+96 instructions, +0.96%) and REG 122 -> 126.
+# Occupancy is unaffected -- both are under the __launch_bounds__(256,2) ceiling of
+# 128 and neither spills -- so what the 0.38% buys is code layout.
+#
+# It costs the NO_HASH build NOTHING: same REG 128, one .text section either way, and
+# 5,520 instructions against plain's 5,528. With the hash compiled out there is nothing
+# to out-line. So GpuCore_nohash.cubin -- side A of every points-only A/B in this repo --
+# carries no -rdc bias, and those ratios stand as measured.
 #
 # Single-arch only: -cubin with several -gencode flags does not produce one cubin.
 cubin: GpuCore.cu $(HDRS) GpuHash.cu
@@ -225,10 +233,13 @@ nohash-cubin:
 #   ./abtest GpuCore_b1024.cubin GpuCore_b256.cubin 174080 180s loop 256
 #
 #   B vs A in that run    -- both at batch 256, so the FRAME is the only variable.
-#   A vs 80.07-80.09 ms   -- side A is byte-identical to GpuCore_p3base, which four P3 runs put
-#                            at that median at batch 1024 with a spread of 0.031%. So side A's
-#                            own number here IS the batch-size effect, measured against an anchor
-#                            tighter than anything the effect could plausibly be.
+#   A vs the anchor       -- side A is byte-identical to GpuCore_p3base, so side A's own number
+#                            here IS the batch-size effect. STALE AS WRITTEN: this read
+#                            "A vs 80.07-80.09 ms" from the four P3 runs, and that median moved
+#                            2.1% by 2026-08-26 on an unchanged binary and an unchanged toolkit.
+#                            Anchor on the BEST across sessions (75.15-75.55 ms, 0.52% over three
+#                            sessions) and re-take the median anchor in the same session as any
+#                            comparison that leans on it. See `rdc-cubins` for the evidence.
 #
 # That second comparison is why the four P3 runs were worth their wall clock beyond P3 itself,
 # and it is the first time this project has cashed in the reproducibility rather than just noting
@@ -244,12 +255,20 @@ p3-cubins:
 	$(MAKE) cubin HOIST_INV_CHAIN=1 CUBIN_FILE=GpuCore_p3hoist.cubin SM=$(SM_ARCHS)
 	$(MAKE) cubin INLINE_HASH_W2=1 HOIST_INV_CHAIN=1 CUBIN_FILE=GpuCore_p3both.cubin SM=$(SM_ARCHS)
 
-# What -rdc=true costs the SHIPPED kernel, measured instead of asserted.
+# What -rdc=true costs the SHIPPED kernel. MEASURED, 2026-08-26: 0.38% sustained and 1.36%
+# at peak clock, two runs of ~2,230 launches a side, both sides 174,080/174,080 EXACT.
 #
 #   ./abtest ../../GpuCore_rdc.cubin ../../GpuCore_plain.cubin 174080 180s loop
 #
-# A is `make cubin` verbatim -- the status quo, and what NATIVE_CUBIN loads. B is the same
-# source through a plain `-cubin`. B/A < 1 means -rdc costs (1 - B/A).
+#              A -rdc          B plain         B/A best   B/A median
+#   run 1      75.2346/78.3519 74.1165/78.0045   0.985      0.996
+#   run 2      75.1508/78.4621 74.2316/78.2083   0.988      0.997
+#
+# The best and the median disagree by ~1% REPRODUCIBLY (1.0% and 0.9%), so that gap is a
+# result and not noise: B's lead shrinks as the card derates, which puts the mechanism on the
+# core-clock side -- instruction fetch, where keeping both hash bodies inside the kernel's own
+# section pays. Quote the MEDIAN; the shipped program runs 14-27 s launches and never sees a
+# best. Kept as a target because the pair has to be rebuildable from one tree.
 #
 # THIS COMPARISON WAS NOT BUILDABLE UNTIL NOW, and the reason is circular: -rdc's only
 # purpose here is to give the five __constant__ tables GLOBAL binding, so the cheaper build
@@ -268,12 +287,17 @@ p3-cubins:
 # __launch_bounds__(256,2) ceiling of 128 and neither spills, so occupancy is held equal by
 # construction and layout is most of what is left.
 #
-# NO NOISE-FLOOR RUN IS NEEDED -- it is already banked four times. Side A is byte-identical
-# to GpuCore_p3base, whose median came out 80.0835 / 80.0915 / 80.0667 / 80.0824 ms across
-# four separate six-minute invocations, a spread of 0.031%. So: side A here must land in
-# 80.07-80.09 ms or the session is not clean and the ratio should be discarded, and any
-# effect above ~0.1% is real. Same grid, same batch, same duration as those four runs --
-# change any of them and the anchor stops applying.
+# THE ANCHOR TO CHECK AGAINST IS THE BEST, NOT THE MEDIAN, and this pair is what established
+# that. Side A is byte-identical to GpuCore_p3base, which on 2026-08-17 gave a median of
+# 80.0835/80.0915/80.0667/80.0824 ms -- a 0.031% spread that looked like the tightest anchor
+# in the project. Nine days later the same binary gave 78.3519 and 78.4621: 0.14% from each
+# other and 2.1% from that anchor, with GpuCore.cu unchanged bar a comment, the same CUDA
+# 13.0 and EIATTR_REGCOUNT still 126. A healthy card's SUSTAINED clock drifts; its ceiling
+# barely does. Across all three sessions A's best is 75.5450/75.2346/75.1508 -- 0.52% -- while
+# its median spans 2.19%. So: anchor on the best across sessions, read the ratio off the
+# median within a run. Current anchor, grid 680 / batch 1024 / bpl 4 / 180s:
+#
+#   full kernel, -rdc     best 75.15-75.24 ms     median 78.35-78.46 ms
 #
 # Both sides must come back 174,080 of 174,080 EXACT. That is not a formality on this pair:
 # it is the only thing that proves the patched symbols actually fed the kernel, since a

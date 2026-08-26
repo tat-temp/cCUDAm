@@ -1654,6 +1654,15 @@ written down and then tested rather than substituted for the test.
   cashed in that reproducibility rather than merely noting it, and it is worth more than the P3
   result it came from.
 
+  > **That anchor has since gone stale, and the technique needs one correction — see *What
+  > `-rdc=true` costs the shipped kernel*, 2026-08-26.** The same binary measured 78.35 and
+  > 78.46 ms nine days later, 2.1% off, with the source unchanged bar a comment and the same
+  > CUDA 13.0. A healthy card's *sustained* clock drifts; its ceiling barely does — A's **best**
+  > held to 0.52% across all three sessions where its median spanned 2.19%. So cash in the
+  > reproducibility against the **best**, and re-take any median anchor in the same session as
+  > the comparison that leans on it. The result below is unaffected: it was a same-session
+  > comparison, which is what the rule now says to do.
+
 Built: `make p2-cubins SM=120`. Verified offline — the frame goes 16,384 → 4,096 bytes, `c_Gx`
 and `c_Gy` shrink 16,384 → 4,096 each (they are sized by `MAX_BATCH_SIZE` too, which the P2 entry
 did not mention), `GpuCore_b1024.cubin` is byte-identical to the P3 baseline, and the harness
@@ -2010,6 +2019,101 @@ register table. Not worth it.
 remaining levers are the ones that change what the kernel *waits* on — the 16 KB frame and the
 `subp[]` round trip — plus P3 on the hash layer, which is 57-61% of the full kernel's wall clock
 and the only item touching it.
+
+### What `-rdc=true` costs the shipped kernel — RTX 5090, 2026-08-26
+
+**0.38% sustained, 1.36% at peak clock.** Two runs, 2,234 and 2,232 launches per side,
+interleaved, both sides 174,080 of 174,080 EXACT with every output limb agreeing:
+
+| | A — `-rdc` (`make cubin`) | B — plain `-cubin` | B/A |
+|---|---:|---:|---:|
+| run 1, best | 75.2346 ms | 74.1165 ms | 0.985 |
+| run 1, **median** | 78.3519 ms | 78.0045 ms | **0.996** |
+| run 2, best | 75.1508 ms | 74.2316 ms | 0.988 |
+| run 2, **median** | 78.4621 ms | 78.2083 ms | **0.997** |
+
+**The measurement was not buildable before, and the reason was circular.** `-rdc`'s only job in
+this project is giving the five `__constant__` tables GLOBAL binding so `cuModuleGetGlobal` can
+find them — so the cheaper build is exactly the one `abtest` cannot load, and the cost could be
+counted in instructions but never timed. `cubin_globalize.py` breaks the circle by flipping
+`STB_LOCAL` → `STB_GLOBAL` after the fact: 10 bytes, five symbols across `.symtab` and
+`.nv.merc.symtab`, with all 19,968 encoded SASS words verified identical before and after. It is
+now validated on hardware twice over — 348,160 EXACT thread-results through a patched cubin.
+
+Sides differ in exactly what `-rdc` does: REG 126 against 122, 10,080 instructions against 9,984,
+and `getHash160_33`/`_w2` in sections of their own instead of inside `.text.TestKernel`. Both are
+under the `__launch_bounds__(256,2)` ceiling of 128 and neither spills, so **occupancy is held equal
+by construction (2 blocks/SM on both sides, confirmed by the driver) and code layout is most of what
+is left.**
+
+**The median and the best disagree by 1%, reproducibly, and that is a result rather than noise.**
+The gap is 1.0% in run 1 and 0.9% in run 2 — a thermal artifact would not reproduce to a tenth of a
+percent. B's advantage is 1.36% at peak clock and 0.38% sustained, so it *shrinks* as the card
+derates, which places the mechanism on the core-clock side rather than in memory: instruction fetch,
+where keeping both hash bodies inside the kernel's own section pays. It is the throttle section's
+lesson in miniature — a clock change alters the *mix*, not just the scale — and it means the two
+statistics answer different questions here. **The median is the operationally relevant one**: the
+shipped program runs 14–27 second launches and never sees the best.
+
+**The old anchor is stale, and the anchor rule needed a band all along.** Side A is byte-identical
+to `GpuCore_p3base`, whose median came out 80.0835 / 80.0915 / 80.0667 / 80.0824 ms on 2026-08-17 —
+a spread of 0.031%. Today the same binary measured 78.3519 and 78.4621, agreeing with *each other*
+to 0.14% and with that anchor to 2.1%. `GpuCore.cu` has not changed since (the only diff is a
+comment, `09cb901`), the toolkit is CUDA 13.0 in both sessions, and `EIATTR_REGCOUNT` still reads
+126 — so this is a healthy card in a different sustained-clock state, not a broken session. That
+retires the claim in `09cb901` that the anchor "holds to a thirtieth of a percent on a healthy
+machine and was 2.4× off in the bad session. **Nothing in between has been seen.**" 2.1% is in
+between and has now been seen twice.
+
+**What replaces it: anchor on the BEST across sessions, ratio on the MEDIAN within a run.** The two
+are stable in opposite directions and both runs say so:
+
+| | 2026-08-17 | run 1 | run 2 | spread |
+|---|---:|---:|---:|---:|
+| A best | 75.5450 | 75.2346 | 75.1508 | **0.52%** |
+| A median | 80.0835 | 78.3519 | 78.4621 | **2.19%** |
+
+The best is four times the more stable cross-session quantity, because it is the least exposed to
+thermal state — the card's ceiling barely moved in nine days while its sustained clock moved 2%.
+Within a run the ordering reverses, exactly as the stall calibration found: the median ratio
+replicated to 0.1% (0.996, 0.997) against the best ratio's 0.3% (0.985, 0.988). **Neither statistic
+is simply better; each is the right one for a different comparison.**
+
+**New anchor for the full kernel** at grid 680, batch 1024, bpl 4, 180 s: best **75.15–75.24 ms**,
+median **78.35–78.46 ms**.
+
+**The points-only ratios in this document are unaffected — measured, not assumed.** `-rdc` costs
+the `NO_HASH` build nothing at all: same REG 128, one `.text` section either way, and 5,520
+instructions against the plain build's 5,528, i.e. eight *fewer*. With the hash compiled out there
+is nothing to out-line, so the whole mechanism is absent. `GpuCore_nohash.cubin` is side A of every
+points-only A/B here, and the 22.4% hand-written lead stands as measured.
+
+**Who actually pays the 0.38%.** Only a *compiled* kernel loaded through `NATIVE_CUBIN` — which is
+the configuration `proof.py` verified 592/592 and the one the native path defaults to. The shipped
+`make` build does not pay it (no `-rdc`), and neither would a hand-written `TestKernel`: RCAsm's
+template is built with `-rdc` purely for the symbol bindings and injection discards its instruction
+stream, so the tax is metadata-only there. That makes this the first item measured in the SASS
+route's favour rather than against it, and `cubin_globalize.py` now offers a third option — point
+`NATIVE_CUBIN` at a patched plain cubin and the compiled native path recovers the 0.38% too.
+**Not made the default here**: item 6 of *Still to do* (run `proof.py` against the plain build) is
+the standard this project holds a configuration change to, and 348,160 EXACT results in `abtest`
+are not that.
+
+**One trap worth recording, because it cost a diagnostic cycle.** In run 1 the harness printed
+`REG 120` for side A; in run 2 it printed `REG 126` — same file, same machine, same command. The
+cubin declares 126 in `EIATTR_REGCOUNT`, in `cuobjdump -res-usage` and in `ptxas -v`, and the
+highest register it actually names is R123. So `cuFuncGetAttribute(CU_FUNC_ATTRIBUTE_NUM_REGS)` on
+a device-linked module is **not reliably the declared count**, most likely an artifact of lazy
+module loading querying a function the driver has not materialised. It changed nothing — 120, 122,
+124 and 126 all give 2 blocks/SM — but a reader who treats that line as ground truth about the
+binary will be wrong some of the time. Read `EIATTR_REGCOUNT`, and treat `BLOCKS/SM` as the number
+the harness line is actually there to supply.
+
+**A hardware rule confirmed for free.** `asm/tk/main.asm` records, from three faulting builds, that
+the declared register count must exceed the highest register used by more than one — `regcnt >= top
++ 3` — noting ptxas hits it in the shipped kernel (122 declared, R119 top). Both builds here hit it
+**exactly**: 122 = 119 + 3 and 126 = 123 + 3. An empirical rule that cost a GPU round trip to find
+is now corroborated on a second, independently generated code shape.
 
 ### The throttle — and what it voids
 
