@@ -134,6 +134,16 @@ ifneq ($(strip $(MAX_BATCH)),)
 NVCCFLAGS += -DMAX_BATCH_SIZE=$(MAX_BATCH)
 endif
 
+# P6's probe. `make SUBP_WRAP=32` masks every subp[] index to the low 32 slots -- deliberately
+# wrong arithmetic, holding the instruction stream and the memory-op count fixed while shrinking
+# the WORKING SET. See the long note at the flag in GpuCore.cu for what it isolates and why P2's
+# 4 KB step could not have shown it. Must be a power of two. 512 is the identity on [0,511] and
+# is therefore both the matched baseline and arithmetically correct.
+SUBP_WRAP ?=
+ifneq ($(strip $(SUBP_WRAP)),)
+NVCCFLAGS += -DSUBP_WRAP=$(SUBP_WRAP)
+endif
+
 CPU_SRC := cCUDAHurricane.cpp EcInt.cpp GpuPuzzle.cpp EcPoint.cpp Ec.cpp
 GPU_SRC := GpuCore.cu GpuEc.cu
 HDRS    := $(wildcard *.h *.cuh)
@@ -172,7 +182,7 @@ CU_OBJECTS  := $(GPU_SRC:.cu=.o)
 
 TARGET := cCUDAHurricane
 
-.PHONY: all clean ptxinfo sass cubin nohash-cubin p2-cubins p3-cubins rdc-cubins
+.PHONY: all clean ptxinfo sass cubin nohash-cubin p2-cubins p3-cubins rdc-cubins subp-cubins
 
 all: $(TARGET)
 
@@ -307,6 +317,42 @@ rdc-cubins:
 	$(MAKE) cubin CUBIN_FILE=GpuCore_rdc.cubin SM=$(SM_ARCHS)
 	$(NVCC) $(NVCCFLAGS) -cubin -o GpuCore_plain.cubin GpuCore.cu
 	python3 cubin_globalize.py GpuCore_plain.cubin c_Gx c_Gy c_Jx c_Jy c_target_words
+
+# P6's probe series: does crossing the L2 boundary do anything? Four points, one variable.
+# NO_HASH on every rung -- the traffic under test is the EC walk's, and the hash layer would
+# dilute the effect by 60% for nothing. Side A is ALWAYS w512.
+#
+#   ./abtest ../../GpuCore_w512.cubin ../../GpuCore_w128.cubin 174080 180s loop
+#   ./abtest ../../GpuCore_w512.cubin ../../GpuCore_w32.cubin  174080 180s loop
+#   ./abtest ../../GpuCore_w512.cubin ../../GpuCore_w8.cubin   174080 180s loop
+#
+# RUN AT THE DEFAULT BATCH (1024) -- do not pass a batch argument. w512's correctness depends
+# on `i & 511` being the identity over [0, half-1], which holds only while half == 512. At any
+# smaller batch side A is wrong too and the series loses its anchor.
+#
+# w512 is the identity mask, so it must report 174,080/174,080 EXACT and its median is an
+# absolute anchor across the three runs -- if it drifts, the session moved and the ratios go
+# with it. w128/w32/w8 are WRONG BY CONSTRUCTION and the harness will say so; that is the
+# expected reading, exactly as the id/local rungs of the SASS ladder are read for launch
+# success only. Only the timing column means anything on those three.
+#
+# VERIFIED OFFLINE, and the isolation is the tightest in this repo. All four rungs: 5,496
+# instructions, REG:128, STACK:16384, 6 LDL / 4 STL / 22 LDC.64, and instruction text identical
+# once hex is stripped. The entire difference is FIVE immediates -- ptxas folded the wrap into
+# the byte offset, so one LOP3 per access site carries 0x3fe0 (511*32), 0x3e0 (31*32) or 0xe0
+# (7*32). The frame stays 16 KB on every rung, so P2's frame variable is held constant too and
+# only the TOUCHED range moves. For comparison the stall dose changed 3,246 encoded words.
+#
+# What the answer decides. A flat series kills multi-level batch inversion outright: the
+# +10-23% instruction cost buys nothing and P2's verdict generalises after all. A step down
+# between w128 and w32/w8 sizes the prize, and the decision is then arithmetic -- two-level
+# reaches 48 slots for ~+10%, three-level 24 slots for ~+23%, both at zero register cost
+# (the kernel has exactly ONE spare register, R125, so nothing can move into them).
+subp-cubins:
+	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=512 CUBIN_FILE=GpuCore_w512.cubin SM=$(SM_ARCHS)
+	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=128 CUBIN_FILE=GpuCore_w128.cubin SM=$(SM_ARCHS)
+	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=32  CUBIN_FILE=GpuCore_w32.cubin  SM=$(SM_ARCHS)
+	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=8   CUBIN_FILE=GpuCore_w8.cubin   SM=$(SM_ARCHS)
 
 $(TARGET): $(CPP_OBJECTS) $(CU_OBJECTS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)

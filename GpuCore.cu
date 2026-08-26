@@ -90,6 +90,50 @@ __device__ __constant__ uint64_t c_Jy[4];
 #define HOIST_INV_CHAIN 0
 #endif
 
+// P6 PROBE -- `make subp-cubins`. Wraps every subp[] index to the low SUBP_WRAP slots, which
+// is ARITHMETICALLY WRONG for any value below half and is meant to be: it shrinks the WORKING
+// SET while holding the instruction stream, the memory-operation count and the access pattern
+// fixed, so an A/B across two wrap values measures cache residency and nothing else. Same
+// shape as the stall-dose pair -- a deliberately broken build that isolates one variable.
+//
+// WHAT IT IS TESTING. The theoretical-ceiling analysis (DEVPLAN, 2026-08-26) puts this kernel
+// at 38% of issue capacity and 56% of DRAM peak, with memory binding first: subp[] is 16 KB
+// per thread and 512 resident threads on each of 170 SMs make the live set 1.39 GB against an
+// L2 of roughly 90 MB, so essentially every read of a suffix product is a DRAM read. Nothing
+// about chunking reduces the BYTES -- each slot is written once and read once at any chunk
+// size, as the P2 note says -- so the only thing a smaller buffer can buy is L2 residency,
+// and that claim has never been tested at a size where it could be true.
+//
+//   SUBP_WRAP   frame touched   live across 170 SMs   vs ~90 MB L2
+//   512 (none)      16 KB            1.39 GB           16x over
+//   128             4 KB              348 MB            4x over   <-- where P2 stopped
+//    32             1 KB               87 MB            at the boundary
+//     8             256 B            21.8 MB            well inside
+//
+// P2 IS THE REASON THIS IS A PROBE AND NOT AN IMPLEMENTATION. Its batch half moved the buffer
+// 16 KB -> 4 KB, measured +0.47%, and was written up as a refutation of reuse distance. At
+// 348 MB it never came within 4x of the cliff, so what it actually refuted was that step size.
+// Multi-level batch inversion would reach 24-48 slots for +10-23% instructions; that is worth
+// building only if the residency effect is bigger than the instruction cost, and this settles
+// which before anyone writes it.
+//
+// SUBP_WRAP=512 is the matched baseline and is exactly correct -- `i & 511` is the identity on
+// [0,511] -- so it must come back EXACT and carries the same masking instructions as the other
+// rungs. Side A of every comparison in this series.
+//
+// One confound, stated rather than hidden: a wrapped build feeds inv_mod a different value,
+// and inv_mod's loop is data-dependent. It is ~15% of the kernel, so a few percent of
+// trip-count drift is well under a percent of runtime -- far below the effect being asked
+// about, but not zero.
+#ifndef SUBP_WRAP
+#define SUBP_WRAP 0
+#endif
+#if SUBP_WRAP
+#define SUBP_IDX(i) ((i) & (SUBP_WRAP - 1))
+#else
+#define SUBP_IDX(i) (i)
+#endif
+
 #if NO_HASH
 #define HASH_CONSUME(sink, prefix, X) \
 	do { (sink) ^= (X)[0] ^ (X)[1] ^ (X)[2] ^ (X)[3] ^ (uint64_t)(prefix); } while (0)
@@ -239,23 +283,24 @@ __global__ void TestKernel(
 		sub_mod(acc, c_Jx, x1);
 		
 		#pragma unroll
-		for(int i = 0; i < 4; i++) subp[half-1][i] = acc[i];
-		
+		for(int i = 0; i < 4; i++) subp[SUBP_IDX(half-1)][i] = acc[i];
+
 		for (int i = half - 2; i >= 0; --i) {
             sub_mod(tmp, &c_Gx[(size_t)(i + 1) * 4], x1);
             mul_mod(acc, acc, tmp);
-            subp[i][0] = acc[0]; subp[i][1] = acc[1]; subp[i][2] = acc[2]; subp[i][3] = acc[3];
+            subp[SUBP_IDX(i)][0] = acc[0]; subp[SUBP_IDX(i)][1] = acc[1];
+            subp[SUBP_IDX(i)][2] = acc[2]; subp[SUBP_IDX(i)][3] = acc[3];
         }
-		
+
 		uint64_t inverse[5];
 		sub_mod((uint64_t*)inverse, &c_Gx[0], x1);      // d0 = c_Gx[0] - x1, straight into inverse[0..3]
-        mul_mod(inverse, inverse, subp[0]);
+        mul_mod(inverse, inverse, subp[SUBP_IDX(0)]);
 		
 		inv_mod((uint32_t*)inverse);
 		
 		for (int i = 0; i < half - 1; ++i) {
             uint64_t dx_inv_i[4];
-            mul_mod(dx_inv_i, subp[i], inverse);
+            mul_mod(dx_inv_i, subp[SUBP_IDX(i)], inverse);
 #if HOIST_INV_CHAIN
             // P3, second half. `inverse` is the only loop-carried value here, so the shortest
             // possible critical path through the iteration is the one that resolves it first.
@@ -375,7 +420,7 @@ __global__ void TestKernel(
 		{
             const int i = half - 1;
             uint64_t dx_inv_i[4];
-            mul_mod(dx_inv_i, subp[i], inverse);
+            mul_mod(dx_inv_i, subp[SUBP_IDX(i)], inverse);
 
             uint64_t px3[4], s[4], lam[4];
             uint64_t px_i[4], py_i[4];
