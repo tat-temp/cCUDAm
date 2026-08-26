@@ -1792,16 +1792,19 @@ about +1.9% predicted, so it is only worth running as a threshold test with that
 null hypothesis. Note the oracle is single-threaded and does one Fermat inversion per batch per
 thread, so `bpl 64` costs roughly four times this run's post-processing.
 
-> **That test was run, and it wins — see *P6* below.** The paragraph above is the correct
-> diagnosis and it was left as an optional aside for nine days. Two corrections to it, both in the
-> route's favour. The threshold is crossed at **wrap 32, not batch 64**, and it is worth **9.5%**.
-> And `SUBP_WRAP` reaches it *without* paying the +1.9%: masking the index shrinks the footprint
-> while leaving the batch size, the instruction count and the memory-operation count untouched, so
-> the fixed per-batch work is never re-amortized and the measurement is not a difference of two
-> larger numbers. **The verdict "the locality credit is zero" was drawn from a rung 4× outside L2
-> and does not survive** — `w128` reproduces this run's +0.47% at that same footprint through an
-> unrelated mechanism, which is the check that says P2 measured the right quantity and simply never
-> reached the transition.
+> **That test was run — see *P6* below. The effect is real; the fix is not.** The paragraph above
+> is the correct diagnosis and it was left as an optional aside for nine days. **The verdict "the
+> locality credit is zero" does not survive**: it was drawn from a rung 4× outside L2, the
+> threshold is crossed at **wrap 32, not batch 64**, and it is worth **9.5%**. `w128` reproduces
+> this run's +0.47% at that same footprint through an unrelated mechanism, which is the check that
+> says P2 measured the right quantity and simply never reached the transition. `SUBP_WRAP` also
+> reaches the threshold *without* paying the +1.9% — masking the index leaves batch size,
+> instruction count and memory-operation count untouched — so the effect is measured directly
+> rather than as a difference of two larger numbers.
+>
+> **What P2's bottom line got right anyway: there is nothing to collect.** Reaching those
+> footprints for real means multi-level batch inversion, whose extra chunk-product pass costs
+> ~10.1% against the 9.5% it buys. P2's *reasoning* is superseded and its *recommendation* stands.
 
 ### `asm/tk/inc.asm`, and every copy through `Copy256` — 2026-08-18 (branch `f3`)
 
@@ -2019,6 +2022,24 @@ deleting 36 indirect branches per walk iteration bought 4.9%, and P3's two halve
 and the `Copy256` stalls were all null. **Divide any static instruction-count argument by about
 five before believing it.**
 
+> **That last sentence is wrong and P6 measures it — 2026-08-27.** `SUBP_PASSES` adds pure ALU to
+> an otherwise byte-identical kernel, and **it is paid at ~90% of full weight, linearly** (one pass
+> +11.2% dynamic costs 10.1%, two cost 20.5%). The factor for added instruction count is ~1, not
+> ~5.
+>
+> **The 5× is real but its scope is narrower than "not specific to stalls".** This section's own
+> derivation says why: the schedulers are **oversubscribed 1.6×**, which is precisely the condition
+> under which an added *stall cycle* is covered by another warp and an added *issue slot* is not.
+> Absorption applies to latency, not to work. The stall answer and the ~2.8% ceiling on stall
+> scheduling are untouched — they are latency-side and were measured as such.
+>
+> **The retrodictions are not evidence for the wider claim either**, since every one of them is an
+> instruction *removal* across kernels that differ in other ways, not a controlled delta. The
+> field-math case reconciles cleanly if the hand-written kernel's *dynamic* reduction is ~25%
+> rather than the ~50% inferred from the walk alone — 22.2% at 89% weight — which is the same
+> number P6 measures directly. **Nobody has counted the dynamic instructions of either kernel**;
+> until someone does, that reconciliation is arithmetic that fits, not a result.
+
 That also settles the `.64` → `.128` question raised alongside this one, without a run. The hot
 traffic is already `.128` — `subp[]` uses `LDL.128`/`STL.128` at exactly the compiled kernel's
 counts (6 and 4). The only `.64`s in a loop are 52 `LDC.64` constant reads worth ~0.3% of the
@@ -2174,7 +2195,7 @@ at the loop bottom and **never reads `subp[]`**. The corruption reaches only the
 which under `NO_HASH` go to the XOR sink. Recorded because a green correctness column beside a
 deliberately-wrong kernel is exactly the silent-clean-report class this document keeps finding.
 
-### And the extra pass it costs is free — RTX 5090, 2026-08-27
+### And the extra pass costs more than the footprint saves — RTX 5090, 2026-08-27
 
 None of the above is available without paying for it: a smaller `subp[]` means multi-level batch
 inversion, which buys the smaller buffer with an extra chunk-product pass. `SUBP_PASSES=n` is that
@@ -2191,39 +2212,62 @@ arithmetic is written.
 Identical resources, no spill, memory-operation count identical to `w512` — so the added work is
 pure ALU and occupancy is held at 2 blocks/SM by construction rather than by hope.
 
-| `ml2` vs `w512` | A | B | B/A |
-|---|---:|---:|---:|
-| median | 34.8801 ms | 34.7499 ms | **0.996** |
-| best | 31.4004 ms | 32.1552 ms | 1.024 |
+Both rungs carry the wrap as well, so **`B/A` against `w512` is the NET of the whole trade, not the
+cost of the pass**. The cost is recovered by dividing out `w32`'s own 0.905/0.927:
 
-**Read off the median, per the rule the `-rdc` pair established: +11.2% dynamic instructions cost
-nothing.** The absorption factor holds at full strength on this shape.
+| | vs `w512` best | vs `w512` median | vs `w32` best | vs `w32` median | dynamic | **paid** |
+|---|---:|---:|---:|---:|---:|---:|
+| `ml2` — one pass | 1.024 | 0.996 | 1.105 | 1.101 | +11.2% | **90%** |
+| `ml3` — two passes | 1.123 | 1.090 | 1.211 | 1.205 | +22.4% | **91%** |
 
-**The best/median split points the same way it did on `-rdc`, with the sign reversed, and that is
-what makes it a reading rather than noise.** There B carried *fewer* instructions and led by 1.5%
-at best but 0.4% at median; here B carries *more* and loses 2.4% at best but breaks even at median.
-Both runs say the same thing: **instruction-count differences show up at peak clock and compress as
-the card derates**, which is *The throttle* below arriving from a third direction — derating shifts
-the mix toward memory-bound and squeezes exactly the issue-side differences. The shipped program
-runs sustained, so 0.996 is the operational number and 1.024 is the conservative bound.
+**Two passes cost 2.03× one pass, and both are paid at ~90% of full weight. Added ALU is not
+absorbed here at all.** Side A anchored the run at 34.8801 and 34.8543 median (0.89% over five
+runs), so the cross-run division is licensed.
 
-| | |
-|---|---:|
-| gain, wrap 32 (85 MB) | **9.5%** |
-| cost, one extra pass | **0% to 2.4%** |
-| **net** | **7.1% to 9.5%** |
+**That reconciles with the stall calibration rather than contradicting it, and the reconciliation
+is the transferable part.** That work derived the schedulers as **oversubscribed 1.6×** — 4 warps
+offering 1.59 instr/cycle into a capacity of 1 — and concluded stalls are fully hideable.
+Oversubscription means *issue* is the binding constraint, so the two kinds of added work have
+opposite prices: an added **stall cycle** is covered by another warp (the measured 5× absorption),
+an added **issue slot** competes directly and is paid nearly in full. **The 5× factor was never
+transferable to instruction count**, and every estimate in this document that leaned on it for ALU
+work is wrong in that direction. This run is what says so.
 
-**And that is a floor, by construction — both deliberate errors in the probe point against the
-change.** `ml2` is held at wrap 32 (85 MB) where a real two-level scheme wants ~48 slots (~128 MB),
-and `ml3` is a *stress bound* rather than a model of three-level, which is the opposite of how the
-names read: a real three-level scheme's level-1 recompute is 448 multiplies and its level-2 only
-56, so it costs about **one** extra pass plus a rounding error — the same as two-level, for a
-deeper cut.
+The best/median split behaves as it did on the `-rdc` pair, and separating the halves says which
+half owns it: the pass costs 10.5% at best against 10.1% at median — essentially clock-independent
+— while the wrap benefit is 7.3% at best against 9.5% at median. **Derating enlarges the memory
+benefit and leaves the ALU cost alone**, which is *The throttle* below arriving from a third
+direction and is the whole of the divergence.
 
-**Verdict: multi-level batch inversion is worth building.** It is also the first item in this
-document that helps *both* implementations equally — the wrap is a property of the algorithm, not
-of who wrote the SASS — and it attacks the residual that survived the calls, the registers and the
-occupancy work.
+| | at best | at median |
+|---|---:|---:|
+| wrap benefit, 85 MB | 7.3% | 9.5% |
+| one extra pass | −10.5% | −10.1% |
+| **net** | **−2.4%** | **+0.4%** |
+
+**And the real schemes are worse than what the probe simulated — the footprint error runs in the
+probe's favour, not against it, which is the opposite of what was written when it was built.**
+Two-level stores `C + S` slots, minimized at 24 + 24 = **48 → 134 MB**, where `ml2` simulated
+85 MB; its true benefit is *below* 9.5% against the same 10.1% pass, so it is a **net loss**.
+Three-level reaches 8 + 8 + 8 = **24 → 67 MB** (~10-11% interpolated) but costs ~1.1 passes ≈ 11%,
+so it is a **net zero**. The 14.1% rung needs 8 slots and no scheme reaches it.
+
+**Verdict: do not build multi-level batch inversion.** Nothing rescues the arithmetic — a smaller
+batch adds P2's amortization cost on top of the same pass, shared memory is 128 KB/SM against the
+512 KB/SM that even wrap 32 needs, and cutting resident threads gives back the 12.4% the occupancy
+work bought. The `subp[]` footprint is real and worth 9.5-14%, and **every mechanism for reaching
+it costs at least what it saves.**
+
+That is the probe doing exactly the job it was built for: the Makefile note said a `B/A > 1` "kills
+it BEFORE anyone rewrites the one part of this kernel that took a ten-rung ladder to verify", and
+two 180 s runs did that for the price of two `#define`s.
+
+**One reading error, recorded because it is the probe's own design turned against it.** `ml2`'s
+0.996 was first read as the *pass cost* and reported as "the extra pass is free, net 7.1-9.5% in
+favour". It is the *net*, by construction — carrying both halves in one binary is the entire point
+of the rung — and the cost only appears after dividing out `w32`. A composite measurement compared
+against 1.0 instead of against its own baseline reads as the component the reader was looking for.
+`ml3` is what exposed it: 9.0% cannot be the second half of a trade whose first half cost nothing.
 
 Two traps caught building the probe, both of which would have made it measure nothing:
 

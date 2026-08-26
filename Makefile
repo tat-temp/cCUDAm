@@ -400,21 +400,40 @@ subp-cubins:
 # kills it BEFORE anyone rewrites the one part of this kernel that took a ten-rung ladder to
 # verify.
 #
-# ml2 MEASURED 2026-08-27: B/A 0.996 median, 1.024 best. Side A landed at 34.8801 median /
-# 31.4004 best, holding its band to 0.89% over four runs, so the run is comparable. Read off
-# the median per the -rdc rule: THE EXTRA PASS IS FREE, and the trade nets 9.5% - (0 to 2.4%)
-# = 7.1-9.5% in favour. Multi-level batch inversion is worth building.
+# MEASURED 2026-08-27. Side A anchored both runs at 34.8801 and 34.8543 median, 0.89% over
+# five runs, so the ratios are comparable to the wrap series and to each other:
 #
-# The best/median split reverses the -rdc pair's sign and that is what makes it readable: there
-# B had FEWER instructions and led 1.5% at best against 0.4% at median; here B has MORE and
-# loses 2.4% at best against 0% at median. Instruction-count differences show at peak clock and
-# compress as the card derates. The shipped program runs sustained, so 0.996 is the operational
-# number and 1.024 is the conservative bound.
+#                    vs w512      vs w32       dynamic   paid
+#   ml2  one pass    0.996 med    1.101 med    +11.2%    90%
+#   ml3  two passes  1.090 med    1.205 med    +22.4%    91%
 #
-# ml3 IS STILL WORTH RUNNING, now as a margin test rather than a decision: if two passes are
-# also absorbed, the absorption budget has room and a level count is not what constrains the
-# design. If ml3 costs roughly 2x ml2's best-case 2.4%, the budget is at its edge and the
-# scheme should stay two-level.
+# BOTH RUNGS CARRY THE WRAP TOO, so B/A against w512 is the NET of the whole trade and not the
+# cost of the pass -- divide out w32's own 0.905 to get the cost. Two passes cost 2.03x one
+# pass, both paid at ~90% of full weight: ADDED ALU IS NOT ABSORBED HERE AT ALL.
+#
+# That agrees with the stall calibration instead of contradicting it. Schedulers are
+# oversubscribed 1.6x, which is why an added STALL CYCLE is covered by another warp (the 5x
+# absorption) and an added ISSUE SLOT is not. The 5x factor never transferred to instruction
+# count.
+#
+#   at median:  wrap benefit 9.5%   one pass -10.1%   net +0.4%
+#   at best:    wrap benefit 7.3%   one pass -10.5%   net -2.4%
+#
+# The pass cost is clock-independent; only the memory benefit grows as the card derates.
+#
+# AND THE FOOTPRINT ERROR RUNS IN THE PROBE'S FAVOUR, opposite to what is written above.
+# Two-level stores C+S slots, minimized at 24+24 = 48 -> 134 MB where ml2 simulated 85 MB, so
+# its true benefit is below 9.5% against the same 10.1% pass: a net LOSS. Three-level reaches
+# 8+8+8 = 24 -> 67 MB (~10-11%) but costs ~1.1 passes ~ 11%: a net ZERO. The 14.1% rung needs
+# 8 slots and no scheme reaches it.
+#
+# VERDICT: DO NOT BUILD MULTI-LEVEL BATCH INVERSION. The subp[] footprint is real and worth
+# 9.5-14%, and every mechanism for reaching it costs at least what it saves. A smaller batch
+# adds P2's amortization on top of the same pass; shared memory is 128 KB/SM against the
+# 512 KB/SM wrap 32 needs; fewer resident threads gives back the 12.4% occupancy win.
+#
+# Which is this target doing its job: two 180 s runs and two #defines, instead of rewriting the
+# one part of this kernel that took a ten-rung ladder to verify.
 ml-cubins:
 	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=512 CUBIN_FILE=GpuCore_w512.cubin SM=$(SM_ARCHS)
 	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=32 SUBP_PASSES=1 CUBIN_FILE=GpuCore_ml2.cubin SM=$(SM_ARCHS)
