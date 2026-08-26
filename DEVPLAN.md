@@ -1792,6 +1792,17 @@ about +1.9% predicted, so it is only worth running as a threshold test with that
 null hypothesis. Note the oracle is single-threaded and does one Fermat inversion per batch per
 thread, so `bpl 64` costs roughly four times this run's post-processing.
 
+> **That test was run, and it wins — see *P6* below.** The paragraph above is the correct
+> diagnosis and it was left as an optional aside for nine days. Two corrections to it, both in the
+> route's favour. The threshold is crossed at **wrap 32, not batch 64**, and it is worth **9.5%**.
+> And `SUBP_WRAP` reaches it *without* paying the +1.9%: masking the index shrinks the footprint
+> while leaving the batch size, the instruction count and the memory-operation count untouched, so
+> the fixed per-batch work is never re-amortized and the measurement is not a difference of two
+> larger numbers. **The verdict "the locality credit is zero" was drawn from a rung 4× outside L2
+> and does not survive** — `w128` reproduces this run's +0.47% at that same footprint through an
+> unrelated mechanism, which is the check that says P2 measured the right quantity and simply never
+> reached the transition.
+
 ### `asm/tk/inc.asm`, and every copy through `Copy256` — 2026-08-18 (branch `f3`)
 
 The hand-written kernel's arithmetic now lives in **`asm/tk/inc.asm`** beside `main.asm` instead of
@@ -2114,6 +2125,116 @@ the declared register count must exceed the highest register used by more than o
 + 3` — noting ptxas hits it in the shipped kernel (122 declared, R119 top). Both builds here hit it
 **exactly**: 122 = 119 + 3 and 126 = 123 + 3. An empirical rule that cost a GPU round trip to find
 is now corroborated on a second, independently generated code shape.
+
+### P6 — `subp[]` does not fit in L2, and that is worth 9.5% — RTX 5090, 2026-08-26/27
+
+The residual from *The calls were not it*, sized at last. That section left hypothesis 1 — the
+16 KB local frame and the 32 KB of `subp[]` traffic per thread per batch — as the unexplained
+remainder behind a 15.6% result, and said the direct experiment was a build at a smaller batch.
+P2 ran that experiment and came back +0.47%, which was read as a refutation. **It was not. P2
+stopped 4× short of the cliff.**
+
+`SUBP_WRAP=n` masks every `subp[]` index to `n` slots, so the ladder and the walk keep every
+instruction and every memory operation and simply reuse a smaller window. The arithmetic is
+deliberately wrong past the first `n` slots — this rung measures footprint and nothing else — and
+`loop` mode cannot see that, which is the trap recorded below. Four rungs, 174,080 threads,
+~4,800 launches a side, interleaved:
+
+| rung | per thread | × 87,040 resident threads | B/A best | B/A median | gain |
+|---|---:|---:|---:|---:|---:|
+| `w512` (side A) | 16 KB | 1,360 MB | — | — | — |
+| `w128` | 4 KB | 340 MB | 0.995 | 0.995 | **0.5%** |
+| `w32` | 1 KB | 85 MB | 0.927 | 0.905 | **9.5%** |
+| `w8` | 256 B | 21 MB | 0.890 | 0.859 | **14.1%** |
+
+The curve has the shape a residency effect makes — flat while far over capacity, a step as it
+crosses — and it **brackets the L2 capacity** rather than assuming it: 340 MB is outside, 85 MB is
+inside, which puts the boundary between them and is consistent with this card's ~88-96 MB.
+
+**`w128` independently reproduced P2's +0.47%.** Same magnitude, completely different mechanism —
+address masking rather than batch size. That is strong evidence P2 measured the right quantity and
+drew the wrong conclusion: at 340 MB it never came within 4× of the transition.
+
+**The spread corroborates it from a second direction.** Across the three runs A's spread grows
+12.6 → 13.5 → 14.1% while B's *falls* 12.7 → 10.0 → 9.3%. Less DRAM traffic, less power, less
+derate, tighter distribution. It also explains the harness's "not thermally clean" flag on the last
+two: the two ratios diverge because the two **sides** derate differently, which is a property of
+the comparison rather than noise.
+
+**Side A has no historical anchor and had to earn one within the series** — `w512` is a new binary,
+and `GpuCore_nohash`'s 29.1-29.4 ms history came from 5-iteration runs against these 180 s
+sustained ones. It self-anchored across four runs: median 34.7757 / 34.6653 / 34.5737 / 34.8801
+(**0.89%**), best 31.6086 / 31.4609 / 31.3005 / 31.4004 (**0.98%**). That is what licenses reading
+the four rungs against each other.
+
+**The correctness column carries no information in this series, and it looks like it does.** Every
+rung reports 174,080 EXACT however corrupted `subp[]` is, because `loop` mode checks the jumped
+point — which rides the `inverse` chain, and the chain is advanced by `inverse *= (c_Gx[i] - x1)`
+at the loop bottom and **never reads `subp[]`**. The corruption reaches only the candidate points,
+which under `NO_HASH` go to the XOR sink. Recorded because a green correctness column beside a
+deliberately-wrong kernel is exactly the silent-clean-report class this document keeps finding.
+
+### And the extra pass it costs is free — RTX 5090, 2026-08-27
+
+None of the above is available without paying for it: a smaller `subp[]` means multi-level batch
+inversion, which buys the smaller buffer with an extra chunk-product pass. `SUBP_PASSES=n` is that
+pass and only that pass — the ladder's arithmetic with the stores removed — so paired with the wrap
+one binary carries both halves of the trade and the wall clock is measurable before any of the real
+arithmetic is written.
+
+| cubin | resources | instructions | vs `w512` | LDL / STL |
+|---|---|---:|---:|---:|
+| `GpuCore_w512` | REG:128 STACK:16384 | 5,496 | — | 6 / 4 |
+| `GpuCore_ml2` | REG:128 STACK:16384 | 5,768 | +272 (+4.9% static, +11.2% dynamic) | 6 / 4 |
+| `GpuCore_ml3` | REG:128 STACK:16384 | 6,040 | +544 (exactly 2×) | 6 / 4 |
+
+Identical resources, no spill, memory-operation count identical to `w512` — so the added work is
+pure ALU and occupancy is held at 2 blocks/SM by construction rather than by hope.
+
+| `ml2` vs `w512` | A | B | B/A |
+|---|---:|---:|---:|
+| median | 34.8801 ms | 34.7499 ms | **0.996** |
+| best | 31.4004 ms | 32.1552 ms | 1.024 |
+
+**Read off the median, per the rule the `-rdc` pair established: +11.2% dynamic instructions cost
+nothing.** The absorption factor holds at full strength on this shape.
+
+**The best/median split points the same way it did on `-rdc`, with the sign reversed, and that is
+what makes it a reading rather than noise.** There B carried *fewer* instructions and led by 1.5%
+at best but 0.4% at median; here B carries *more* and loses 2.4% at best but breaks even at median.
+Both runs say the same thing: **instruction-count differences show up at peak clock and compress as
+the card derates**, which is *The throttle* below arriving from a third direction — derating shifts
+the mix toward memory-bound and squeezes exactly the issue-side differences. The shipped program
+runs sustained, so 0.996 is the operational number and 1.024 is the conservative bound.
+
+| | |
+|---|---:|
+| gain, wrap 32 (85 MB) | **9.5%** |
+| cost, one extra pass | **0% to 2.4%** |
+| **net** | **7.1% to 9.5%** |
+
+**And that is a floor, by construction — both deliberate errors in the probe point against the
+change.** `ml2` is held at wrap 32 (85 MB) where a real two-level scheme wants ~48 slots (~128 MB),
+and `ml3` is a *stress bound* rather than a model of three-level, which is the opposite of how the
+names read: a real three-level scheme's level-1 recompute is 448 multiplies and its level-2 only
+56, so it costs about **one** extra pass plus a rounding error — the same as two-level, for a
+deeper cut.
+
+**Verdict: multi-level batch inversion is worth building.** It is also the first item in this
+document that helps *both* implementations equally — the wrap is a property of the algorithm, not
+of who wrote the SASS — and it attacks the residual that survived the calls, the registers and the
+occupancy work.
+
+Two traps caught building the probe, both of which would have made it measure nothing:
+
+- **`for (int p = 0; p < SUBP_PASSES; ++p)` let nvcc keep one body and a trip counter** — +280 for
+  two passes against +272 for one, so the static count could not tell two passes from one. Written
+  out explicitly under `#if SUBP_PASSES >= 2`, it is +272 and +544 exactly.
+- **Identical per-pass seeds made the whole probe hoistable.** `sink ^= cacc` an even number of
+  times with the same `cacc` cancels to zero, so nothing had to be computed. The seeds differ now,
+  which is also the more faithful model — real chunk products differ. An intermediate `(p & 3)`
+  version additionally introduced 32 bytes of spill (STACK 16416, LDL 9 / STL 7); the explicit
+  unroll removed that too.
 
 ### The throttle — and what it voids
 

@@ -399,6 +399,22 @@ subp-cubins:
 # B/A < 1 means the trade nets out and multi-level is worth building. B/A > 1 kills it, and
 # kills it BEFORE anyone rewrites the one part of this kernel that took a ten-rung ladder to
 # verify.
+#
+# ml2 MEASURED 2026-08-27: B/A 0.996 median, 1.024 best. Side A landed at 34.8801 median /
+# 31.4004 best, holding its band to 0.89% over four runs, so the run is comparable. Read off
+# the median per the -rdc rule: THE EXTRA PASS IS FREE, and the trade nets 9.5% - (0 to 2.4%)
+# = 7.1-9.5% in favour. Multi-level batch inversion is worth building.
+#
+# The best/median split reverses the -rdc pair's sign and that is what makes it readable: there
+# B had FEWER instructions and led 1.5% at best against 0.4% at median; here B has MORE and
+# loses 2.4% at best against 0% at median. Instruction-count differences show at peak clock and
+# compress as the card derates. The shipped program runs sustained, so 0.996 is the operational
+# number and 1.024 is the conservative bound.
+#
+# ml3 IS STILL WORTH RUNNING, now as a margin test rather than a decision: if two passes are
+# also absorbed, the absorption budget has room and a level count is not what constrains the
+# design. If ml3 costs roughly 2x ml2's best-case 2.4%, the budget is at its edge and the
+# scheme should stay two-level.
 ml-cubins:
 	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=512 CUBIN_FILE=GpuCore_w512.cubin SM=$(SM_ARCHS)
 	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=32 SUBP_PASSES=1 CUBIN_FILE=GpuCore_ml2.cubin SM=$(SM_ARCHS)
