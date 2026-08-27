@@ -2366,6 +2366,77 @@ arithmetic — 759,346 instructions, **66.5%** — is untouched by any of it. Th
 against the whole clock, the L2 benefit is charged against the whole clock, and the benefit caps
 at 14%.
 
+### The weight is constant, and the 42.4% was never worth 42.4% — RTX 5090, 2026-08-27
+
+Two candidate explanations for the 91%-vs-52% gap, both killed, and the third is the one that
+matters for the whole SASS route.
+
+**1. The memory-ridge reading is refuted.** `wt-cubins` runs the same extra pass at the full
+1,360 MB footprint instead of wrap 32's 85 MB — the same 5,768-instruction stream, differing in
+**four** `LOP3.LUT` mask immediates and nothing else.
+
+| one extra pass, +11.0% dynamic instructions | cost | weight |
+|---|---:|---:|
+| at wrap 32 — 85 MB, L2-resident | 10.1% | 92% |
+| at wrap 512 — 1,360 MB, 16× the memory pressure | **9.4%** | **85%** |
+
+`B/A` was 1.094 median against 1.093 best — agreeing to **0.1%**, spreads 6.7%/6.3%, the cleanest
+run in the series, and both sides EXACT (these are the only rungs here whose correctness column
+carries information, since `w512` is the identity mask and the pass is inert). Ridge-dependence
+predicted ≈1.05 or lower. **The weight barely moves**, so instructions are fully priced whatever
+the memory pressure.
+
+**2. The dependency-chain reading is refuted too.** `asm/tk/stalls.py` decodes the stall count
+from each instruction's control word (bits 105-108) and weights it by the same trip counts:
+
+| | A | B |
+|---|---:|---:|
+| trip-weighted mean stall | 1.988 | 2.720 |
+| 4 warps/scheduler offer | 2.01 instr/cycle | 1.47 instr/cycle |
+| | issue-bound | **still issue-bound** |
+
+Both schedulers are oversubscribed. A local model that charges `max(4 warps, stall)` per
+instruction — so a low-stall phase cannot subsidise a high-stall one — predicts **B/A = 0.582**
+against pure count's 0.576, where the measurement is 0.778. **Stall explains 0.6 points of a
+20-point gap.** The decoder is validated rather than assumed: S01 dominates both kernels
+(41%/43%), which is what the hand-written source says it must.
+
+**3. The cause is the opcode mix, and it caps this route.** `asm/tk/mix.py`:
+
+| per batch | A — compiled | B — hand-written |
+|---|---:|---:|
+| **IMAD** | 315,830 — 27.7% | **335,363 — 51.0%** |
+| IADD3 | 577,313 — 50.6% | 291,561 — 44.4% |
+| IADD | 174,104 — 15.3% | — |
+| total | 1,141,278 | 657,278 |
+
+**B issues 6.2% MORE integer multiplies than A while issuing 42.4% fewer instructions.** Every
+instruction it saves is carry-chain bookkeeping — IADD3/IADD, 751,417 → 291,561, a 61% cut — and
+the multiply count goes *up*.
+
+Per routine, read straight off the loop bodies: ptxas's `mul_mod` is **75 IMADs in ~222
+instructions**; RCAsm's `MulMod256` is **78 IMADs in 112 instructions**. The 2× instruction ratio
+this entire route was premised on is real and it is **entirely bookkeeping**. The multiplies are
+fixed by the schoolbook 256×256 structure — 16 limb products at four IMADs each — and neither
+implementation goes below it, because neither can.
+
+Fitting `cycles ∝ α·IMAD + β·other` to the measured 0.778 gives **α/β ≈ 3.6**: an IMAD costs
+about 3.6× a bookkeeping instruction here. That ratio is an inference from one measurement and a
+purely additive model, so treat it as the shape of the answer rather than a constant — but the
+*counts* it is fitted to are exact, and they alone say the 42.4% was never worth 42.4%.
+
+**What this means for the route, and it is the sharpest bound yet stated.** *What it would
+actually take* sized the prize at ~15% from halving field-math instructions; the occupancy work
+revised it to 8.8% whole-program. Both assumed instruction count is the currency. It is not —
+IMAD count is, and **the hand-written kernel has already spent slightly more of it than the
+compiler did.** There is no further win available from re-scheduling or re-registering the
+existing routines; a real gain now requires issuing *fewer multiplies*, which is an algorithmic
+change to the field arithmetic (Karatsuba on the limb product, a different reduction), not a
+codegen one.
+
+**And it retires the `MulMod256` 112-vs-222 headline as a performance argument.** It stays true
+as an instruction count and stops being evidence about speed.
+
 ### The throttle — and what it voids
 
 `GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago
