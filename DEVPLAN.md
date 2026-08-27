@@ -2437,6 +2437,59 @@ codegen one.
 **And it retires the `MulMod256` 112-vs-222 headline as a performance argument.** It stays true
 as an instruction count and stops being evidence about speed.
 
+### It is `IMAD.WIDE`, it costs 4, and that is the ceiling — RTX 5090, 2026-08-27
+
+The headline lead re-measured in the fast state, same run, interleaved — the first time it has been
+taken as one measurement rather than assembled from separate sessions:
+
+| | A `GpuCore_nohash` | B `TestKernel_loop` | B/A |
+|---|---:|---:|---:|
+| median | 29.7138 ms | 23.2891 ms | **0.784** |
+| best | 28.5248 ms | 22.4836 ms | 0.788 |
+
+Ratios agree to 0.6%, both sides EXACT 174,080, side A at 29.71 inside the 29.4-29.9 fast-state
+band. **21.6%, against the 22.2% this document has carried** — confirmed, and now cleanly.
+Incidentally it also validates cross-session scaling by the reference side: B was predicted at
+23.29 ms by scaling the old 22.8921 by A's session ratio, and measured **23.2891**.
+
+**Which IMAD, measured (`asm/tk/imad.py`): essentially all of them are `IMAD.WIDE`** — the
+32×32→64 form, 314,500 of A's 315,830 and 329,868 of B's 331,167. That matters because a fitted
+cost of ~3.7× cannot be issue slots: a scheduler issues one instruction per cycle whatever the
+pipe. It can be **pipe occupancy** — a 64-bit-result multiply holds the multiplier for several
+passes — and that is a claim with no free parameter in it:
+
+| cost model | A cycles | B cycles | B/A |
+|---|---:|---:|---:|
+| `IMAD.WIDE` = 4, everything else = 1 | 2,088,768 | 1,650,779 | **0.790** |
+| **measured** | | | **0.784** |
+
+**A quarter-rate wide multiply fits to 0.8%.** Under it, the multiplier holds **60.5%** of A's
+time and **80.2%** of B's.
+
+**That is the ceiling on the whole SASS route, and it is a hard one.** If B's bookkeeping went to
+*zero* — every IADD3, LOP3, MOV, LDC and branch free — it would still be 1,324,668 multiplier
+cycles against A's 2,088,768, i.e. **B/A = 0.634**. So everything still available from
+instruction-count work on the existing routines is the gap between 0.784 and 0.634: **at most 15
+points of ratio, for deleting literally all of the non-multiply work.** Realistically a small
+fraction of that.
+
+**And the compiler is already ahead on the metric that binds.** `mul_mod` is 75 wide multiplies
+where `MulMod256` is 78 — RCAsm spends three *more* per modular multiply and pays for its
+112-vs-222 instruction win entirely in the cheap pipe. Per key it is 308.4 wide multiplies against
+323.4.
+
+**So the only direction left is issuing fewer multiplies.** At 8×32-bit limbs the schoolbook
+product is 8×8 = 64 wide multiplies, and `mul_mod`'s 75 is that plus ~11 for the fold by K — which
+is essentially optimal *for schoolbook*. One level of Karatsuba splits it into three 4-limb
+products, 3×16 = **48**, a 25% cut in the quantity that owns 60-80% of the clock. On a kernel this
+multiplier-bound that is worth more than anything else left in this document.
+
+**It is not free and nobody has counted the other side of it.** Karatsuba pays in additions and in
+the sign handling of the middle term, and additions are the pipe this kernel has in surplus —
+which is exactly why the trade looks favourable here and would not on a machine with a fast
+multiplier. Count the added IADD3s against 16 saved `IMAD.WIDE` per modmul before believing it.
+That count is an offline exercise on `Math.cuh`, not a GPU run.
+
 ### The throttle — and what it voids
 
 `GpuCore.cubin` built `NO_HASH=1` measured **19.5350 ms** at grid 170 in the run three commits ago
