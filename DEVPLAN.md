@@ -2039,6 +2039,10 @@ five before believing it.**
 > rather than the ~50% inferred from the walk alone — 22.2% at 89% weight — which is the same
 > number P6 measures directly. **Nobody has counted the dynamic instructions of either kernel**;
 > until someone does, that reconciliation is arithmetic that fits, not a result.
+>
+> **Counted 2026-08-27 — and it does not fit.** A is 1,114.5 instructions/key and B is 641.9, so
+> B's reduction is **42.4%**, not ~25%, and its 22.2% lead is **52%** conversion rather than 89%.
+> See *The dynamic instruction counts* below.
 
 That also settles the `.64` → `.128` question raised alongside this one, without a run. The hot
 traffic is already `.128` — `subp[]` uses `LDL.128`/`STL.128` at exactly the compiled kernel's
@@ -2279,6 +2283,88 @@ Two traps caught building the probe, both of which would have made it measure no
   which is also the more faithful model — real chunk products differ. An intermediate `(p & 3)`
   version additionally introduced 32 bytes of spill (STACK 16416, LDL 9 / STL 7); the explicit
   unroll removed that too.
+
+### The dynamic instruction counts, at last — 2026-08-27
+
+Every performance estimate in this document has been built on static counts or on the ~2,707/~1,207
+hash/field split, which is itself an estimate. `asm/tk/loops.py` + `asm/tk/dyncount.py` replace them
+with a count: each instruction is weighted by the product of the trip counts of the loops containing
+it, from back-edge intervals in the SASS. Predicated-off instructions still **issue**, so every
+instruction in an interval counts once per trip — the right convention when the question is what
+competes for issue slots.
+
+Trip counts are exact where the algorithm fixes them (ladder and walk both run `half-1` = 511;
+the batch loop normalises out) and simulated where the data fixes them. The one data-dependent nest
+is `inv_mod` — a 30-bit-batched divstep, Pornin-style binary GCD — and `asm/tk/invtrips.py` ports it
+and reports **9.03 / 17.10 / 150.86** trips for the pre-loop, the outer round and the inner divstep.
+
+**The simulator is validated on two properties the trip count cannot fake**, which is the `vsim`
+lesson from `pts` applied in advance: over 3,000 uniform operands it terminates with `|modp| == 1`
+every time (gcd with a prime — breaks instantly if the matrix/shift logic is wrong) and returns the
+true inverse every time. Both kernels run the same algorithm on the same inputs and their SASS nests
+are structurally identical — pre-loop, outer with one nested inner, two normalisation loops, differing
+only in body size — so one model serves both.
+
+| per batch (1,024 keys) | A — compiled `NO_HASH` | B — hand-written |
+|---|---:|---:|
+| static | 5,520 | 3,248 |
+| batch body, straight-line | 2,658 | 1,339 |
+| ladder — 511 × body | 127,239 | 75,117 |
+| walk — 511 × body | 997,983 | 572,320 |
+| `inv_mod` / `InvMod256` | 8,504 | 8,504 |
+| **total** | **1,141,279** | **657,279** |
+| **per key** | **1,114.5** | **641.9** |
+
+**B issues 42.4% fewer instructions.** An independent corroboration of the method: B excluding the
+inversion is **633.6/key** against the **634** derived in a separate session from the cubin by a
+different route — 0.06% apart.
+
+**And it does not support the reconciliation offered above.** That block guessed B's dynamic
+reduction at ~25%, which would have put its 22.2% lead at 89% weight and matched P6's marginal
+number. The reduction is 42.4%, so the lead converts at **52%**, and the two measurements genuinely
+disagree:
+
+| | instructions | wall clock | weight |
+|---|---:|---:|---:|
+| one extra pass on A | +11.0% | +10.1% | **91%** |
+| two extra passes on A | +22.0% | +20.5% | **93%** |
+| B against A | −42.4% | −22.2% | **52%** |
+
+They reconcile only if the weight is not constant — full slope while issue-bound, flattening toward
+the memory ridge P6 measured, with both kernels carrying identical `subp[]` traffic. A at 1,114
+instr/key is well above the ridge, which is why `ml2` → `ml3` stays linear; B at 642 would be close
+enough to it that further removal pays about half. **That is not isolated and should not be quoted
+as measured.** The direct test is adding a known instruction count to the hand-written side and
+checking the weight comes out below 91%.
+
+**Where P6's answer comes from, in one line: the extra pass is one more ladder.** 125,195 against
+the ladder's 127,239, 1.6% apart. That is not a coincidence but the algebra of the scheme:
+
+| | multiplies | storage |
+|---|---:|---:|
+| standard batch inversion of N | 3(N−1) | N = 512 slots |
+| two-level, C chunks of S, CS = N | ≈ 4N | C + S = 48 slots |
+
+A 10.7× storage cut for 33% more multiplies. The SASS agrees: batch inversion is 360,766 of the
+kernel's 1,141,279 (**31.6%** — the ladder plus the walk's two chain multiplies per trip), and one
+pass adds 125,195, which is **34.7% of the inversion**. Theory and cubin within 1.7 points.
+
+**So the exchange rate has no headroom, and that is the whole of P6:**
+
+| | |
+|---|---:|
+| one level of nesting costs | +11.0% instructions → **10.1% wall clock** |
+| the entire L2 prize, at 21 MB / 8 slots | **14.1%** |
+| two-level actually reaches 48 slots → 134 MB | ~1-3% |
+| three-level actually reaches 24 slots → 67 MB | ~10-11%, at ~1.1 passes ≈ 11% |
+
+One level costs 10.1% against a best-conceivable 14.1% that no scheme reaches. Two-level loses
+outright; three-level lands on zero.
+
+**The structural reason is that the inversion is only 32% of this kernel.** The walk's point
+arithmetic — 759,346 instructions, **66.5%** — is untouched by any of it. The pass is charged
+against the whole clock, the L2 benefit is charged against the whole clock, and the benefit caps
+at 14%.
 
 ### The throttle — and what it voids
 
