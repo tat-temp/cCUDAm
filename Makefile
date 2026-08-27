@@ -191,7 +191,7 @@ CU_OBJECTS  := $(GPU_SRC:.cu=.o)
 
 TARGET := cCUDAHurricane
 
-.PHONY: all clean ptxinfo sass cubin nohash-cubin p2-cubins p3-cubins rdc-cubins subp-cubins ml-cubins
+.PHONY: all clean ptxinfo sass cubin nohash-cubin p2-cubins p3-cubins rdc-cubins subp-cubins ml-cubins wt-cubins
 
 all: $(TARGET)
 
@@ -481,3 +481,42 @@ sass: $(GPU_SRC) $(HDRS)
 
 clean:
 	rm -f $(CPP_OBJECTS) $(CU_OBJECTS) $(TARGET) $(PTXINFO_OBJS) $(SASS_OBJS) GpuCore-rdc.o
+
+# THE WEIGHT TEST. P6 priced one extra chunk-product pass at 10.1% of wall clock for +11.0% of
+# dynamic instructions -- a marginal weight of 91% -- but it measured that at WRAP 32, where
+# subp[] is L2-resident and there is little memory latency in the shadow of which added ALU
+# could hide. The dynamic counts (asm/tk/dyncount.py) then produced a number that does not fit
+# it: the hand-written kernel issues 42.4% fewer instructions and is only 22.2% faster, which is
+# 52% conversion, not 91%. Those reconcile only if the weight is NOT CONSTANT -- full slope while
+# issue-bound, flattening as the kernel approaches the memory ridge.
+#
+# This target is the single-variable test of exactly that. Same pass, same +11.0% and +22.0% of
+# dynamic instructions, at the FULL 1,360 MB footprint instead of 85 MB:
+#
+#   ./abtest ../../GpuCore_w512.cubin ../../GpuCore_ml1.cubin  174080 180s loop
+#   ./abtest ../../GpuCore_w512.cubin ../../GpuCore_ml1b.cubin 174080 180s loop
+#
+#   ml1    one extra pass    wrap 512 -> 1,360 MB   (against ml2's wrap 32 -> 85 MB)
+#   ml1b   two extra passes  wrap 512 -> 1,360 MB   (against ml3)
+#
+# IT READS DIRECTLY OFF B/A, which no other rung in this series does. A and B have IDENTICAL
+# footprints here, so there is nothing to divide out -- unlike ml2/ml3, where B/A was the net of
+# the wrap benefit and the pass cost together and reading it against 1.0 got the sign of the
+# whole P6 verdict wrong for one commit.
+#
+#   B/A ~ 1.10 and 1.20  -> weight is constant at ~91%; instructions are fully priced whatever
+#                           the memory pressure, and the 52% conversion needs another cause
+#                           entirely (dependency-chain length is the next candidate).
+#   B/A ~ 1.05 or lower  -> weight falls with memory pressure, the ridge reading is confirmed,
+#                           and the corollary is uncomfortable: the hand-written kernel sits
+#                           nearer the ridge than its 22.2% lead suggests, so further
+#                           instruction-count work on it is worth LESS than the counts imply.
+#
+# Both rungs are arithmetically WRONG past slot 511 in the same way w512 is not -- w512 is the
+# identity mask, so these two are the only rungs in the whole series whose answers should be
+# EXACT and where the correctness column therefore carries real information. If either reports
+# WRONG, the pass is clobbering something and the timing is not readable.
+wt-cubins:
+	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=512 CUBIN_FILE=GpuCore_w512.cubin SM=$(SM_ARCHS)
+	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=512 SUBP_PASSES=1 CUBIN_FILE=GpuCore_ml1.cubin SM=$(SM_ARCHS)
+	$(MAKE) cubin NO_HASH=1 SUBP_WRAP=512 SUBP_PASSES=2 CUBIN_FILE=GpuCore_ml1b.cubin SM=$(SM_ARCHS)
