@@ -2431,8 +2431,7 @@ revised it to 8.8% whole-program. Both assumed instruction count is the currency
 IMAD count is, and **the hand-written kernel has already spent slightly more of it than the
 compiler did.** There is no further win available from re-scheduling or re-registering the
 existing routines; a real gain now requires issuing *fewer multiplies*, which is an algorithmic
-change to the field arithmetic (Karatsuba on the limb product, a different reduction), not a
-codegen one.
+change to the field arithmetic, not a codegen one.
 
 **And it retires the `MulMod256` 112-vs-222 headline as a performance argument.** It stays true
 as an instruction count and stops being evidence about speed.
@@ -2477,42 +2476,6 @@ fraction of that.
 where `MulMod256` is 78 — RCAsm spends three *more* per modular multiply and pays for its
 112-vs-222 instruction win entirely in the cheap pipe. Per key it is 308.4 wide multiplies against
 323.4.
-
-**So the only direction left is issuing fewer multiplies.** At 8×32-bit limbs the schoolbook
-product is 8×8 = 64 wide multiplies, and `mul_mod`'s 75 is that plus ~11 for the fold by K — which
-is essentially optimal *for schoolbook*. One level of Karatsuba splits it into three 4-limb
-products, 3×16 = **48**, a 25% cut in the quantity that owns 60-80% of the clock. On a kernel this
-multiplier-bound that is worth more than anything else left in this document.
-
-**It is not free, and counted, it LOSES — 2026-08-27.** `asm/tk/kara/kara.cu` implements both the
-8×8 schoolbook product and subtractive Karatsuba (three 4-limb products, so the operands stay
-128-bit and the middle term is another 4×4 rather than a 5×5), compiled by the same nvcc at the
-same flags. Correctness first: the two agree on 200,000 random operand pairs plus all-ones,
-all-zero and one-half-zero edge cases, so the instruction counts describe a multiply that works.
-
-| | total | `IMAD.WIDE` | IADD3 | logic | **cost** (4×wide + rest) |
-|---|---:|---:|---:|---:|---:|
-| schoolbook | 320 | **64** | 49 | 0 | **512** |
-| Karatsuba | 584 | **48** | 104 | 27 | **728** |
-
-**The 16 saved multiplies cost 280 extra additions.** Break-even is 64 — sixteen multiplies at the
-measured 4× — so it is **4.4× over budget**, and Karatsuba comes out **42% more expensive**.
-
-**The reason is in the schoolbook row, and it is the thing the whole idea overlooked: 64
-multiplies need only 49 additions.** `IMAD.WIDE` is a fused multiply-*add*; the column
-accumulation happens inside the multiply, free. Karatsuba's restructuring breaks that fusion and
-then pays for every add explicitly — three separate carry structures instead of one shared one,
-two conditional negates, a 257-bit intermediate, a 256-bit add at a limb offset with carry
-propagation past it, and 27 instructions of sign handling where schoolbook needs none.
-
-**Hand-writing it does not rescue it.** RCAsm's measured advantage over ptxas is ~2× on
-bookkeeping; closing a 280-against-64 gap needs 4.4×. Even a perfect hand-written Karatsuba loses.
-
-**So the last direction is closed and this kernel is at its floor.** The field arithmetic is not
-merely well optimised, it is *matched to the hardware*: schoolbook plus a fused multiply-add-with-
-carry is what this machine is built to run, and every restructuring that trades multiplies for
-additions trades a fused op for unfused ones. That is why the compiler is already ahead on the
-metric that binds, and why the hand-written kernel's 21.6% is close to all there is.
 
 ### The throttle — and what it voids
 
