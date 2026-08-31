@@ -104,7 +104,8 @@ endif
 
 # P2. `make MAX_BATCH=256` sizes the kernel for a 256-key batch instead of 1024, which shrinks
 # TestKernel's subp[] local frame 16 KB -> 4 KB per thread and the c_Gx/c_Gy constant tables
-# 16 KB -> 4 KB each. Defs.h guards the default with #ifndef, so this is the whole of the change.
+# 16 KB -> 4 KB each. Defs.h guards the default with #ifndef, so the -D is the whole of the
+# change -- but it has to reach BOTH compilers, not just nvcc. See the note at the flag below.
 #
 # P2 as filed BUNDLES TWO CHANGES, and they have to be separated or the result cannot be read.
 # MAX_BATCH_SIZE is both the size of the frame and the ceiling on the run-time batch, so building
@@ -132,6 +133,17 @@ endif
 MAX_BATCH ?=
 ifneq ($(strip $(MAX_BATCH)),)
 NVCCFLAGS += -DMAX_BATCH_SIZE=$(MAX_BATCH)
+# BOTH sides, and the second one is not optional. MAX_BATCH_SIZE is read on the host as well as
+# the device -- GpuPuzzle.cpp:12 sizes BYTES_PER_THREAD from it, and cCUDAHurricane.cpp:275 uses
+# it as the ceiling it validates --grid's batch against -- so a device-only -D builds a binary
+# whose two halves disagree about the kernel's limit. The host would keep Defs.h's 1024, accept
+# `--grid 1024,...` as legal, and pass 1024 to a kernel that returns immediately at
+# GpuCore.cu:195 (`B > MAX_BATCH_SIZE`); cudaStreamSynchronize then succeeds on a kernel that
+# did nothing, the run loop counts the launch, and the program exits 2 "Range exhausted: key not
+# found" having hashed no keys at all. That is the H15/C1-C6 silent-phantom-scan shape, reached
+# through a build flag instead of a launch failure. BYTES_PER_THREAD would be wrong the same
+# way: 16,448 instead of 4,160, over-reserving 4x and under-provisioning threadsTotal.
+CCFLAGS   += -DMAX_BATCH_SIZE=$(MAX_BATCH)
 endif
 
 # P6's probe. `make SUBP_WRAP=32` masks every subp[] index to the low 32 slots -- deliberately
