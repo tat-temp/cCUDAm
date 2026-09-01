@@ -2,8 +2,7 @@
 
 #include <cstdint>
 
-//PTX asm
-//"volatile" is important
+//PTX asm. "volatile" is required: these chains pass carries through CC.CF with no clobber declared, so they must not be reordered or dropped.
 #define add_64(res, a, b)				asm volatile ("add.u64 %0, %1, %2;" : "=l"(res) : "l"(a), "l"(b)  );
 #define add_cc_64(res, a, b)			asm volatile ("add.cc.u64 %0, %1, %2;" : "=l"(res) : "l"(a), "l"(b)  );
 #define addc_64(res, a, b)				asm volatile ("addc.u64 %0, %1, %2;" : "=l"(res) : "l"(a), "l"(b));
@@ -97,14 +96,12 @@ __device__ __forceinline__ void sub_mod3(uint64_t* r, const uint64_t* a, const u
 {
 	uint32_t b1, b2, b3;
 	
-	// r = a - b
     sub_cc_64(r[0], a[0], b[0]);
     subc_cc_64(r[1], a[1], b[1]);
     subc_cc_64(r[2], a[2], b[2]);
     subc_cc_64(r[3], a[3], b[3]);
     subc_32(b1, 0, 0);				// 0 or 0xFFFFFFFFFFFFFFFF
 	
-	// r = r - c
 	sub_cc_64(r[0], r[0], c[0]);
     subc_cc_64(r[1], r[1], c[1]);
     subc_cc_64(r[2], r[2], c[2]);
@@ -143,7 +140,6 @@ __device__ __forceinline__ void sub_mod_is_odd(uint8_t* parity, const uint64_t* 
     *parity = (r[0] & 1) ^ (borrow & 1);
 }
 
-//mul 256bit by 64bit
 __device__ __forceinline__ void mul_256_by_64(uint64_t* res, uint64_t* val256, uint64_t val64)
 {
 	uint64_t tmp64[7];
@@ -168,7 +164,7 @@ __device__ __forceinline__ void mul_256_by_64(uint64_t* res, uint64_t* val256, u
 	addc_cc_32(rs[5], tmp[7], tmp[8]);
 	addc_cc_32(rs[6], tmp[9], tmp[10]);
 	addc_cc_32(rs[7], tmp[11], tmp[12]);
-	addc_32(rs[8], tmp[13], 0); //we cannot get carry here for rs[9] because mul 8+1=9 words, rs[9] is 10th word
+	addc_32(rs[8], tmp[13], 0); //no carry out here: an 8+1 word product is 9 words, rs[9] is the 10th
 
 	uint64_t kk[7];
 	uint32_t* k = (uint32_t*)kk;
@@ -188,7 +184,7 @@ __device__ __forceinline__ void mul_256_by_64(uint64_t* res, uint64_t* val256, u
 	addc_cc_32(k[5], tmp[7], tmp[8]);
 	addc_cc_32(k[6], tmp[9], tmp[10]);
 	addc_cc_32(k[7], tmp[11], tmp[12]);
-	addc_32(k[8], tmp[13], 0); //we cannot get carry here for k[9] because mul 8+1=9 words, k[9] is 10th word
+	addc_32(k[8], tmp[13], 0); //no carry out here: an 8+1 word product is 9 words, k[9] is the 10th
 
 	add_cc_32(rs[1], rs[1], k[0]);
 	addc_cc_32(rs[2], rs[2], k[1]);
@@ -317,8 +313,7 @@ __device__ __forceinline__ void add_320_to_256s(uint32_t* res, uint64_t _v1, uin
 // r = a ^ 2 (mod P)
 __device__ __forceinline__ void sqr_mod(uint64_t* r, uint64_t* aTmp)
 {
-	//buff needs 17 words, not 16: the last add_320_to_256s starts at b32+7 and writes 10 words
-	//(res[0..9], the 10th being the carry-out), so it reaches b32[16]. The 9th limb is write-only.
+	//buff needs 17 words, not 16: the last add_320_to_256s starts at b32+7 and writes 10 words, so it reaches b32[16].
 	uint64_t buff[9], tmp[5], tmp2[2], tmp3, mm;
 	uint32_t* a = (uint32_t*)aTmp;
 	uint64_t mar[28];

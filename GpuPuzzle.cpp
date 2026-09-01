@@ -110,9 +110,7 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	effectiveBatchSize = batchSize;
 	effectiveSlises = (uint64_t)dwSlices;
 
-	//cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
 	threadsPerBlock = GetThreadsPerBlock(&prop);
-	//printf("threadsPerBlock: %llu\r\n", (unsigned long long)threadsPerBlock);
 	
 	threadsTotal = GetThreadsCount(&prop, threadsPerBlock, pRange, maxUserBlockPerSm, effectiveBatchSize, effectiveSlises);
 		
@@ -140,9 +138,8 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	Kparams.h_find_result = hParams.find_result;
 #endif
 
-	// The pinned result page now belongs to Kparams, so drop the hParams reference: the
-	// ClearHParams at LExit must not free a page Kparams still points at. Every path that reaches
-	// LExit without getting this far still owns it there, which is the point.
+	// The pinned result page now belongs to Kparams: the ClearHParams at LExit must not free a page
+	// Kparams still points at. Paths reaching LExit before this point still own it there.
 	hParams.find_result = nullptr;
 
 	Kparams.block_count = threadsTotal / threadsPerBlock;
@@ -219,13 +216,9 @@ void GpuPuzzle::Execute() {
 #ifndef NO_GPU_MODE	
 		err = CallGpuKernel(Kparams, m_cudaStream);
 		if (err != cudaSuccess) {
-			// Same reasoning as the synchronize check below, and the same reason it is not
-			// ck(). A REJECTED launch enqueues nothing, so the synchronize that follows would
-			// wait on an empty stream and succeed, and the run would be counted as scanned.
-			// Fires on both paths: cuLaunchKernel returns its status directly, and the
-			// runtime <<<>>> discards a synchronous rejection into the last-error slot that
-			// no synchronize ever reads. H12 lands here -- on a card that is not sm_120 the
-			// very first launch is cudaErrorNoKernelImageForDevice.
+			// Not ck(): a REJECTED launch enqueues nothing, so the synchronize below would wait on an
+			// empty stream, succeed, and count the run as scanned. Covers both paths (cuLaunchKernel's
+			// status, and the last-error slot no synchronize reads). H12: first launch on a non-sm_120 card.
 			std::cerr << "GPU " << CudaIndex << ": kernel launch failed: "
 			          << cudaGetErrorString(err) << "\r\n";
 			Failed = true;
@@ -234,9 +227,8 @@ void GpuPuzzle::Execute() {
 
 		err = cudaStreamSynchronize(m_cudaStream);
 		if (err != cudaSuccess) {
-			// Not ck(): that macro only prints and jumps, and it cannot set Failed because the
-			// same macro is used by free functions with no such member. A kernel that dies here
-			// (Xid, ECC, illegal address) must not be reported as a completed scan.
+			// Not ck(): that macro cannot set Failed. A kernel that dies here (Xid, ECC, illegal
+			// address) must not be reported as a completed scan.
 			std::cerr << "GPU " << CudaIndex << ": kernel execution failed: "
 			          << cudaGetErrorString(err) << "\r\n";
 			Failed = true;
@@ -254,17 +246,13 @@ void GpuPuzzle::Execute() {
 			if (!tm) tm = 1;
 			
 			uint64_t cur_speed = (uint64_t)(pnt_cnt / (1000 * tm));
-			//printf("GPU %d kernel time %d ms, speed %d MH\r\n", CudaIndex, (int)tm, cur_speed);
-			//std::cout << "GPU " << CudaIndex << " kernel time " << tm << " ms, speed " << cur_speed << " MH Idx: " << m_stat_idx << "\r\n";
 
 			m_speed_stat[m_stat_idx] = cur_speed;
 			m_stat_idx = (m_stat_idx + 1) % STATS_WND_SIZE;
 		}
 	
-		// Safe to read plainly: this is after cudaStreamSynchronize, which already orders every
-		// write the kernel made. If P1 adds a poll DURING the launch, that reader must go through a
-		// volatile TFindResult* -- the device's release fence makes the scalar visible, but nothing
-		// stops the compiler from hoisting a non-volatile load of `found` out of the poll loop.
+		// Plain read is safe only because cudaStreamSynchronize already ordered the kernel writes. A
+		// poll DURING a launch must use a volatile TFindResult*, or the compiler hoists the load of `found`.
 		if (Kparams.h_find_result->found != 0u) {
 			Found = true;
 			
@@ -331,44 +319,27 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, uint64_t threadsPerBlock, const u
 	uint64_t remMaxThreadsByRange = 0ull;
 
 	maxThreadsByMem = GetMaxThreadsByMem(prop);
-    //printf("maxThreadsByMem: %llu\r\n", (unsigned long long)maxThreadsByMem);
 	
 	maxThreadsByUser = GetUserMaxThreads(prop, threadsPerBlock, userBlocksPerSm);
-	//printf("maxThreadsByUser: %llu\r\n", (unsigned long long)maxThreadsByUser);
 	
 	minThreads = GetMinThreads(prop, threadsPerBlock);
-	//printf("minThreads: %llu\r\n", (unsigned long long)minThreads);
 	
-	// max threads required
     div_256_u64(range, (uint64_t)batchSize * slises, maxThreadsByRange, &remMaxThreadsByRange);
 	if (remMaxThreadsByRange) {
 		add_256_u64(maxThreadsByRange, (uint64_t)1, maxThreadsByRange);
 	}
 	
 	result = std::min(maxThreadsByMem, maxThreadsByUser);
-	//printf("result (0): %llu\r\n", (unsigned long long)result);
 	
 	if (!(maxThreadsByRange[1] | maxThreadsByRange[2] | maxThreadsByRange[3])) {
-		////printf("result (1): %llu\r\n", (unsigned long long)maxThreadsByRange[0]);
-		//uint64_t roundedBlock = (maxThreadsByRange[0] + (prop->multiProcessorCount * BLOCKS_PER_SM) - 1) / (prop->multiProcessorCount * BLOCKS_PER_SM);
-		////printf("result (2): %llu\r\n", (unsigned long long)roundedBlock);
-		//result = std::min(roundedBlock * (prop->multiProcessorCount * BLOCKS_PER_SM), result);
-		////printf("result (3): %llu\r\n", (unsigned long long)result);
 		result = std::min(maxThreadsByRange[0], result);
 	}
 	
 	result = std::max(result, minThreads);
-	//printf("result (4): %llu\r\n", (unsigned long long)result);
 
-	// The caller derives block_count = threadsTotal / threadsPerBlock with a truncating divide,
-	// so anything left over here is a set of threads that gets a sub-range and a start point in
-	// PrepareHost and is then never launched -- its keys are silently skipped. maxThreadsByUser
-	// and minThreads are multiples of threadsPerBlock by construction; maxThreadsByMem and
-	// maxThreadsByRange are arbitrary quotients, so the alignment has to happen here, after the
-	// last clamp. Round DOWN: rounding up could exceed the memory budget or the user's
-	// blocks/SM cap. Dropping up to threadsPerBlock-1 threads costs no coverage, because
-	// PrepareHost divides the range by whatever count it is given. minThreads is at least
-	// 2 * threadsPerBlock, so at least one full block always survives.
+	// block_count = threadsTotal / threadsPerBlock truncates, so leftover threads still get a
+	// sub-range and start point in PrepareHost but are never launched -- their keys are silently
+	// skipped. Round DOWN: rounding up could exceed the memory budget or the user's blocks/SM cap.
 	result -= result % threadsPerBlock;
 
 	return result;
@@ -399,11 +370,9 @@ void CalcEffectiveBatchSize(uint64_t threadsPerBlock, const uint64_t* range, uin
 	
 }
 
-// The two deallocators are not interchangeable and the mistake is silent: cudaFree on a pointer
-// from cudaHostAlloc is rejected with cudaErrorInvalidValue, so it frees nothing. Worse, the error
-// then sits in this host thread's slot until somebody calls cudaGetLastError -- which is
-// PrepareCuda's post-launch check, running for the NEXT GPU -- and is reported there as a
-// setup-kernel failure. So: say which free failed, and drain the slot behind us.
+// The two deallocators are not interchangeable and the mistake is silent: cudaFree on a cudaHostAlloc
+// pointer fails with cudaErrorInvalidValue and frees nothing, and the error then sits in this thread's
+// last-error slot until PrepareCuda's post-launch check blames the NEXT GPU. So: name it, drain the slot.
 static void free_host_pinned(void* p, const char* what) {
 	if (!p) return;
 #ifndef NO_GPU_MODE
@@ -427,17 +396,15 @@ static void free_device(void* p, const char* what) {
 		cudaGetLastError();
 	}
 #else
-	(void)p; (void)what;	// NO_GPU_MODE never reaches PrepareCuda, so there is nothing device-side
+	(void)p; (void)what;	// NO_GPU_MODE never reaches PrepareCuda
 #endif
 }
 
 void ClearHParams(THparams* hParams) {
 	free_host_pinned(hParams->counts, "counts");
 	free_host_pinned(hParams->scalars, "scalars");
-	// find_result belongs here only until PrepareCuda takes it; Prepare nulls the field at the
-	// handoff. Without this line every failure exit in the window between PrepareHost returning
-	// true and that handoff orphaned the page outright -- hParams is a stack local in Prepare and
-	// nothing else held the pointer.
+	// find_result belongs here only until PrepareCuda takes it (Prepare nulls the field at the
+	// handoff); without this line a failure inside that window orphans the page outright.
 	free_host_pinned(hParams->find_result, "find_result");
 
 	hParams->counts = nullptr;
@@ -451,8 +418,7 @@ void ClearKParams(TKparams* kParams) {
 	free_device(kParams->px, "d_Px");
 	free_device(kParams->py, "d_Py");
 	// h_find_result came from cudaHostAlloc, so it takes cudaFreeHost. d_find_result is only the
-	// device-side alias of that same mapped page -- an address, not an allocation -- and must not
-	// be freed at all; dropping the pointer is the whole of releasing it.
+	// device-side alias of that same mapped page -- an address, not an allocation -- never free it.
 	free_host_pinned(kParams->h_find_result, "h_find_result");
 
 	kParams->counts = nullptr;
@@ -474,11 +440,10 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	uint32_t half;
 	bool result = false;
 
-	// Distribute whole BATCHES, not raw keys. The kernel consumes exactly batchSize keys per
-	// iteration and stops as soon as fewer than that remain (GpuCore.cu:65) -- there is no short
-	// final pass -- so a per-thread count that is not a multiple of batchSize leaves its
-	// remainder permanently unscanned. Rounding the batch total up costs at most batchSize-1
-	// keys of over-scan past the end of the range, which is harmless; a short tail is not.
+	// Distribute whole BATCHES, not raw keys: the kernel consumes exactly batchSize keys per
+	// iteration and stops as soon as fewer remain (GpuCore.cu:65), so a per-thread count that is
+	// not a multiple of batchSize leaves its remainder permanently unscanned. Rounding the batch
+	// total up over-scans by at most batchSize-1 keys, which is harmless; a short tail is not.
 	// r1 counts the threads that get one EXTRA batch.
 	div_256_u64(range, batchSize, batch_cnt, &rem_batch);
 	if (rem_batch) {
@@ -497,7 +462,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
     h_find_result = (TFindResult*)malloc(sizeof(TFindResult));
 #endif
 
-	// h_counts256
 	{
 		for (uint64_t i = 0; i < threadsTotal; ++i) {
 			h_counts256[i*4+0] = per_thread_cnt[0];
@@ -511,7 +475,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 		}
 	}
 
-	// h_start_scalars
 	half = (uint32_t)batchSize >> 1;
     {
         uint64_t cur[4] = { start[0], start[1], start[2], start[3] };
@@ -556,7 +519,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	}
 */
 
-	// B pointer
 	{
 		EcPoint p;
 		EcInt k;
@@ -568,7 +530,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 		std::memcpy(&hParams->by, p.y.data, 32);
 	}
 
-	// find_result
     {
 		std::memset(h_find_result, 0, sizeof(TFindResult));
 	}
@@ -609,14 +570,12 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
     ck(cudaMemcpy(d_start_scalars, 	hParams->scalars, 	threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy scalars");
     ck(cudaMemcpy(d_counts,        	hParams->counts,  	threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy counts");
 
-	// Start points P(x1, y1)
 	{
 		uint64_t mulBlocks = (uint64_t)((threadsTotal + threadsPerBlock - 1) / threadsPerBlock);;
 
-		// The last-error slot is per host thread and sticky: successful calls do not clear it, only
-		// cudaGetLastError does. Prepare runs for every GPU on this one thread, so without this the
-		// check below reports whatever failed most recently ANYWHERE -- including in the previous
-		// GPU's cleanup -- as a launch failure of THIS setup kernel, and kills a healthy card.
+		// The last-error slot is per host thread and sticky: only cudaGetLastError clears it. Prepare
+		// runs for every GPU on this thread, so without this the check below blames THIS setup kernel
+		// for whatever failed most recently anywhere -- including the previous GPU's cleanup.
 		cudaGetLastError();
 
 		ck(CallGpuMulKernel(mulBlocks, threadsPerBlock, d_start_scalars, d_Px, d_Py, (uint32_t)threadsTotal), "GpuMulKernel call");
@@ -625,7 +584,6 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
         ck(cudaGetLastError(), "gpuMulKernel launch");
 	}
 
-	// c_target_words
 	{
         uint32_t target_words[5];
         target_words[0] = (uint32_t)hParams->hash160[ 0] | ((uint32_t)hParams->hash160[ 1] << 8) | ((uint32_t)hParams->hash160[ 2] << 16) | ((uint32_t)hParams->hash160[ 3] << 24);
@@ -633,13 +591,8 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
         target_words[2] = (uint32_t)hParams->hash160[ 8] | ((uint32_t)hParams->hash160[ 9] << 8) | ((uint32_t)hParams->hash160[10] << 16) | ((uint32_t)hParams->hash160[11] << 24);
         target_words[3] = (uint32_t)hParams->hash160[12] | ((uint32_t)hParams->hash160[13] << 8) | ((uint32_t)hParams->hash160[14] << 16) | ((uint32_t)hParams->hash160[15] << 24);
         target_words[4] = (uint32_t)hParams->hash160[16] | ((uint32_t)hParams->hash160[17] << 8) | ((uint32_t)hParams->hash160[18] << 16) | ((uint32_t)hParams->hash160[19] << 24);
-        //cudaMemcpyToSymbol(c_target_words, target_words, sizeof(target_words));
 		ck(CudaCopyTargetWords(&target_words), "ToSymbol c_target_words");
     }
-	//ck(cudaMemcpyToSymbol(c_Gx, 	hParams->gx, 		(batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gx");
-	//ck(cudaMemcpyToSymbol(c_Gy, 	hParams->gy, 		(batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gy");
-	//ck(cudaMemcpyToSymbol(c_Jx, 	hParams->bx, 		4 * sizeof(uint64_t)), "ToSymbol c_Jx");
-	//ck(cudaMemcpyToSymbol(c_Jy, 	hParams->by, 		4 * sizeof(uint64_t)), "ToSymbol c_Jy");
 	ck(CudaCopyGx(hParams->gx, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gx");
 	ck(CudaCopyGy(hParams->gy, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gy");
 	ck(CudaCopyJx(&hParams->bx), "ToSymbol c_Jx");
@@ -659,8 +612,7 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 LExit:	
 
 	if (!result) {
-		// Only the four cudaMalloc'd buffers. d_find_result is the mapped alias of the caller's
-		// pinned page, which the caller still owns and frees.
+		// Only the four cudaMalloc'd buffers; d_find_result is the caller's mapped page, freed there.
 		free_device(d_counts, "d_counts");
 		free_device(d_start_scalars, "d_start_scalars");
 		free_device(d_Px, "d_Px");

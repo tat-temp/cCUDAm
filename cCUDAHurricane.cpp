@@ -47,9 +47,8 @@ struct TInParams {
 	std::string address_b58;
 };
 
-// Exit codes. Every outcome used to return 0 -- found, not found, GPU crash and no-GPU alike --
-// so nothing driving this binary could tell success from total failure. EXIT_FAILURE (1) stays
-// reserved for usage and parse errors.
+// Exit-code contract: whatever drives this binary must be able to tell success from failure,
+// so no outcome may share a code. EXIT_FAILURE (1) stays reserved for usage and parse errors.
 #define EXIT_FOUND			0	// key found and printed
 #define EXIT_NOT_FOUND		2	// range scanned to the end, no match
 #define EXIT_GPU_ERROR		3	// no usable GPU, or one failed to prepare or died mid-run
@@ -69,11 +68,8 @@ static GpuPuzzle* g_GpuPuzzles[MAX_GPU_CNT];
 
 static void handle_sigint(int) {
 	if (g_sigint) {
-		// Second Ctrl+C. The graceful path did not get us out -- most likely a worker is inside a
-		// kernel launch the driver never returns from, which nothing on this side can reclaim. Leave
-		// now rather than make the user go find SIGKILL. _Exit is async-signal-safe; std::exit is
-		// not, since it would run static destructors and flush streams from a signal context while
-		// other threads are still mutating them.
+		// Second Ctrl+C: the graceful path failed, most likely a kernel launch the driver never
+		// returns from. _Exit is async-signal-safe; std::exit is not (static dtors, stream flushes).
 		std::_Exit(EXIT_INTERRUPTED);
 	}
 	g_sigint = 1;
@@ -240,19 +236,15 @@ int validate_params(TInParams& pInParams, TOutParams& pOutParams, char** argv) {
         std::cerr << "Error: invalid range hex\n"; return EXIT_FAILURE;
     }
 	
-	// Both results carry a status the caller must read. A reversed range borrows out of
-	// sub_256 and yields 2^256-1, which the +1 then wraps to a length of 0; a length of 0
-	// survives every downstream size check (max(0, minThreads) lifts threadsTotal past the
-	// threadsTotal == 0 test), so the program would print a healthy configuration and scan
-	// nothing at all.
+	// Both statuses must be checked: a reversed range borrows out of sub_256 and the +1 then wraps
+	// the length to 0, which survives every downstream size check -- the program would print a
+	// healthy configuration and scan nothing at all.
 	if (sub_256(range_end, range_start, pOutParams.range)) {
 		std::cerr << "Error: range end must be >= range start\n";
 		return EXIT_FAILURE;
 	}
 	if (add_256(pOutParams.range, num_256_1, pOutParams.range)) {
-		// Only reachable for start=0, end=FFFF...FF: the inclusive length is exactly 2^256
-		// and does not fit in 256 bits. secp256k1's order is below 2^256 anyway, so this is
-		// never a range worth scanning.
+		// Only reachable for start=0, end=FFFF...FF: the inclusive length is 2^256, unrepresentable.
 		std::cerr << "Error: range covers the entire 2^256 keyspace; its length cannot be represented. Narrow the range.\n";
 		return EXIT_FAILURE;
 	}
@@ -394,7 +386,6 @@ uint32_t __stdcall puzzle_thr_proc(void* data)
 {
 	GpuPuzzle* puzzle = (GpuPuzzle*)data;
 	puzzle->Execute();
-	//InterlockedDecrement(&g_threadcnt);
 	if (puzzle->Found) g_found.store(true);
 	g_threadcnt.fetch_sub(1, std::memory_order_acq_rel);
 	return 0;
@@ -404,7 +395,6 @@ void* puzzle_thr_proc(void* data)
 {
 	GpuPuzzle* puzzle = (GpuPuzzle*)data;
 	puzzle->Execute();
-	//__sync_fetch_and_sub(&g_threadcnt, 1);
 	if (puzzle->Found) g_found.store(true);
 	g_threadcnt.fetch_sub(1, std::memory_order_acq_rel);
 	return 0;
@@ -420,7 +410,7 @@ void show_stat(u64 tm_start, u64 range) {
 
 	u64 exp_sec = 0xFFFFFFFFFFFFFFFFull;
 	if (speed) {
-		exp_sec = range / (speed * 1000000ul); //in sec
+		exp_sec = range / (speed * 1000000ul);
 	}
 
 	u64 exp_days = exp_sec / (3600 * 24);
@@ -455,9 +445,8 @@ int find_key(TOutParams& pParams) {
 #else
 	pthread_t thr_handles[MAX_GPU_CNT];
 #endif
-	// Whether thr_handles[i] holds a thread we actually started. The join loop used to test
-	// "!thr_handles[i]" instead, which is not portable -- pthread_t need not be comparable against 0
-	// -- and cannot tell a failed create from a thread that legitimately got handle value 0.
+	// Whether thr_handles[i] holds a thread we actually started. Do not test the handle itself
+	// instead: pthread_t need not be comparable against 0, and 0 can be a legitimate handle.
 	bool thr_started[MAX_GPU_CNT];
 
 	std::memset(&thr_handles, 0, sizeof(thr_handles));
@@ -505,15 +494,10 @@ int find_key(TOutParams& pParams) {
 		return EXIT_GPU_ERROR;
 	}
 
-	// g_threadcnt is charged HERE, per create, and only for a create that succeeded -- it used to be
-	// incremented up in the prepare loop, before any thread existed, while both create calls threw
-	// their return value away. Only a thread that actually starts ever decrements the counter (see
-	// puzzle_thr_proc), so crediting one that was never created left it permanently above zero and
-	// the drain loop below spinning forever, with SIGKILL the only way out.
-	//
-	// The charge precedes the create because the new thread can run to completion and decrement
-	// before this thread gets the next line; incrementing afterwards would let the counter dip
-	// negative. On failure we refund it, since nothing will ever decrement it.
+	// Charge g_threadcnt HERE, per create, and only for a create that succeeded: only a thread that
+	// actually starts ever decrements it (see puzzle_thr_proc), so crediting one that was never
+	// created leaves the counter above zero and the drain loop below spinning forever. Charge before
+	// the create (the new thread may finish and decrement first); refund on failure.
 	int started = 0;
 	for (int i = 0; i < g_gpucnt; i++)
 	{
@@ -537,8 +521,8 @@ int find_key(TOutParams& pParams) {
 			g_threadcnt.fetch_sub(1, std::memory_order_relaxed);
 			std::cerr << "GPU " << g_GpuPuzzles[i]->CudaIndex << ": failed to start worker thread; "
 			             "its part of the range will NOT be scanned.\r\n";
-			// Safe to write from this thread: the create failed, so there is no worker for this
-			// object to race with. It also keeps the GPU out of the Stop() and join loops below.
+			// Safe here: the create failed, so no worker races us; also keeps this GPU out of
+			// the Stop() and join loops below.
 			g_GpuPuzzles[i]->Failed = true;
 			any_failed = true;
 		}
@@ -552,7 +536,6 @@ int find_key(TOutParams& pParams) {
 	u64 tm_stats = GetTickCount64();
 	u64 tm0 = tm_stats;
 	
-	// wait cycle
 	while (g_threadcnt.load(std::memory_order_acquire) && !g_sigint) {
 		sleep(1);
 		
@@ -575,14 +558,10 @@ int find_key(TOutParams& pParams) {
 		g_GpuPuzzles[i]->Stop();
 	}
 
-	// Deliberately no timeout and no g_sigint check here. This loop reaching zero is what gives the
-	// Failed reads below their happens-before edge (see the comment there); bailing out early would
-	// turn those into a data race on a plain bool, and returning while workers are still live would
-	// let main tear down g_GpuPuzzles underneath them. It is now provably bounded: g_threadcnt
-	// counts exactly the threads that started, each decrements on its way out of puzzle_thr_proc,
-	// and Stop() above has already cleared their loop guard -- so the wait is at most one kernel
-	// launch. The one thing it cannot bound is a wedged GPU whose launch never returns; that is what
-	// the second Ctrl+C in handle_sigint is for. Say so rather than sitting there silently.
+	// Deliberately no timeout and no g_sigint check: reaching zero is what gives the Failed reads
+	// below their happens-before edge, and returning with workers still live would let main tear
+	// down g_GpuPuzzles under them. Bounded by one kernel launch, unless a GPU wedges -- hence the
+	// second Ctrl+C, and hence saying so rather than sitting there silently.
 	{
 		u64 tm_wait = GetTickCount64();
 		while (g_threadcnt.load(std::memory_order_acquire)) {
@@ -607,10 +586,8 @@ int find_key(TOutParams& pParams) {
 #endif
 	}
 
-	// Failed is a plain bool written by the workers, so it is only safe to read once this thread
-	// has a happens-before edge to those writes. The drain loop above supplies one: each worker
-	// writes Failed inside Execute() and then does g_threadcnt.fetch_sub(release), which this
-	// thread observes reaching zero.
+	// Failed is a plain bool written by the workers; safe to read only via the drain loop's edge
+	// above (worker writes Failed, then fetch_sub(release)).
 	for (int i = 0; i < g_gpucnt; i++) {
 		if (g_GpuPuzzles[i]->Failed) {
 			any_failed = true;

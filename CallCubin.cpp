@@ -28,9 +28,8 @@ bool TCubinCall::LoadCubin(const char* fn)
 {
 	Unload(); //a second LoadCubin would otherwise leak the first module
 
-	// cuModuleLoad needs a context current on the calling thread. The runtime's
-	// primary context is created lazily, so cudaSetDevice() alone does not make
-	// one -- without this the load fails with CUDA_ERROR_INVALID_CONTEXT (201).
+	// Forces creation of the runtime's lazily-created primary context; cuModuleLoad
+	// needs one current, or the load fails with CUDA_ERROR_INVALID_CONTEXT (201).
 	cudaFree(0);
 
 	CUresult res = ::cuModuleLoad(&cuModule, fn);
@@ -51,9 +50,7 @@ bool TCubinCall::CallKernel(TCallKernelParams params)
 	gridDim.x = params.blockCnt; gridDim.y = 1; gridDim.z = 1;
 	blockDim.x = params.blockSize; blockDim.y = 1; blockDim.z = 1;
 
-	// cuLaunchKernel reads one kernelParams entry per declared parameter. A caller
-	// that supplies an explicit array (TestKernel: 8) gets it verbatim; otherwise
-	// fall back to the single-struct-by-value convention.
+	// cuLaunchKernel reads one kernelParams entry per declared parameter (see TCallKernelParams).
 	void* one_arg[1];
 	void** args;
 	if (params.kernel_args && (params.kernel_arg_cnt > 0))
@@ -99,9 +96,8 @@ bool TCubinCall::CopyToSymbol(const char* sym_name, void* data, int size)
 	CUresult res = cuModuleGetGlobal(&dptr, &symBytes, cuModule, sym_name);
 	if (res != CUDA_SUCCESS)
 	{
-		// CUDA_ERROR_NOT_FOUND (500) here means the symbol is STB_LOCAL in the cubin.
-		// nvcc gives every __device__/__constant__ variable internal linkage unless
-		// the cubin is built with -rdc=true, and the driver only resolves globals.
+		// NOT_FOUND (500) means the symbol is STB_LOCAL: nvcc gives every
+		// __device__/__constant__ internal linkage unless the cubin is built with -rdc=true.
 		printf("cuModuleGetGlobal(\"%s\") failed, err %d%s\r\n", sym_name, res,
 			(res == CUDA_ERROR_NOT_FOUND) ? " (NOT_FOUND -- symbol is not global; build the cubin with -rdc=true)" : "");
 		return false;

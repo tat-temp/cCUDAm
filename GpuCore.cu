@@ -6,10 +6,8 @@
 #include "Math.cuh"
 
 // ---- Native cubin path (make NATIVE_CUBIN=...) ---------------------------------
-// TestKernel is launched through the driver API out of a prebuilt .cubin instead of
-// the runtime <<<>>> launch, so a hand-written-SASS kernel can be dropped in without
-// rebuilding the host. Everything below this kernel's own source stays compiled and
-// linked as before -- only the launch and the constant uploads are rerouted.
+// TestKernel is launched from a prebuilt .cubin through the driver API instead of the
+// runtime <<<>>> launch. Only the launch and the constant uploads are rerouted.
 #if USE_NATIVE_CUBIN
 #include "CallCubin.h"
 #include <stdio.h>
@@ -19,10 +17,8 @@
 #define NATIVE_CUBIN_PATH "GpuCore.cubin"
 #endif
 
-// One module per GPU, not per thread: a CUmodule belongs to a context, and the
-// runtime's primary context is per-device and shared by every thread that selects
-// that device. Prepare() uploads the constants from the main thread while Execute()
-// launches from the worker thread, and both must reach the same module.
+// One module per GPU, not per thread: Prepare() uploads the constants from the main
+// thread while Execute() launches from the worker thread, and both must reach the same module.
 static TCubinCall g_cubin[MAX_GPU_CNT];
 static bool       g_cubin_ready[MAX_GPU_CNT];
 static std::mutex g_cubin_lock;
@@ -68,18 +64,10 @@ __device__ __constant__ uint64_t c_Jy[4];
 
 
 // Points-only build: `make NO_HASH=1`. Compiles the hash layer out of the hot path so the EC walk
-// can be measured and validated on its own -- it is the reference that a hand-written-SASS
-// TestKernel has to reproduce, and the hash layer is the part that route lifts verbatim rather
-// than rewriting (asm/TESTKERNEL_TEMPLATE.md §9).
-//
-// The trap this macro exists for: with the hash calls gone, px3, lam and s are dead in all four
-// candidate blocks, and nvcc deletes essentially the whole walk -- what survives is the inverse
-// chain and the point jump. A "points/sec" number off that build would be measuring nothing, and a
-// correctness comparison against it would compare against code that was never emitted. So every
-// candidate x-coordinate is folded into a sink that escapes exactly once, at the end of the kernel.
-// Five XORs per candidate against ~222 instructions for the mul_mod feeding it.
-//
-// This build cannot find a key and is not meant to: `found` is never set from a hash match.
+// can be measured on its own (asm/TESTKERNEL_TEMPLATE.md §9). Without the sink below, px3/lam/s
+// are dead and nvcc deletes essentially the whole walk -- only the inverse chain and the point
+// jump survive -- so a "points/sec" number off such a build measures nothing. This build cannot
+// find a key and is not meant to: `found` is never set from a hash match.
 #ifndef NO_HASH
 #define NO_HASH 0
 #endif
@@ -90,31 +78,18 @@ __device__ __constant__ uint64_t c_Jy[4];
 #endif
 
 #define FLUSH_THRESHOLD 65536u
-//#define WARP_FLUSH_HASHES() do { \
-//    unsigned long long v = warp_reduce_add_ull((unsigned long long)local_hashes); \
-//    if (lane == 0 && v) atomicAdd(hashes_accum, v); \
-//    local_hashes = 0; \
-//} while (0)
+// WARP_FLUSH_HASHES is compiled out: the warp-reduce + atomicAdd hash counter is disabled.
 #define WARP_FLUSH_HASHES()
 #define MAYBE_WARP_FLUSH() do { if ((local_hashes & (FLUSH_THRESHOLD - 1u)) == 0u) WARP_FLUSH_HASHES(); } while (0)
 		
-// Publish a hit into the mapped result struct, exactly once, in the order the host needs to observe
-// it. Every found path goes through here.
+// Publish a hit into the mapped result struct, exactly once. Every found path goes through here.
 //
-// The old code stored the scalar, set found = true, and only THEN issued __threadfence_system(). A
-// release fence orders what precedes it against what follows, so a fence placed after both orders
-// nothing *between* them -- and Copy_u64_x4 is four separate stores (Math.cuh:37), not one wide one.
-// Nothing stopped `found` from reaching the mapped page ahead of some or all of `scalar`. A host
-// that saw the flag early would hand a torn scalar to DumpFound, which multiplies it out and prints
-// a well-formed, self-consistent, completely wrong key -- there is no hash160 recheck host-side to
-// catch that. It stayed latent only because the sole host read happens after cudaStreamSynchronize,
-// which is already a full ordering point; adding the mid-launch poll that P1 wants would make it
-// live.
-//
-// atomicCAS picks a single publisher, so a second finder cannot overwrite a scalar the host may
-// already be reading. The _system variants are the ones that mean anything on mapped host memory
-// (device-scope atomics do not order against the host); they need sm_60+, which init_gpus already
-// requires.
+// H7: the fence must stay BETWEEN the scalar stores and the flag. Copy_u64_x4 is four separate
+// stores (Math.cuh:37) and a fence after both orders nothing between them; a host that saw `found`
+// early would hand a torn scalar to DumpFound, which prints a well-formed, self-consistent,
+// completely WRONG key -- no host-side hash160 recheck catches that. Latent only because the sole
+// host read follows cudaStreamSynchronize; the mid-launch poll P1 wants would make it live.
+// atomicCAS picks a single publisher; only the _system atomics order against the host (sm_60+).
 __device__ __forceinline__ void publish_found(TFindResult* __restrict__ find_result,
                                               const uint64_t scalar[4])
 {
@@ -143,24 +118,16 @@ __global__ void TestKernel(
 	const uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= threadsTotal) return;
 	
-	//const unsigned lane      = (unsigned)(threadIdx.x & (WARP_SIZE - 1));
-	// There is no single warp mask any more. One captured here could not stay valid: the batch loop
-	// below drops lanes at different iterations, so the mask has to be re-derived. See there.
+	// No warp mask is captured here: it is re-derived every iteration (see the __ballot_sync below).
 
-	// Filter on hash160 WORD 2, not word 0: word 2 is the cheapest of the five to produce
-    // (its RIPEMD-160 inputs are final 7 rounds earlier -- see CUDAHash.cu). Any single word
-    // is an equally selective 32-bit filter, so this is a free choice.
+	// Filter on hash160 WORD 2, not word 0: any single word is an equally selective 32-bit filter,
+    // and word 2 is the cheapest of the five to produce (see CUDAHash.cu).
     const uint32_t target_prefix = c_target_words[2];
 	
-	// rem is 256-bit here and is NOT in the hand-written asm/tk/main.asm, which guards its batch
-	// loop on `BDone < BpL` alone. That asymmetry is deliberate and it is not a missing
-	// optimization: measured, dropping rem here moves the shipped build by ZERO registers
-	// (122 either way) and 29 instructions per batch against ~1.24M, because ptxas already
-	// spills the cold limbs to the frame in the prologue and reloads them in the epilogue --
-	// outside the loop entirely. RCAsm has no allocator, which is why the same removal was worth
-	// 8 registers and a whole resident block per SM there. See DEVPLAN "rem costs the COMPILED
-	// kernel nothing". Removing it for real needs the host to own the batch budget first, or the
-	// final launch over-scans; that is the open host item, not a change to this file.
+	// rem is 256-bit here but absent from asm/tk/main.asm, which guards its batch loop on
+	// `BDone < BpL` alone. Deliberate: measured, dropping rem moves the compiled build by ZERO
+	// registers (122 either way) -- DEVPLAN "rem costs the COMPILED kernel nothing". Removing it for
+	// real needs the host to own the batch budget first, or the final launch over-scans (host item).
 	uint64_t x1[4], y1[4], s1[4], rem[4];
 	// GS: cache lane ????
     { const uint64_t idx = gid*4 + 0; x1[0] = Px[idx]; y1[0] = Py[idx]; s1[0] = start_scalars[idx]; rem[0] = counts256[idx]; }
@@ -170,36 +137,22 @@ __global__ void TestKernel(
 	
 	if ((rem[0]|rem[1]|rem[2]|rem[3]) == 0ull) return;
 	
-	// The mask handed to a warp intrinsic has to name exactly the lanes that reach it: CUDA requires
-	// every NON-EXITED thread named in a mask to execute the same intrinsic with the same mask, and
-	// on Volta+ a mask naming a live thread that never arrives can stall the warp waiting for it.
+	// A mask handed to a warp intrinsic must name exactly the lanes that reach it: CUDA requires
+	// every NON-EXITED thread named in a mask to run the same intrinsic with the same mask, and on
+	// Volta+ a mask naming a live thread that never arrives can stall the warp.
 	//
-	// The old code captured one __activemask() at the top of the kernel and reused it for every
-	// __any_sync/__syncwarp below. That breaks at the LOOP EXIT: rem is per-thread, and PrepareHost
+	// H4: one captured __activemask() cannot serve this loop. rem is per-thread and PrepareHost
 	// gives the first r1 threads one extra batch (GpuPuzzle.cpp:455), so on the final launch a lane
-	// whose warp straddles that boundary falls out of this loop one iteration before its neighbours.
-	// It is still LIVE -- it goes on to the write-back at the bottom of the kernel -- yet it stayed
-	// named in the captured mask and never arrived at the matching __any_sync.
+	// can leave the loop an iteration early and still be LIVE for the write-back -- named in the
+	// stale mask, never arriving at the matching __any_sync. The per-iteration __ballot_sync names
+	// exactly the lanes that enter the body; the other exits leave the kernel entirely, and exited
+	// threads are exempt.
 	//
-	// The other exits are fine and are deliberately left as they are: the rem==0 return above and
-	// the found-path returns inside the loop leave the kernel entirely, and exited threads are
-	// exempt from the rule. Only the loop exit produces a live absentee.
-	//
-	// The fix is the per-iteration __ballot_sync below, NOT the seed: every arriving lane votes, and
-	// the result names precisely the lanes that enter the body -- precisely the set that reaches the
-	// __any_sync calls. One ballot per batch is nothing against B keys' worth of hashing.
-	//
-	// Seed 0xFFFFFFFFu rather than __activemask(). Every lane of the warp either reaches the first
-	// ballot or has already EXITED at :40 / :44 / :62, and exited threads named in a mask are exempt,
-	// so the full mask is legal; __ballot_sync sets a bit only for a lane that is both active and
-	// voted true, so the seed self-corrects on iteration 0. It is also deterministic, which
-	// __activemask() is not: taken here it would be an instantaneous snapshot immediately after the
-	// rem==0 return -- the kernel's first per-thread divergent branch -- and the CUDA guide states
-	// outright that __activemask() cannot be used to determine which lanes execute a given branch.
-	// Two lanes observing different snapshots would then enter __ballot_sync with mismatched masks,
-	// which is undefined on its own. (Naming all 32 lanes is safe because blockDim.x is always a
-	// multiple of 32: GetThreadsPerBlock only ever returns THREADS_PER_BLOCK=256,
-	// MIN_THREADS_PER_BLOCK=32, or prop.maxThreadsPerBlock -- GpuPuzzle.cpp:283-288, Defs.h:15-16.)
+	// The seed must stay 0xFFFFFFFFu: the full mask is legal (every lane either reaches the first
+	// ballot or has exited) and the ballot self-corrects on iteration 0, whereas __activemask() here
+	// is a nondeterministic post-divergence snapshot, and lanes seeing different snapshots would call
+	// __ballot_sync with mismatched masks -- undefined. All 32 lanes is safe: blockDim.x is always a
+	// multiple of 32 (GpuPuzzle.cpp:283-288, Defs.h:15-16).
 	unsigned mask = 0xFFFFFFFFu;
 	uint32_t batches_done = 0;
 #if NO_HASH
@@ -281,8 +234,7 @@ __global__ void TestKernel(
 				if (__any_sync(mask, pref)) {
 					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 					if (full) {
-						// In registers, not in the mapped struct: the old form did the add as a
-						// read-modify-write straight over PCIe.
+						// Add in registers, not as a read-modify-write over PCIe into the mapped struct.
 						uint64_t hit[4];
 						Copy_u64_x4(hit, s1);
 						add256_u64(hit, (uint64_t)i + 1ull);
@@ -420,11 +372,9 @@ __global__ void TestKernel(
 	}
 	
 #if NO_HASH
-	// The one escape for the sink. Every candidate x-coordinate the walk produced is folded into
-	// it, so this single comparison is what keeps ~2,000 instructions per batch from being deleted.
-	// It is outside the loop, and the compare is against a value the arithmetic cannot be shown not
-	// to produce -- which is exactly what makes it un-eliminable. It will not fire (2^-64/thread),
-	// and this build cannot report a real key anyway.
+	// The one escape for the sink: without it nvcc deletes the walk (see NO_HASH above). Outside the
+	// loop, and compared against a value the arithmetic cannot be shown not to produce, which is what
+	// makes it un-eliminable. It will not fire (2^-64/thread), and this build cannot report a key.
 	if (sink == 0xD1CEB0EDFACADE01ull) publish_found(find_result, s1);
 #endif
 	{ const uint64_t idx = gid*4 + 0; Px[idx] = x1[0]; Py[idx] = y1[0]; counts256[idx] = rem[0]; start_scalars[idx] = s1[0]; }
@@ -436,34 +386,22 @@ __global__ void TestKernel(
 
 // Returns cudaSuccess when the launch was ACCEPTED -- not when the kernel finished.
 //
-// Both paths need this and neither gets it for free. A rejected launch enqueues
-// nothing, so the cudaStreamSynchronize in Execute() then waits on an empty stream
-// and returns cudaSuccess: the run loop counts launches that never happened and the
-// program exits 2, "Range exhausted: key not found", having computed nothing.
-//
-//  - native: cuLaunchKernel returns its status directly and never touches the
-//    runtime's error slot.
-//  - runtime: <<<>>> expands to cudaLaunchKernel and DISCARDS its return. Synchronous
-//    rejections -- cudaErrorNoKernelImageForDevice (i.e. H12, on any card that is not
-//    sm_120), cudaErrorLaunchOutOfResources, cudaErrorInvalidConfiguration, and the
-//    local-memory allocation failure TestKernel's 16 KB frame invites -- are left in
-//    the per-thread last-error slot, which only cudaGetLastError reads. A synchronize
-//    does NOT report them; it only reports failures of a kernel that actually started.
-//    This is the same hole as the native path, through a different slot.
-//
-// The slot is drained immediately before the launch so the value read after it can
-// only describe that launch. That is what keeps the H6 item-3 misattribution out --
-// a stale error latched earlier in this thread cannot be reported as a launch
-// failure if it is no longer there. GpuEc.cu's CallGpuMulKernel already uses the
-// launch-then-cudaGetLastError half of this pattern, and PrepareCuda the drain half.
+// A rejected launch enqueues nothing, so the cudaStreamSynchronize in Execute() waits on an empty
+// stream and returns cudaSuccess: the run loop counts launches that never happened and the program
+// exits 2, "Range exhausted: key not found", having computed nothing. Native cuLaunchKernel returns
+// its status directly; <<<>>> DISCARDS cudaLaunchKernel's return and leaves synchronous rejections
+// (H12 cudaErrorNoKernelImageForDevice on a non-sm_120 card, LaunchOutOfResources,
+// InvalidConfiguration, the local-memory failure TestKernel's 16 KB frame invites) only in the
+// per-thread last-error slot, which a synchronize does NOT report. The slot is therefore drained
+// immediately before the launch, so the value read after it describes only that launch -- that is
+// what keeps the H6 item-3 misattribution out.
 cudaError_t CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 #if USE_NATIVE_CUBIN
 	TCubinCall* cc = NativeCubin();
 	if (!cc)
 		return cudaErrorInitializationError;
 
-	// One entry per declared parameter; cuLaunchKernel reads exactly as many as the
-	// signature has and copies each by that parameter's size.
+	// One entry per declared parameter; cuLaunchKernel reads exactly as many as the signature has.
 	void* args[8] = {
 		&Kparams.px,
 		&Kparams.py,
@@ -546,9 +484,8 @@ cudaError_t CudaCopyJy(const void* value) {
 
 cudaError_t CudaSetupKernel() {
 #if USE_NATIVE_CUBIN
-	// cudaFuncSetCacheConfig would configure the runtime-linked TestKernel, which is
-	// not the one being launched. DEVPLAN records PreferL1 as a verified non-win, so
-	// there is nothing to reproduce against the cubin's function here.
+	// cudaFuncSetCacheConfig would configure the runtime-linked TestKernel, not the one being
+	// launched. DEVPLAN records PreferL1 as a verified non-win, so there is nothing to reproduce.
 	return cudaSuccess;
 #else
 	return cudaFuncSetCacheConfig(TestKernel, cudaFuncCachePreferL1);

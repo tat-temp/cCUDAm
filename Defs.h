@@ -24,9 +24,8 @@ typedef unsigned char u8;
 typedef char i8;
 typedef __uint128_t uint128_t;
 
-// Lives in zero-copy mapped host memory, written by the device and read by the host, so the two
-// flags are the publication protocol rather than plain bookkeeping -- see publish_found in
-// GpuCore.cu. They are uint32_t and not bool because CUDA atomics have no bool overload.
+// Lives in zero-copy mapped host memory: device writes, host reads, so the two flags are a
+// publication protocol, not bookkeeping (see publish_found in GpuCore.cu). uint32_t, not bool: CUDA atomics have no bool overload.
 struct TFindResult {
     uint64_t scalar[4];
     uint64_t rx[4];
