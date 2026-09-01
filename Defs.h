@@ -37,7 +37,6 @@ struct TFindResult {
 //gpu kernel parameters
 struct TKparams {
 	uint64_t* scalars;
-	uint64_t* counts;
 	uint64_t* px;
 	uint64_t* py;
 	TFindResult* d_find_result;
@@ -45,6 +44,11 @@ struct TKparams {
 	uint64_t points_per_run;
 	uint64_t batch_size;
 	uint64_t batches_per_launch;
+	// Total batches EVERY thread must run, summed over all launches -- the same number for every
+	// thread, which is what lets the kernel drop its per-thread counter. Execute() spends this
+	// down and shortens the final launch so the scan stops exactly here instead of the kernel
+	// discovering the end per-thread.
+	uint64_t batches_per_thread;
 	uint64_t threads_total;
 	uint64_t runs_total;
 	

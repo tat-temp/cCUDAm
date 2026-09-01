@@ -105,7 +105,6 @@ __global__ void TestKernel(
 	uint64_t* __restrict__ Px,
     uint64_t* __restrict__ Py,
 	uint64_t* __restrict__ start_scalars,
-    uint64_t* __restrict__ counts256,
 	TFindResult* __restrict__ find_result, //found_scalar,
 	uint64_t threadsTotal,
     uint32_t batch_size,
@@ -124,29 +123,42 @@ __global__ void TestKernel(
     // and word 2 is the cheapest of the five to produce (see CUDAHash.cu).
     const uint32_t target_prefix = c_target_words[2];
 	
-	// rem is 256-bit here but absent from asm/tk/main.asm, which guards its batch loop on
-	// `BDone < BpL` alone. Deliberate: measured, dropping rem moves the compiled build by ZERO
-	// registers (122 either way) -- DEVPLAN "rem costs the COMPILED kernel nothing". Removing it for
-	// real needs the host to own the batch budget first, or the final launch over-scans (host item).
-	uint64_t x1[4], y1[4], s1[4], rem[4];
+	// The per-thread remaining-key counter (rem, and the counts256 array behind it) is gone. The
+	// HOST now owns the batch budget: every thread is given the SAME number of batches, and the
+	// final launch is shortened by passing a smaller batches_per_launch rather than by letting
+	// each thread notice it has run out (GpuPuzzle.cpp, PrepareHost/Execute). That is the
+	// precondition asm/tk/main.asm always assumed and could not enforce.
+	//
+	// What this buys, in order of importance:
+	//   * Every lane of a warp now runs exactly the same number of iterations BY CONSTRUCTION.
+	//     InvMod256 "requires all active threads in warp" (asm/mod_inv.asm:189), and the
+	//     straddling warp H4 patched -- one lane leaving the loop an iteration early while still
+	//     live for the write-back -- can no longer be built, at any range, not just a
+	//     power-of-two one.
+	//   * A 256-bit compare and a 256-bit subtract leave the batch loop.
+	//   * 32 bytes/thread of device memory, its pinned host mirror and its H2D copy are gone,
+	//     as are four loads at entry and four stores at exit.
+	uint64_t x1[4], y1[4], s1[4];
 	// GS: cache lane ????
-    { const uint64_t idx = gid*4 + 0; x1[0] = Px[idx]; y1[0] = Py[idx]; s1[0] = start_scalars[idx]; rem[0] = counts256[idx]; }
-    { const uint64_t idx = gid*4 + 1; x1[1] = Px[idx]; y1[1] = Py[idx]; s1[1] = start_scalars[idx]; rem[1] = counts256[idx]; }
-    { const uint64_t idx = gid*4 + 2; x1[2] = Px[idx]; y1[2] = Py[idx]; s1[2] = start_scalars[idx]; rem[2] = counts256[idx]; }
-    { const uint64_t idx = gid*4 + 3; x1[3] = Px[idx]; y1[3] = Py[idx]; s1[3] = start_scalars[idx]; rem[3] = counts256[idx]; }
-	
-	if ((rem[0]|rem[1]|rem[2]|rem[3]) == 0ull) return;
-	
+    { const uint64_t idx = gid*4 + 0; x1[0] = Px[idx]; y1[0] = Py[idx]; s1[0] = start_scalars[idx]; }
+    { const uint64_t idx = gid*4 + 1; x1[1] = Px[idx]; y1[1] = Py[idx]; s1[1] = start_scalars[idx]; }
+    { const uint64_t idx = gid*4 + 2; x1[2] = Px[idx]; y1[2] = Py[idx]; s1[2] = start_scalars[idx]; }
+    { const uint64_t idx = gid*4 + 3; x1[3] = Px[idx]; y1[3] = Py[idx]; s1[3] = start_scalars[idx]; }
+
 	// A mask handed to a warp intrinsic must name exactly the lanes that reach it: CUDA requires
 	// every NON-EXITED thread named in a mask to run the same intrinsic with the same mask, and on
 	// Volta+ a mask naming a live thread that never arrives can stall the warp.
 	//
-	// H4: one captured __activemask() cannot serve this loop. rem is per-thread and PrepareHost
-	// gives the first r1 threads one extra batch (GpuPuzzle.cpp:455), so on the final launch a lane
-	// can leave the loop an iteration early and still be LIVE for the write-back -- named in the
-	// stale mask, never arriving at the matching __any_sync. The per-iteration __ballot_sync names
-	// exactly the lanes that enter the body; the other exits leave the kernel entirely, and exited
-	// threads are exempt.
+	// H4: one captured __activemask() cannot serve this loop. The per-iteration __ballot_sync
+	// names exactly the lanes that enter the body; the other exits leave the kernel entirely,
+	// and exited threads are exempt.
+	//
+	// The divergence H4 was originally patching is now GONE at the source: `live` below depends
+	// only on batches_per_launch, which is a kernel argument and therefore warp-uniform, so no
+	// lane can leave this loop while another stays in it. The ballot is kept anyway, and it is
+	// not vestigial -- a lane that publishes a find RETURNS from inside the body, so the set of
+	// arriving lanes still shrinks mid-loop, and the ballot is what keeps the mask naming that
+	// set. It also costs one instruction per batch against B keys' worth of hashing.
 	//
 	// The seed must stay 0xFFFFFFFFu: the full mask is legal (every lane either reaches the first
 	// ballot or has exited) and the ballot self-corrects on iteration 0, whereas __activemask() here
@@ -159,7 +171,7 @@ __global__ void TestKernel(
 	uint64_t sink = 0ull;
 #endif
 	while (true) {
-		const bool live = (batches_done < batches_per_launch) && ge256_u64(rem, (uint64_t)B);
+		const bool live = (batches_done < batches_per_launch);
 		mask = __ballot_sync(mask, live);
 		if (!live) break;
 
@@ -363,11 +375,8 @@ __global__ void TestKernel(
             x1[3] = x3[3]; y1[3] = y3[3];
         }
 		
-		{
-			add256_u64(s1, (uint64_t)B);
-            sub256_u64(rem, (uint64_t)B);
-        }
-		
+		add256_u64(s1, (uint64_t)B);
+
 		batches_done++;
 	}
 	
@@ -377,10 +386,10 @@ __global__ void TestKernel(
 	// makes it un-eliminable. It will not fire (2^-64/thread), and this build cannot report a key.
 	if (sink == 0xD1CEB0EDFACADE01ull) publish_found(find_result, s1);
 #endif
-	{ const uint64_t idx = gid*4 + 0; Px[idx] = x1[0]; Py[idx] = y1[0]; counts256[idx] = rem[0]; start_scalars[idx] = s1[0]; }
-    { const uint64_t idx = gid*4 + 1; Px[idx] = x1[1]; Py[idx] = y1[1]; counts256[idx] = rem[1]; start_scalars[idx] = s1[1]; }
-    { const uint64_t idx = gid*4 + 2; Px[idx] = x1[2]; Py[idx] = y1[2]; counts256[idx] = rem[2]; start_scalars[idx] = s1[2]; }
-    { const uint64_t idx = gid*4 + 3; Px[idx] = x1[3]; Py[idx] = y1[3]; counts256[idx] = rem[3]; start_scalars[idx] = s1[3]; }
+	{ const uint64_t idx = gid*4 + 0; Px[idx] = x1[0]; Py[idx] = y1[0]; start_scalars[idx] = s1[0]; }
+    { const uint64_t idx = gid*4 + 1; Px[idx] = x1[1]; Py[idx] = y1[1]; start_scalars[idx] = s1[1]; }
+    { const uint64_t idx = gid*4 + 2; Px[idx] = x1[2]; Py[idx] = y1[2]; start_scalars[idx] = s1[2]; }
+    { const uint64_t idx = gid*4 + 3; Px[idx] = x1[3]; Py[idx] = y1[3]; start_scalars[idx] = s1[3]; }
     
 }
 
@@ -402,11 +411,15 @@ cudaError_t CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 		return cudaErrorInitializationError;
 
 	// One entry per declared parameter; cuLaunchKernel reads exactly as many as the signature has.
-	void* args[8] = {
+	// NOTE: dropping counts256 shifted every parameter after it down one slot, so a cubin built
+	// against the old 8-parameter layout will read find_result where threadsTotal now lives and
+	// launch into nonsense. asm/tmpl_TestKernel.cu and asm/tk/main.asm carry the matching layout
+	// and were updated with this; the committed asm/tk/*.cubin fixtures were NOT rebuilt (that
+	// needs RCAsm and a card) and are stale until they are.
+	void* args[7] = {
 		&Kparams.px,
 		&Kparams.py,
 		&Kparams.scalars,
-		&Kparams.counts,
 		&Kparams.d_find_result,
 		&Kparams.threads_total,
 		&Kparams.batch_size,
@@ -420,7 +433,7 @@ cudaError_t CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 	p.sharedSize     = 0;
 	p.stream         = cudaStream;
 	p.kernel_args    = args;
-	p.kernel_arg_cnt = 8;
+	p.kernel_arg_cnt = 7;
 	if (!cc->CallKernel(p))
 		return cudaErrorLaunchFailure;   // CallKernel has already printed the CUresult
 	return cudaSuccess;
@@ -431,7 +444,6 @@ cudaError_t CallGpuKernel(TKparams& Kparams, cudaStream_t cudaStream) {
 		Kparams.px,
 		Kparams.py,
 		Kparams.scalars,
-		Kparams.counts,
 		Kparams.d_find_result,
 		Kparams.threads_total,
 		Kparams.batch_size,
