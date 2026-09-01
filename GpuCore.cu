@@ -151,10 +151,7 @@ __global__ void TestKernel(
 	//     as are four loads at entry and four stores at exit.
 	__align__(16) uint64_t x1[4], y1[4], s1[4];
 	// GS: cache lane ????
-    //{ const uint64_t idx = gid*4 + 0; x1[0] = Px[idx]; y1[0] = Py[idx]; s1[0] = start_scalars[idx]; }
-    //{ const uint64_t idx = gid*4 + 1; x1[1] = Px[idx]; y1[1] = Py[idx]; s1[1] = start_scalars[idx]; }
-    //{ const uint64_t idx = gid*4 + 2; x1[2] = Px[idx]; y1[2] = Py[idx]; s1[2] = start_scalars[idx]; }
-    //{ const uint64_t idx = gid*4 + 3; x1[3] = Px[idx]; y1[3] = Py[idx]; s1[3] = start_scalars[idx]; }
+
 	const uint64_t idx = gid*4 + 0;
 	LOAD_VAL_256(x1, Px, idx);
 	LOAD_VAL_256(y1, Py, idx);
@@ -220,8 +217,6 @@ __global__ void TestKernel(
 			load4_const(gx_i, &c_Gx[(size_t)(i + 1) * 4]);
             sub_mod(tmp, gx_i, x1);
             mul_mod(acc, acc, tmp);
-            //subp[i][0] = acc[0]; subp[i][1] = acc[1];
-            //subp[i][2] = acc[2]; subp[i][3] = acc[3];
 			SAVE_VAL_256(subp[i], acc, 0);
         }
 
