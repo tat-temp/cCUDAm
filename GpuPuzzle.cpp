@@ -33,6 +33,7 @@ cudaError_t CallGpuMulKernel(
 cudaError_t CudaCopyTargetWords(const void* value);
 cudaError_t CudaCopyGx(const void* value, size_t size);
 cudaError_t CudaCopyGy(const void* value, size_t size);
+cudaError_t CudaCopyGyNeg(const void* value, size_t size);
 cudaError_t CudaCopyJx(const void* value);
 cudaError_t CudaCopyJy(const void* value);
 
@@ -60,6 +61,18 @@ void ClearKParams(TKparams* kParams);
 bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize);
 bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTotal, uint64_t threadsPerBlock, uint64_t batchSize);
 void DumpFound(int gpuIndex, TKparams* kParams);
+
+// r = P - a for 0 < a < P (secp256k1 field), little-endian 64-bit limbs.
+static void neg_mod_p_host(const uint64_t* a, uint64_t* r) {
+	static const uint64_t P[4] = { 0xFFFFFFFEFFFFFC2Full, ~0ull, ~0ull, ~0ull };
+	uint64_t borrow = 0ull;
+	for (int i = 0; i < 4; i++) {
+		const uint64_t d = P[i] - a[i];
+		const uint64_t b = (P[i] < a[i]) | (d < borrow);
+		r[i] = d - borrow;
+		borrow = b;
+	}
+}
 
 bool GpuPuzzle::Start() {
 	
@@ -606,6 +619,11 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
     }
 	ck(CudaCopyGx(hParams->gx, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gx");
 	ck(CudaCopyGy(hParams->gy, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_Gy");
+	{
+		uint64_t gyneg[(MAX_BATCH_SIZE / 2) * 4];
+		for (size_t i = 0; i < (batchSize >> 1); i++) neg_mod_p_host(&hParams->gy[i * 4], &gyneg[i * 4]);
+		ck(CudaCopyGyNeg(gyneg, (batchSize >> 1) * 4 * sizeof(uint64_t)), "ToSymbol c_GyNeg");
+	}
 	ck(CudaCopyJx(&hParams->bx), "ToSymbol c_Jx");
 	ck(CudaCopyJy(&hParams->by), "ToSymbol c_Jy");
 	

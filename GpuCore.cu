@@ -40,7 +40,7 @@ static TCubinCall* NativeCubin()
 	return &g_cubin[dev];
 }
 
-// The five __constant__ tables live in the cubin's own module, so cudaMemcpyToSymbol
+// The six __constant__ tables live in the cubin's own module, so cudaMemcpyToSymbol
 // -- which addresses the runtime-linked module -- would write to the wrong place.
 static cudaError_t NativeToSymbol(const char* name, const void* value, size_t size)
 {
@@ -59,6 +59,7 @@ static cudaError_t NativeToSymbol(const char* name, const void* value, size_t si
 __device__ __constant__ uint32_t c_target_words[5];
 __device__ __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
 __device__ __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
+__device__ __constant__ uint64_t c_GyNeg[(MAX_BATCH_SIZE/2) * 4];   // P - Gy[k], negated on the host
 __device__ __constant__ uint64_t c_Jx[4];
 __device__ __constant__ uint64_t c_Jy[4];
 
@@ -264,9 +265,7 @@ __global__ void TestKernel(
 				
 				// GS: Cache lane???
                 px_i[0]=c_Gx[(size_t)i*4+0]; px_i[1]=c_Gx[(size_t)i*4+1]; px_i[2]=c_Gx[(size_t)i*4+2]; px_i[3]=c_Gx[(size_t)i*4+3];
-                py_i[0]=c_Gy[(size_t)i*4+0]; py_i[1]=c_Gy[(size_t)i*4+1]; py_i[2]=c_Gy[(size_t)i*4+2]; py_i[3]=c_Gy[(size_t)i*4+3];
-                
-				neg_mod(py_i); 
+                py_i[0]=c_GyNeg[(size_t)i*4+0]; py_i[1]=c_GyNeg[(size_t)i*4+1]; py_i[2]=c_GyNeg[(size_t)i*4+2]; py_i[3]=c_GyNeg[(size_t)i*4+3];
 
                 sub_mod(s, py_i, y1);
                 mul_mod(lam, s, dx_inv_i);
@@ -314,9 +313,7 @@ __global__ void TestKernel(
             uint64_t px_i[4], py_i[4];
 			
             px_i[0]=c_Gx[(size_t)i*4+0]; px_i[1]=c_Gx[(size_t)i*4+1]; px_i[2]=c_Gx[(size_t)i*4+2]; px_i[3]=c_Gx[(size_t)i*4+3];
-            py_i[0]=c_Gy[(size_t)i*4+0]; py_i[1]=c_Gy[(size_t)i*4+1]; py_i[2]=c_Gy[(size_t)i*4+2]; py_i[3]=c_Gy[(size_t)i*4+3];
-            
-			neg_mod(py_i);
+            py_i[0]=c_GyNeg[(size_t)i*4+0]; py_i[1]=c_GyNeg[(size_t)i*4+1]; py_i[2]=c_GyNeg[(size_t)i*4+2]; py_i[3]=c_GyNeg[(size_t)i*4+3];
 
             sub_mod(s, py_i, y1);
             mul_mod(lam, s, dx_inv_i);
@@ -475,6 +472,14 @@ cudaError_t CudaCopyGy(const void* value, size_t size) {
 	return NativeToSymbol("c_Gy", value, size);
 #else
 	return cudaMemcpyToSymbol(c_Gy, value, size);
+#endif
+}
+
+cudaError_t CudaCopyGyNeg(const void* value, size_t size) {
+#if USE_NATIVE_CUBIN
+	return NativeToSymbol("c_GyNeg", value, size);
+#else
+	return cudaMemcpyToSymbol(c_GyNeg, value, size);
 #endif
 }
 
