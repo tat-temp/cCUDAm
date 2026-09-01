@@ -193,6 +193,9 @@ def main() -> int:
     ap.add_argument("--rounds", type=int, default=3, help="interleaved A,B rounds (default 3)")
     ap.add_argument("--warmup", type=int, default=2,
                     help="leading Speed samples to discard per run (default 2 = ~10 s)")
+    ap.add_argument("--warmup-rounds", type=int, default=1,
+                    help="A,B passes to run and discard before round 1 (default 1); the first "
+                         "launch on a cold card is faster and always lands on A")
     ap.add_argument("--sm", default="120", help="compute capability to build for")
     ap.add_argument("--grid", default=None, help='"A,B" passed to both sides')
     ap.add_argument("--make-args", default="", help="extra args appended to make")
@@ -229,7 +232,8 @@ def main() -> int:
     print("======== A/B configuration ===========================")
     print(f"  A (base) : {args.base:12s} {sha_a[:12]}")
     print(f"  B (head) : {args.head:12s} {sha_b[:12]}")
-    print(f"  schedule : {args.rounds} rounds x {args.seconds}s per side, INTERLEAVED A,B")
+    print(f"  schedule : {args.rounds} rounds x {args.seconds}s per side, INTERLEAVED A,B"
+          f"  (+{args.warmup_rounds} discarded warm-up pass{'es' if args.warmup_rounds != 1 else ''})")
     print(f"  build    : SM={args.sm} {args.make_args}".rstrip())
     print(f"  runner   : {'WSL ' + runner.distro if runner.distro else 'native bash'}")
     print(f"  worktrees: {work}")
@@ -267,6 +271,20 @@ def main() -> int:
                       "worth nothing -- refusing to benchmark it.", flush=True)
                 return 1
 
+        # Discarded warm-up: the first launch runs cold at boost clocks and always lands on A.
+        for w in range(1, args.warmup_rounds + 1):
+            for name, wt in (("A", wt_a), ("B", wt_b)):
+                print(f"warm-up {w}/{args.warmup_rounds}  side {name} ...", end=" ", flush=True)
+                samples, tail = measure(runner, wt, args.seconds, args.grid, args.warmup)
+                if not samples:
+                    print("NO SPEED SAMPLES", flush=True)
+                    print(f"\nside {name} produced no 'Speed:' line. Tail:\n{tail}", flush=True)
+                    if "No usable CUDA device" in tail or "CUDA init error" in tail:
+                        print("\nThis machine has no usable NVIDIA GPU -- the A/B has to run "
+                              "on the card.", flush=True)
+                    return 1
+                print(f"median {statistics.median(samples):,.0f} MKeys/s  (discarded)")
+
         rounds_a: List[List[int]] = []
         rounds_b: List[List[int]] = []
         for r in range(1, args.rounds + 1):
@@ -283,7 +301,7 @@ def main() -> int:
                               "on the card.", flush=True)
                     return 1
                 bucket.append(samples)
-                print(f"median {statistics.median(samples):,} MKeys/s  ({len(samples)} samples)")
+                print(f"median {statistics.median(samples):,.0f} MKeys/s  ({len(samples)} samples)")
 
         sa, sb = summarize("A", rounds_a), summarize("B", rounds_b)
         if not sa or not sb:

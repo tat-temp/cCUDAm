@@ -232,8 +232,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--path", "-c", default="./cCUDAHurricane", help="binary to test")
-    ap.add_argument("--range", "-r", dest="range_arg", default="1000000:100FFFF",
-                    help="HEX START:END, power-of-two length, start aligned (default: 2^16 keys)")
+    # 2^32 keys: large enough that CalcEffectiveBatchSize keeps B=1024 on a big card. A 2^16 range
+    # shrank it to 2, and at half=1 the ladder and walk loops never run.
+    ap.add_argument("--range", "-r", dest="range_arg", default="100000000:1FFFFFFFF",
+                    help="HEX START:END, power-of-two length, start aligned (default: 2^32 keys)")
+    ap.add_argument("--min-batch", type=int, default=64,
+                    help="refuse to run if the kernel's effective batch is below this (default 64). "
+                         "A small B means the host shrank it to fit the range, and the batch "
+                         "machinery under test then barely executes -- grow --range instead.")
     ap.add_argument("--grid", default=None, help='"A,B" passed through to the binary')
     ap.add_argument("--timeout", type=int, default=300,
                     help="per-run cap in seconds (default 300). A miss scans the whole range, "
@@ -263,6 +269,13 @@ def main() -> int:
         return 1
     if B <= 0 or B & 1:
         print(f"binary reported an invalid batch size {B}", file=sys.stderr)
+        return 1
+    if B < args.min_batch:
+        # A degenerate B is a config error, not a result: it must never read as PASS.
+        print(f"REFUSING: effective batch {B} (half = {B >> 1}) is below --min-batch {args.min_batch}.\n"
+              f"  The range ({span} keys) is too small for this card; the host shrank the batch.\n"
+              f"  Use a larger --range, or lower --min-batch to test a small batch on purpose.",
+              file=sys.stderr)
         return 1
 
     offsets = plan_offsets(B, span)
