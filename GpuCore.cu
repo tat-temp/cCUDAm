@@ -56,6 +56,11 @@ static cudaError_t NativeToSymbol(const char* name, const void* value, size_t si
 #define BLOCK_X		blockIdx.x
 #define THREAD_X	threadIdx.x
 
+// 4 limbs as two 128-bit accesses. idx counts LIMBS, so ptr must be flat: for a [N][4] array
+// pass the row (SAVE_VAL_256(subp[i], acc, 0)), never the array with a row index.
+#define LOAD_VAL_256(dst, ptr, idx) { *((int4*)&(dst)[0]) = *((int4*)&(ptr)[idx]); *((int4*)&(dst)[2]) = *((int4*)&(ptr)[idx + 2]); }
+#define SAVE_VAL_256(ptr, src, idx) { *((int4*)&(ptr)[idx]) = *((int4*)&(src)[0]); *((int4*)&(ptr)[idx + 2]) = *((int4*)&(src)[2]); }
+
 __device__ __constant__ uint32_t c_target_words[5];
 // __align__(16): each 4-limb entry starts on a 32-byte boundary, so a point reads as two
 // LDCU.128 instead of four LDCU.64 (see load4_const).
@@ -68,9 +73,8 @@ __device__ __constant__ __align__(16) uint64_t c_Jy[4];
 // 4 limbs out of a 16-byte-aligned __constant__ table, as two 128-bit loads.
 __device__ __forceinline__ void load4_const(uint64_t* r, const uint64_t* src)
 {
-	const ulonglong2 lo = *(const ulonglong2*)src;
-	const ulonglong2 hi = *(const ulonglong2*)(src + 2);
-	r[0] = lo.x; r[1] = lo.y; r[2] = hi.x; r[3] = hi.y;
+	((int4*)r)[0] = ((const int4*)src)[0];
+	((int4*)r)[1] = ((const int4*)src)[1];
 }
 
 
@@ -147,10 +151,14 @@ __global__ void TestKernel(
 	//     as are four loads at entry and four stores at exit.
 	__align__(16) uint64_t x1[4], y1[4], s1[4];
 	// GS: cache lane ????
-    { const uint64_t idx = gid*4 + 0; x1[0] = Px[idx]; y1[0] = Py[idx]; s1[0] = start_scalars[idx]; }
-    { const uint64_t idx = gid*4 + 1; x1[1] = Px[idx]; y1[1] = Py[idx]; s1[1] = start_scalars[idx]; }
-    { const uint64_t idx = gid*4 + 2; x1[2] = Px[idx]; y1[2] = Py[idx]; s1[2] = start_scalars[idx]; }
-    { const uint64_t idx = gid*4 + 3; x1[3] = Px[idx]; y1[3] = Py[idx]; s1[3] = start_scalars[idx]; }
+    //{ const uint64_t idx = gid*4 + 0; x1[0] = Px[idx]; y1[0] = Py[idx]; s1[0] = start_scalars[idx]; }
+    //{ const uint64_t idx = gid*4 + 1; x1[1] = Px[idx]; y1[1] = Py[idx]; s1[1] = start_scalars[idx]; }
+    //{ const uint64_t idx = gid*4 + 2; x1[2] = Px[idx]; y1[2] = Py[idx]; s1[2] = start_scalars[idx]; }
+    //{ const uint64_t idx = gid*4 + 3; x1[3] = Px[idx]; y1[3] = Py[idx]; s1[3] = start_scalars[idx]; }
+	const uint64_t idx = gid*4 + 0;
+	LOAD_VAL_256(x1, Px, idx);
+	LOAD_VAL_256(y1, Py, idx);
+	LOAD_VAL_256(s1, start_scalars, idx);
 
 	// A mask handed to a warp intrinsic must name exactly the lanes that reach it: CUDA requires
 	// every NON-EXITED thread named in a mask to run the same intrinsic with the same mask, and on
@@ -208,11 +216,13 @@ __global__ void TestKernel(
 		for(int i = 0; i < 4; i++) subp[half-1][i] = acc[i];
 
 		for (int i = half - 2; i >= 0; --i) {
-            uint64_t gx_i[4]; load4_const(gx_i, &c_Gx[(size_t)(i + 1) * 4]);
+            __align__(16) uint64_t gx_i[4];
+			load4_const(gx_i, &c_Gx[(size_t)(i + 1) * 4]);
             sub_mod(tmp, gx_i, x1);
             mul_mod(acc, acc, tmp);
-            subp[i][0] = acc[0]; subp[i][1] = acc[1];
-            subp[i][2] = acc[2]; subp[i][3] = acc[3];
+            //subp[i][0] = acc[0]; subp[i][1] = acc[1];
+            //subp[i][2] = acc[2]; subp[i][3] = acc[3];
+			SAVE_VAL_256(subp[i], acc, 0);
         }
 
 		__align__(16) uint64_t inverse[5];
