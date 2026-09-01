@@ -14,10 +14,13 @@
 //
 // Preconditions, both of which bite silently if violated:
 //   * All threads in a warp must run the SAME number of batch iterations. InvMod256
-//     "requires all active threads in warp!" (mod_inv.asm:189) and a thread whose rem
-//     runs out early leaves the loop while its neighbours are still inside -- exactly
-//     H4's straddling warp. Use a power-of-two range so every thread gets an equal
-//     batch count.
+//     "requires all active threads in warp!" (mod_inv.asm:189) and a thread leaving the
+//     loop early while its neighbours are still inside is exactly H4's straddling warp.
+//     This is now GUARANTEED rather than assumed: the per-thread remaining-key counter is
+//     gone, the host hands every thread the same batch budget and shortens the final
+//     launch instead (GpuPuzzle.cpp), so the trip count is batches_per_launch -- a kernel
+//     argument, warp-uniform by construction. The old "use a power-of-two range" advice
+//     is obsolete; any range is safe.
 //   * blockDim.x is assumed to be 256 (see the gid comment).
 //
 // Constant bank 3 -- the DEVICE-LINKED (-rdc) layout, which is NOT declaration order:
@@ -27,8 +30,15 @@
 // plain -cubin offsets would read c_Jy where c_target_words lives.
 //
 // Parameters, c[0x0], sm_120 (PARAM_BASE 0x380 = the sm_89 0x160 + 0x220):
-//     0x380 Px          0x388 Py           0x390 start_scalars  0x398 counts256
-//     0x3a0 find_result 0x3a8 threadsTotal 0x3b0 batch_size     0x3b4 batches_per_launch
+//     0x380 Px          0x388 Py           0x390 start_scalars
+//     0x398 find_result 0x3a0 threadsTotal 0x3a8 batch_size     0x3ac batches_per_launch
+//
+// CHANGED: counts256 was removed from the signature, so everything after start_scalars moved
+// DOWN one 8-byte slot from the layout this file was originally written against
+// (find_result 0x3a0 -> 0x398, threadsTotal 0x3a8 -> 0x3a0, batch_size 0x3b0 -> 0x3a8,
+// batches_per_launch 0x3b4 -> 0x3ac). Any body below still reading the old offsets loads
+// find_result where threadsTotal now sits. The committed asm/tk/*.cubin fixtures predate
+// this and are STALE until rebuilt through asm/tk/build.sh.
 //
 // Every idiom below is copied from what ptxas actually emits for THIS kernel rather
 // than invented: global access is `LDG.E.64 Rd, desc[UR][Raddr.64+off]` with the

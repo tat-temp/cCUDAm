@@ -37,8 +37,10 @@ cudaError_t CudaCopyJx(const void* value);
 cudaError_t CudaCopyJy(const void* value);
 
 struct THparams {
-	uint64_t*		counts;
 	uint64_t*		scalars;
+	// Batches per thread, uniform across threads. PrepareHost derives it; Prepare turns it into
+	// runs_total and Execute spends it down. See PrepareHost for why it must be uniform.
+	uint64_t		batches_per_thread;
 	TFindResult*	find_result;
 	const uint64_t* gx;
 	const uint64_t* gy;
@@ -147,17 +149,15 @@ bool GpuPuzzle::Prepare(const uint64_t* pStart, const uint64_t* pRange, const ui
 	Kparams.points_per_run = effectiveBatchSize * threadsTotal * effectiveSlises;
 	Kparams.batch_size = effectiveBatchSize;
 	Kparams.batches_per_launch = effectiveSlises;
+	Kparams.batches_per_thread = hParams.batches_per_thread;
 	Kparams.threads_total = threadsTotal;
 
-	div_256_u64(pRange, Kparams.points_per_run, runsTotal, &remRunsTotal);
-	if (remRunsTotal) {
-		add_256_u64(runsTotal, 1ull, runsTotal);
-	}
-	if (runsTotal[1] | runsTotal[2] | runsTotal[3]) {
-		std::cerr << "Runs total exceeds u64 value.\r\n";
-		goto LExit;
-	}
-	Kparams.runs_total = runsTotal[0];
+	// runs_total now follows from the batch budget instead of a 256-bit divide of the range.
+	// Both express the same thing, but this one is what Execute() actually spends down, so the
+	// launch count and the work remaining cannot drift apart: the old form derived the count
+	// from the range while the kernel decided the end per-thread, and the two only agreed
+	// because the kernel over-scanned on the final launch.
+	Kparams.runs_total = (Kparams.batches_per_thread + effectiveSlises - 1ull) / effectiveSlises;
 
 	std::cout << "============ Calculated ===============\r\n";
 	std::cout << std::left << std::setw(20) << " Points/Batch       " << " : " << Kparams.batch_size << "\r\n";
@@ -210,8 +210,21 @@ void GpuPuzzle::Execute() {
 	pnt_cnt = Kparams.points_per_run;
 	runs_total = Kparams.runs_total;
 
-	while (!m_stopFlag && runs_done < runs_total) {
+	// The host owns the batch budget now. Every thread has exactly batches_per_thread batches to
+	// run; each launch consumes batches_per_launch of them, and the LAST launch is shortened to
+	// whatever is left. That short final launch is what replaces the kernel's per-thread counter:
+	// without it the last launch would run a full slice and over-scan past the end of the range.
+	const uint64_t slices_full = Kparams.batches_per_launch;
+	uint64_t batches_left = Kparams.batches_per_thread;
+
+	while (!m_stopFlag && runs_done < runs_total && batches_left) {
 		u64 t1 = GetTickCount64();
+
+		const uint64_t bpl = (batches_left < slices_full) ? batches_left : slices_full;
+		Kparams.batches_per_launch = bpl;
+		// Points actually scanned by THIS launch. Using the nominal full-slice figure would
+		// overstate the speed of the short final launch and drag the reported average up.
+		const uint64_t pnt_cnt_run = Kparams.batch_size * Kparams.threads_total * bpl;
 
 #ifndef NO_GPU_MODE	
 		err = CallGpuKernel(Kparams, m_cudaStream);
@@ -239,13 +252,14 @@ void GpuPuzzle::Execute() {
 #endif
 
 		runs_done++;
+		batches_left -= bpl;
 
 		{
 			u64 t2 = GetTickCount64();
 			u64 tm = t2 - t1;
 			if (!tm) tm = 1;
-			
-			uint64_t cur_speed = (uint64_t)(pnt_cnt / (1000 * tm));
+
+			uint64_t cur_speed = (uint64_t)(pnt_cnt_run / (1000 * tm));
 
 			m_speed_stat[m_stat_idx] = cur_speed;
 			m_stat_idx = (m_stat_idx + 1) % STATS_WND_SIZE;
@@ -401,19 +415,16 @@ static void free_device(void* p, const char* what) {
 }
 
 void ClearHParams(THparams* hParams) {
-	free_host_pinned(hParams->counts, "counts");
 	free_host_pinned(hParams->scalars, "scalars");
 	// find_result belongs here only until PrepareCuda takes it (Prepare nulls the field at the
 	// handoff); without this line a failure inside that window orphans the page outright.
 	free_host_pinned(hParams->find_result, "find_result");
 
-	hParams->counts = nullptr;
 	hParams->scalars = nullptr;
 	hParams->find_result = nullptr;
 }
 
 void ClearKParams(TKparams* kParams) {
-	free_device(kParams->counts, "d_counts");
 	free_device(kParams->scalars, "d_start_scalars");
 	free_device(kParams->px, "d_Px");
 	free_device(kParams->py, "d_Py");
@@ -421,7 +432,6 @@ void ClearKParams(TKparams* kParams) {
 	// device-side alias of that same mapped page -- an address, not an allocation -- never free it.
 	free_host_pinned(kParams->h_find_result, "h_find_result");
 
-	kParams->counts = nullptr;
 	kParams->scalars = nullptr;
 	kParams->px = nullptr;
 	kParams->py = nullptr;
@@ -432,48 +442,55 @@ void ClearKParams(TKparams* kParams) {
 bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash160, const uint64_t* range, uint64_t threadsTotal, uint64_t batchSize) {
 	uint64_t per_thread_cnt[4];
 	uint64_t batch_cnt[4];
+	uint64_t per_thread_batches[4];
 	uint64_t r1 = 0ull;
 	uint64_t rem_batch = 0ull;
-	uint64_t* h_counts256     	= nullptr;
     uint64_t* h_start_scalars 	= nullptr;
 	TFindResult* h_find_result	= nullptr;
 	uint32_t half;
 	bool result = false;
 
 	// Distribute whole BATCHES, not raw keys: the kernel consumes exactly batchSize keys per
-	// iteration and stops as soon as fewer remain (GpuCore.cu:65), so a per-thread count that is
-	// not a multiple of batchSize leaves its remainder permanently unscanned. Rounding the batch
-	// total up over-scans by at most batchSize-1 keys, which is harmless; a short tail is not.
-	// r1 counts the threads that get one EXTRA batch.
+	// iteration, so a per-thread count that is not a multiple of batchSize would leave its
+	// remainder permanently unscanned. Rounding the batch total up over-scans past the end of
+	// the range, which is harmless; a short tail is not.
+	//
+	// Every thread gets the SAME number of batches -- the round-up is applied here, once, rather
+	// than by handing the first r1 threads one extra batch each. That asymmetry is what forced
+	// the kernel to carry a per-thread remaining-key counter: with unequal budgets no single
+	// batches_per_launch could describe the final launch, so each thread had to notice its own
+	// end, and a warp straddling the r1 boundary then diverged mid-loop (H4) while InvMod256
+	// requires every active lane of the warp to arrive (asm/mod_inv.asm:189).
+	//
+	// Uniform budgets cost at most (threadsTotal - 1) extra batches of over-scan at the very end
+	// -- the last thread runs past the range end, exactly as the batch round-up already did.
+	// Nothing is scanned twice: the start scalars below advance by this same stride, so the
+	// slices stay contiguous and non-overlapping.
 	div_256_u64(range, batchSize, batch_cnt, &rem_batch);
 	if (rem_batch) {
 		add_256_u64((const uint64_t*)&batch_cnt, 1ull, (uint64_t*)&batch_cnt);
 	}
-	div_256_u64((const uint64_t*)&batch_cnt, threadsTotal, per_thread_cnt, &r1);
-	mul_256_u64((const uint64_t*)&per_thread_cnt, batchSize, (uint64_t*)&per_thread_cnt);
+	div_256_u64((const uint64_t*)&batch_cnt, threadsTotal, per_thread_batches, &r1);
+	if (r1) {
+		add_256_u64((const uint64_t*)&per_thread_batches, 1ull, (uint64_t*)&per_thread_batches);
+	}
+	// Execute() counts launches in a u64, and the kernel takes batches_per_launch as a u32, so a
+	// budget that does not fit a u64 could never be spent down. It takes an absurd range to reach
+	// this; refusing beats silently truncating the scan.
+	if (per_thread_batches[1] | per_thread_batches[2] | per_thread_batches[3]) {
+		std::cerr << "Batches per thread exceeds u64; reduce the range or raise the batch size.\r\n";
+		return false;
+	}
+	hParams->batches_per_thread = per_thread_batches[0];
+	mul_256_u64((const uint64_t*)&per_thread_batches, batchSize, (uint64_t*)&per_thread_cnt);
 
 #ifndef NO_GPU_MODE
-    ck(cudaHostAlloc(&h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_counts256 alloc");
     ck(cudaHostAlloc(&h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped), "h_start_scalars alloc");
     ck(cudaHostAlloc(&h_find_result,   sizeof(TFindResult), cudaHostAllocMapped), "h_found_scalar alloc");
 #else
-    h_counts256 = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
     h_start_scalars = (uint64_t*)malloc(threadsTotal * 4 * sizeof(uint64_t));
     h_find_result = (TFindResult*)malloc(sizeof(TFindResult));
 #endif
-
-	{
-		for (uint64_t i = 0; i < threadsTotal; ++i) {
-			h_counts256[i*4+0] = per_thread_cnt[0];
-			h_counts256[i*4+1] = per_thread_cnt[1];
-			h_counts256[i*4+2] = per_thread_cnt[2];
-			h_counts256[i*4+3] = per_thread_cnt[3];
-			
-			if (i < r1) {
-				add_256_u64((const uint64_t*)&h_counts256[i*4], batchSize, (uint64_t*)&h_counts256[i*4]);
-			}
-		}
-	}
 
 	half = (uint32_t)batchSize >> 1;
     {
@@ -487,10 +504,9 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
             h_start_scalars[i*4+3] = scalar_effective[3];
 
             uint64_t next[4];
+			// Same stride for every thread -- see the uniform-budget note above. The slices stay
+			// contiguous, so no key is scanned twice and none between two threads is skipped.
 			add_256((const uint64_t*)&cur, (const uint64_t*)&per_thread_cnt, (uint64_t*)&next);
-			if (i < r1) {
-				add_256_u64((const uint64_t*)&next, batchSize, (uint64_t*)&next);
-			}
 
             cur[0]=next[0]; cur[1]=next[1]; cur[2]=next[2]; cur[3]=next[3];
         }
@@ -534,7 +550,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 		std::memset(h_find_result, 0, sizeof(TFindResult));
 	}
 
-	hParams->counts = h_counts256;
 	hParams->scalars = h_start_scalars;
 	hParams->find_result = h_find_result;
 	hParams->hash160 = hash160;
@@ -544,7 +559,6 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 LExit:	
 
 	if (!result) {
-		free_host_pinned(h_counts256, "h_counts256");
 		free_host_pinned(h_start_scalars, "h_start_scalars");
 		free_host_pinned(h_find_result, "h_find_result");
 	}
@@ -557,18 +571,15 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 	uint64_t* d_start_scalars = nullptr;
 	uint64_t* d_Px = nullptr;
 	uint64_t* d_Py = nullptr;
-	uint64_t* d_counts = nullptr;
 	TFindResult *d_find_result = nullptr;
-	
+
 	ck(cudaMalloc(&d_start_scalars, threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_start_scalars)");
-	ck(cudaMalloc(&d_counts,        threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_counts)");
 	ck(cudaMalloc(&d_Px,            threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Px)");
     ck(cudaMalloc(&d_Py,            threadsTotal * 4 * sizeof(uint64_t)), "cudaMalloc(d_Py)");
 
 	ck(cudaHostGetDevicePointer((void**)&d_find_result, hParams->find_result, 0), "cudaHostGetDevicePointer(find_result)");
 
     ck(cudaMemcpy(d_start_scalars, 	hParams->scalars, 	threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy scalars");
-    ck(cudaMemcpy(d_counts,        	hParams->counts,  	threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyHostToDevice), "cpy counts");
 
 	{
 		uint64_t mulBlocks = (uint64_t)((threadsTotal + threadsPerBlock - 1) / threadsPerBlock);;
@@ -601,7 +612,6 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 	ck(CudaSetupKernel(), "setup MainKernel");
 
 	kParams->scalars = d_start_scalars;
-	kParams->counts = d_counts;
 	kParams->d_find_result = d_find_result;
 	kParams->h_find_result = hParams->find_result;
 	kParams->px = d_Px;
@@ -612,8 +622,7 @@ bool PrepareCuda(TKparams* kParams, const THparams* hParams, uint64_t threadsTot
 LExit:	
 
 	if (!result) {
-		// Only the four cudaMalloc'd buffers; d_find_result is the caller's mapped page, freed there.
-		free_device(d_counts, "d_counts");
+		// Only the three cudaMalloc'd buffers; d_find_result is the caller's mapped page, freed there.
 		free_device(d_start_scalars, "d_start_scalars");
 		free_device(d_Px, "d_Px");
 		free_device(d_Py, "d_Py");

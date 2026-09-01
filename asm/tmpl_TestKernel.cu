@@ -43,7 +43,6 @@ __global__ void TestKernel(
 	uint64_t* __restrict__ Px,
     uint64_t* __restrict__ Py,
 	uint64_t* __restrict__ start_scalars,
-    uint64_t* __restrict__ counts256,
 	TFindResult* __restrict__ find_result,
 	uint64_t threadsTotal,
     uint32_t batch_size,
@@ -77,7 +76,6 @@ __global__ void TestKernel(
 
 	Px[t] = subp[k][0] + v;
 	Py[t] = subp[k][1] + v;
-	start_scalars[t] = subp[k][2] + v;
-	counts256[t] = subp[k][3] + v;
+	start_scalars[t] = subp[k][2] + subp[k][3] + v;
 	find_result->scalar[0] = v;
 }

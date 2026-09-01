@@ -2,6 +2,9 @@
 
 //c_target_words, c_Gx, c_Gy, c_Jx, c_Jy are __constant__ symbols defined in GpuCore.cu.
   
+// No longer used by TestKernel: the batch loop's `rem >= B` guard went away when the host took
+// over the batch budget (GpuCore.cu). Kept because rcasm_test/abtest/ab_kernel.cu includes this
+// header and still reproduces the old guarded loop, which is what makes it a bisect counterpart.
 __device__ __forceinline__ bool ge256_u64(const uint64_t a[4], uint64_t b) {
     if (a[3] | a[2] | a[1]) return true;  // >= 2^64
     return a[0] >= b;
