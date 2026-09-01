@@ -174,7 +174,7 @@ __global__ void TestKernel(
             sub_mod3(px3, sq, x1, px_i);                                               \
             sub_mod(s, x1, px3);                                                       \
             mul_mod(s, s, lam);                                                        \
-            uint8_t odd; sub_mod_is_odd(&odd, s, y1); (void)odd;                       \
+            (void)sub_mod_is_odd_prefix(s, y1);                                        \
             mul_mod(wacc, wacc, px3);                                                  \
             for (int k = 0; k < 4; k++) {                                              \
                 lastpx3[k] = px3[k]; lastlam[k] = lam[k]; lastsqr[k] = sq[k];          \

@@ -103,7 +103,7 @@ nohash-cubin:
 rdc-cubins:
 	$(MAKE) cubin CUBIN_FILE=GpuCore_rdc.cubin SM=$(SM_ARCHS)
 	$(NVCC) $(NVCCFLAGS) -cubin -o GpuCore_plain.cubin GpuCore.cu
-	python3 cubin_globalize.py GpuCore_plain.cubin c_Gx c_Gy c_Jx c_Jy c_target_words
+	python3 cubin_globalize.py GpuCore_plain.cubin c_Gx c_Gy c_GyNeg c_Jx c_Jy c_target_words
 
 $(TARGET): $(CPP_OBJECTS) $(CU_OBJECTS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)
