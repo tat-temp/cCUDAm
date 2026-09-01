@@ -396,10 +396,9 @@ __global__ void TestKernel(
 	// makes it un-eliminable. It will not fire (2^-64/thread), and this build cannot report a key.
 	if (sink == 0xD1CEB0EDFACADE01ull) publish_found(find_result, s1);
 #endif
-	{ const uint64_t idx = gid*4 + 0; Px[idx] = x1[0]; Py[idx] = y1[0]; start_scalars[idx] = s1[0]; }
-    { const uint64_t idx = gid*4 + 1; Px[idx] = x1[1]; Py[idx] = y1[1]; start_scalars[idx] = s1[1]; }
-    { const uint64_t idx = gid*4 + 2; Px[idx] = x1[2]; Py[idx] = y1[2]; start_scalars[idx] = s1[2]; }
-    { const uint64_t idx = gid*4 + 3; Px[idx] = x1[3]; Py[idx] = y1[3]; start_scalars[idx] = s1[3]; }
+	SAVE_VAL_256(Px, x1, idx);
+	SAVE_VAL_256(Py, y1, idx);
+	SAVE_VAL_256(start_scalars, s1, idx);
     
 }
 
