@@ -78,10 +78,6 @@ __device__ __constant__ uint64_t c_Jy[4];
 	do { (sink) ^= (X)[0] ^ (X)[1] ^ (X)[2] ^ (X)[3] ^ (uint64_t)(prefix); } while (0)
 #endif
 
-#define FLUSH_THRESHOLD 65536u
-// WARP_FLUSH_HASHES is compiled out: the warp-reduce + atomicAdd hash counter is disabled.
-#define WARP_FLUSH_HASHES()
-#define MAYBE_WARP_FLUSH() do { if ((local_hashes & (FLUSH_THRESHOLD - 1u)) == 0u) WARP_FLUSH_HASHES(); } while (0)
 		
 // Publish a hit into the mapped result struct, exactly once. Every found path goes through here.
 //
@@ -189,7 +185,7 @@ __global__ void TestKernel(
 				publish_found(find_result, s1);
 			}
 
-			if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
+			if (__any_sync(mask, full)) { __syncwarp(mask); return; }
 		}
 #endif
 
@@ -251,7 +247,7 @@ __global__ void TestKernel(
 						publish_found(find_result, hit);
 					}
 
-					if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
+					if (__any_sync(mask, full)) { __syncwarp(mask); return; }
 				}
 #endif
 			}
@@ -288,7 +284,7 @@ __global__ void TestKernel(
 						publish_found(find_result, hit);
 					}
 
-					if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
+					if (__any_sync(mask, full)) { __syncwarp(mask); return; }
 				}
 #endif
 			}
@@ -333,7 +329,7 @@ __global__ void TestKernel(
 					publish_found(find_result, hit);
 				}
 
-				if (__any_sync(mask, full)) { __syncwarp(mask); WARP_FLUSH_HASHES(); return; }
+				if (__any_sync(mask, full)) { __syncwarp(mask); return; }
 			}
 #endif
 
