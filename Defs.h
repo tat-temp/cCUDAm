@@ -6,9 +6,7 @@
 
 #define SHOW_STAT_INTERVAL_SECS	5
 
-#ifndef MAX_BATCH_SIZE
 #define MAX_BATCH_SIZE			1024
-#endif
 
 #define MAX_GPU_CNT				32
 #define THREADS_PER_BLOCK		256

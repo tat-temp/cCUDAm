@@ -568,8 +568,7 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
 // path; getHash160_33_from_limbs below runs only after a 32-bit filter hit (~2^-32).
 //
 // __noinline__ here is P3's first half, and it is MEASURED RATHER THAN ASSUMED: dropping it is
-// 0.8-1.3% SLOWER on an RTX 5090, so the attribute stays. The flag `make INLINE_HASH_W2=1` still
-// builds the other way, as the reproducer for anyone who has the idea again.
+// 0.8-1.3% SLOWER on an RTX 5090, so the attribute stays.
 //
 // It could not have won, and the reason is worth knowing before reaching for __forceinline__ on
 // anything else here. Inlining recovers 2 CALL + 2 RET per walk iteration against ~5,900
@@ -579,19 +578,10 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
 // Instruction-fetch footprint is. The by-value ABI noted below had already taken everything the
 // call had to give.
 //
-// getHash160_33_from_limbs below keeps __noinline__ unconditionally: it runs under the 32-bit
-// filter, i.e. ~2^-32 of keys, so inlining it would spend code size and registers on a cold path.
-// Guarded, not defined outright: an unguarded define is what made DEBUG_MODE's -D collide with
-// the header and silently lose (H11). The flag only ever arrives from the command line.
-#ifndef INLINE_HASH_W2
-#define INLINE_HASH_W2 0
-#endif
-#if INLINE_HASH_W2
-#define HASH_W2_LINKAGE
-#else
-#define HASH_W2_LINKAGE __noinline__
-#endif
-__device__ HASH_W2_LINKAGE uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U256 x)
+// getHash160_33_from_limbs below carries __noinline__ for the same reason: it runs under the
+// 32-bit filter, i.e. ~2^-32 of keys, so inlining it would spend code size and registers on a
+// cold path.
+__device__ __noinline__ uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U256 x)
 {
     uint32_t sha_state[16];
     SHA256_33_from_limbs(prefix02_03, x.v, sha_state);

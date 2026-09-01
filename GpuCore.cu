@@ -84,61 +84,6 @@ __device__ __constant__ uint64_t c_Jy[4];
 #define NO_HASH 0
 #endif
 
-// P3's second half, `make HOIST_INV_CHAIN=1`. Guarded like NO_HASH above so a command-line -D
-// cannot collide with a header define and lose, which is how H11's DEBUG_MODE went dead.
-#ifndef HOIST_INV_CHAIN
-#define HOIST_INV_CHAIN 0
-#endif
-
-// P6 PROBE -- `make subp-cubins`. Wraps every subp[] index to the low SUBP_WRAP slots, which
-// is ARITHMETICALLY WRONG for any value below half and is meant to be: it shrinks the WORKING
-// SET while holding the instruction stream, the memory-operation count and the access pattern
-// fixed, so an A/B across two wrap values measures cache residency and nothing else. Same
-// shape as the stall-dose pair -- a deliberately broken build that isolates one variable.
-//
-// WHAT IT IS TESTING. The theoretical-ceiling analysis (DEVPLAN, 2026-08-26) puts this kernel
-// at 38% of issue capacity and 56% of DRAM peak, with memory binding first: subp[] is 16 KB
-// per thread and 512 resident threads on each of 170 SMs make the live set 1.39 GB against an
-// L2 of roughly 90 MB, so essentially every read of a suffix product is a DRAM read. Nothing
-// about chunking reduces the BYTES -- each slot is written once and read once at any chunk
-// size, as the P2 note says -- so the only thing a smaller buffer can buy is L2 residency,
-// and that claim has never been tested at a size where it could be true.
-//
-//   SUBP_WRAP   frame touched   live across 170 SMs   vs ~90 MB L2
-//   512 (none)      16 KB            1.39 GB           16x over
-//   128             4 KB              348 MB            4x over   <-- where P2 stopped
-//    32             1 KB               87 MB            at the boundary
-//     8             256 B            21.8 MB            well inside
-//
-// P2 IS THE REASON THIS IS A PROBE AND NOT AN IMPLEMENTATION. Its batch half moved the buffer
-// 16 KB -> 4 KB, measured +0.47%, and was written up as a refutation of reuse distance. At
-// 348 MB it never came within 4x of the cliff, so what it actually refuted was that step size.
-// Multi-level batch inversion would reach 24-48 slots for +10-23% instructions; that is worth
-// building only if the residency effect is bigger than the instruction cost, and this settles
-// which before anyone writes it.
-//
-// SUBP_WRAP=512 is the matched baseline and is exactly correct -- `i & 511` is the identity on
-// [0,511] -- so it must come back EXACT and carries the same masking instructions as the other
-// rungs. Side A of every comparison in this series.
-//
-// One confound, stated rather than hidden: a wrapped build feeds inv_mod a different value,
-// and inv_mod's loop is data-dependent. It is ~15% of the kernel, so a few percent of
-// trip-count drift is well under a percent of runtime -- far below the effect being asked
-// about, but not zero.
-#ifndef SUBP_WRAP
-#define SUBP_WRAP 0
-#endif
-#if SUBP_WRAP
-#define SUBP_IDX(i) ((i) & (SUBP_WRAP - 1))
-#else
-#define SUBP_IDX(i) (i)
-#endif
-
-// P6's cost half. See the long note at the loop it guards, inside the batch body.
-#ifndef SUBP_PASSES
-#define SUBP_PASSES 0
-#endif
-
 #if NO_HASH
 #define HASH_CONSUME(sink, prefix, X) \
 	do { (sink) ^= (X)[0] ^ (X)[1] ^ (X)[2] ^ (X)[3] ^ (uint64_t)(prefix); } while (0)
@@ -288,103 +233,24 @@ __global__ void TestKernel(
 		sub_mod(acc, c_Jx, x1);
 		
 		#pragma unroll
-		for(int i = 0; i < 4; i++) subp[SUBP_IDX(half-1)][i] = acc[i];
+		for(int i = 0; i < 4; i++) subp[half-1][i] = acc[i];
 
 		for (int i = half - 2; i >= 0; --i) {
             sub_mod(tmp, &c_Gx[(size_t)(i + 1) * 4], x1);
             mul_mod(acc, acc, tmp);
-            subp[SUBP_IDX(i)][0] = acc[0]; subp[SUBP_IDX(i)][1] = acc[1];
-            subp[SUBP_IDX(i)][2] = acc[2]; subp[SUBP_IDX(i)][3] = acc[3];
+            subp[i][0] = acc[0]; subp[i][1] = acc[1];
+            subp[i][2] = acc[2]; subp[i][3] = acc[3];
         }
-
-#if SUBP_PASSES
-        // P6's COST half -- `make SUBP_PASSES=n`, NO_HASH builds only (it escapes through sink).
-        //
-        // SUBP_WRAP priced the BENEFIT of a smaller subp[]: 0.5% at 340 MB, 9.5% at 85 MB, 14.1%
-        // at 21 MB. Nothing gets that for free, though. Multi-level batch inversion buys the
-        // smaller buffer by computing chunk products in an extra forward pass and recomputing the
-        // suffix products from them, so its price is one extra pass per level.
-        //
-        // This is that pass, and it is a faithful cost model rather than a guess: a chunk-product
-        // accumulation IS the ladder's arithmetic with the stores removed -- same sub_mod, same
-        // mul_mod, same trip count, and NO memory traffic. Set it alongside SUBP_WRAP and the pair
-        // reproduces both halves of the trade at once, so the wall clock of a multi-level kernel
-        // is measurable BEFORE the (correct, and much harder) arithmetic is written:
-        //
-        //   two-level    48 slots, ~128 MB    SUBP_WRAP=32 SUBP_PASSES=1
-        //   three-level  24 slots,  ~64 MB    SUBP_WRAP=32 SUBP_PASSES=2
-        //
-        // Both are still WRONG by construction and both will still report EXACT, for the reason
-        // the wrap series already established: loop mode checks the jumped point, which rides the
-        // inverse chain and never reads subp[]. Timing is the whole signal.
-        //
-        // The `sink` escape is not optional. Without it nvcc deletes the entire pass -- cacc is
-        // dead -- and the build measures nothing while looking like it measured something. Same
-        // reason NO_HASH carries a sink at all (see the note at its definition).
-        // WRITTEN OUT RATHER THAN LOOPED OVER p, and both halves of that are load-bearing.
-        //
-        // A `for (p...)` loop let nvcc keep ONE body and a trip counter: SUBP_PASSES=2 came out
-        // +280 instructions against +272 for one pass, so the static count could not distinguish
-        // "two passes" from "one pass plus loop control", and the rung would have been unreadable
-        // either way. Explicit blocks make the count say exactly how many passes are in there.
-        // A per-block seed is needed too -- with identical seeds every pass computes the same
-        // cacc, `sink ^= cacc` an even number of times cancels to zero, and the whole thing is
-        // hoistable. Distinct seeds are also the more faithful model: real chunk products differ.
-        {
-            uint64_t cacc[4], ctmp[4];
-            sub_mod(cacc, &c_Gx[0], x1);
-            for (int i = half - 2; i >= 0; --i) {
-                sub_mod(ctmp, &c_Gx[(size_t)(i + 1) * 4], x1);
-                mul_mod(cacc, cacc, ctmp);
-            }
-            sink ^= cacc[0] ^ cacc[1] ^ cacc[2] ^ cacc[3];
-        }
-#if SUBP_PASSES >= 2
-        {
-            uint64_t cacc[4], ctmp[4];
-            sub_mod(cacc, &c_Gx[4], x1);
-            for (int i = half - 2; i >= 0; --i) {
-                sub_mod(ctmp, &c_Gx[(size_t)(i + 1) * 4], x1);
-                mul_mod(cacc, cacc, ctmp);
-            }
-            sink ^= cacc[0] ^ cacc[1] ^ cacc[2] ^ cacc[3];
-        }
-#endif
-#endif
 
 		uint64_t inverse[5];
 		sub_mod((uint64_t*)inverse, &c_Gx[0], x1);      // d0 = c_Gx[0] - x1, straight into inverse[0..3]
-        mul_mod(inverse, inverse, subp[SUBP_IDX(0)]);
+        mul_mod(inverse, inverse, subp[0]);
 		
 		inv_mod((uint32_t*)inverse);
 		
 		for (int i = 0; i < half - 1; ++i) {
             uint64_t dx_inv_i[4];
-            mul_mod(dx_inv_i, subp[SUBP_IDX(i)], inverse);
-#if HOIST_INV_CHAIN
-            // P3, second half. `inverse` is the only loop-carried value here, so the shortest
-            // possible critical path through the iteration is the one that resolves it first.
-            // Nothing between this point and the bottom of the body reads `inverse` -- dx_inv_i
-            // above already holds the old value -- so advancing it HERE rather than at :339 lets
-            // the ~1,700 instructions of point arithmetic below overlap the recurrence instead of
-            // trailing it. Pure reordering: identical operands, identical results.
-            //
-            // MEASURED AND NULL on an RTX 5090, twice: B/A 1.000 on the median in two independent
-            // runs of ~2,200 launches a side, and zero in combination with INLINE_HASH_W2 as well.
-            // ptxas schedules against the dependence graph of this basic block, so the source
-            // order of two independent operations is not a constraint it inherits; there was
-            // never anything here for a source-level hoist to win.
-            //
-            // And it is not free, which is why the flag defaults off rather than on-for-free.
-            // Both `inverse` and `gxmi` become live across the whole point body: the shipped
-            // build goes 122 -> 128 registers with 8 bytes of spill it did not have. Numbers and
-            // the four-way table are in the Makefile beside the flag.
-            {
-                uint64_t gxmi[4];
-                sub_mod(gxmi, &c_Gx[(size_t)i*4], x1);
-                mul_mod(inverse, inverse, gxmi);
-            }
-#endif
+            mul_mod(dx_inv_i, subp[i], inverse);
 
 			{
 				uint64_t px3[4], s[4], lam[4];
@@ -470,17 +336,15 @@ __global__ void TestKernel(
 #endif
 			}
 			
-#if !HOIST_INV_CHAIN
 			uint64_t gxmi[4];
             sub_mod(gxmi, &c_Gx[(size_t)i*4], x1);
             mul_mod(inverse, inverse, gxmi);
-#endif
 		}
 		
 		{
             const int i = half - 1;
             uint64_t dx_inv_i[4];
-            mul_mod(dx_inv_i, subp[SUBP_IDX(i)], inverse);
+            mul_mod(dx_inv_i, subp[i], inverse);
 
             uint64_t px3[4], s[4], lam[4];
             uint64_t px_i[4], py_i[4];
