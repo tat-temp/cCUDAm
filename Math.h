@@ -46,9 +46,8 @@ static bool mul_256_u64(const uint64_t* a, uint64_t b, uint64_t* r) {
 }
 
 // The borrow must come from comparing a[i] against b[i] directly. Folding it in first
-// (bi = b[i] + borrow) wraps to 0 when b[i] is 0xFFFFFFFFFFFFFFFF, which makes a[i] < bi
-// false and drops the outgoing borrow: the limb value stays right but the difference is
-// reported 2^(64*(i+1)) too large, with a bogus "no borrow" return.
+// (bi = b[i] + borrow) wraps to 0 when b[i] is 0xFFFFFFFFFFFFFFFF and drops the outgoing borrow:
+// the limb stays right, but the difference is 2^(64*(i+1)) too large and the return says "no borrow".
 static bool sub_256(const uint64_t* a, const uint64_t* b, uint64_t* r) {
 	uint64_t borrow = 0ULL;
 

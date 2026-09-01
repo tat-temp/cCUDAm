@@ -285,7 +285,6 @@ void EcInt::Mul_i64(EcInt& val, i64 multiplier)
 #define APPLY_DIV_SHIFT() kbnt -= index; val >>= index; matrix[0] <<= index; matrix[1] <<= index; 
 	
 // https://tches.iacr.org/index.php/TCHES/article/download/8298/7648/4494
-//a bit tricky
 void DIV_62(i64& kbnt, i64 modp, i64 val, i64* matrix)
 {
 	int index, cnt;

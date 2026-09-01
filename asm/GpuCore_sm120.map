@@ -1,0 +1,159 @@
+# TestKernel (sm_120) -- Math.cuh function -> SASS location map
+# for asm/GpuCore_sm120.asm
+#
+# Built from: nvcc -O3 -use_fast_math --ptxas-options=-O3 -std=c++17
+#             -gencode arch=compute_120,code=sm_120 -lineinfo -cubin
+#             then nvdisasm -gi (inline call stacks).
+# The -lineinfo build's .text.TestKernel is BYTE-IDENTICAL to the plain
+# build (159744 B / 9984 instrs), so every offset and line below applies
+# to GpuCore_sm120.asm verbatim.
+#
+# Attribution = outermost Math.cuh frame of the inline stack (max depth 6),
+# so mul_256_by_64/add_320_to_256 fold into mul_mod, add_320_to_256s into
+# sqr_mod, the 288-bit helpers into inv_mod, and mul_256_by_P0inv (shared
+# by mul_mod and sqr_mod) resolves by real call site.
+#
+# EXTENT = first..last offset for that call site, incl. instructions ptxas
+# interleaved from neighbours; N = instructions actually attributed.
+
+[mul_mod]  3113 instrs  31.2% of kernel  14 call site(s)
+#  src  extent(off)      extent(cuasm lines)     N   density
+   :151  0x00c70-0x01a90    1553-1779       223    98.2%
+   :157  0x01b10-0x03080    1788-2138       223    64.8%
+   :163  0x06340-0x07300    2987-3241       227    89.7%
+   :174  0x07270-0x08140    3232-3469       221    92.9%
+   :180  0x09130-0x09fb0    3728-3960       221    94.8%
+   :215  0x0a640-0x0b510    4077-4314       222    93.3%
+   :221  0x0c4c0-0x0d340    4569-4801       221    94.8%
+   :244  0x0d960-0x0e780    4911-5137       222    97.8%
+   :250  0x0e860-0x0f8b0    5154-5417       223    85.1%
+   :261  0x0f800-0x106f0    5406-5645       221    92.1%
+   :267  0x116c0-0x12530    5902-6133       222    95.7%
+   :289  0x12c00-0x13be0    6254-6510       223    87.5%
+   :298  0x13b30-0x14a40    6499-6740       222    91.7%
+   :304  0x15970-0x16790    6987-7213       222    97.8%
+#  contiguous blocks >= 8 instrs:
+     0x00ca0-0x01a30   218  cuasm   1556-1773    :151
+     0x01ca0-0x02890   192  cuasm   1815-2006    :157
+     0x028b0-0x02930     9  cuasm   2008-2016    :157
+     0x06380-0x07010   202  cuasm   2991-3192    :163
+     0x072a0-0x08040   219  cuasm   3235-3453    :163,174
+     0x09130-0x09970   133  cuasm   3728-3860    :180
+     0x09990-0x09d90    65  cuasm   3862-3926    :180
+     0x09db0-0x09eb0    17  cuasm   3928-3944    :180
+     0x0a660-0x0b3f0   218  cuasm   4079-4296    :215
+     0x0c4c0-0x0d160   203  cuasm   4569-4771    :221
+     0x0d1c0-0x0d280    13  cuasm   4777-4789    :221
+     0x0d990-0x0e5f0   199  cuasm   4914-5112    :244
+     0x0e610-0x0e740    20  cuasm   5114-5133    :244
+     0x0e900-0x0f270   152  cuasm   5164-5315    :250
+     0x0f290-0x0f3d0    21  cuasm   5317-5337    :250
+     0x0f410-0x0f5f0    31  cuasm   5341-5371    :250
+     0x0f860-0x105f0   218  cuasm   5412-5629    :250,261
+     0x116c0-0x12100   165  cuasm   5902-6066    :267
+     0x12120-0x12340    35  cuasm   6068-6102    :267
+     0x12360-0x12480    19  cuasm   6104-6122    :267
+     0x12c80-0x13920   203  cuasm   6262-6464    :289
+     0x13c20-0x14940   211  cuasm   6514-6724    :298
+     0x15990-0x16720   218  cuasm   6989-7206    :304
+
+[sqr_mod]  844 instrs  8.5% of kernel  4 call site(s)
+#  src  extent(off)      extent(cuasm lines)     N   density
+   :176  0x08050-0x08e30    3454-3676       211    94.6%
+   :217  0x0b400-0x0c1f0    4297-4520       211    94.2%
+   :263  0x10600-0x113e0    5630-5852       211    94.6%
+   :299  0x14950-0x15700    6725-6944       211    95.9%
+#  contiguous blocks >= 8 instrs:
+     0x08070-0x080e0     8  cuasm   3456-3463    :176
+     0x08150-0x08d70   195  cuasm   3470-3664    :176
+     0x0b420-0x0b4b0    10  cuasm   4299-4308    :217
+     0x0b520-0x0bf70   166  cuasm   4315-4480    :217
+     0x0bf90-0x0c010     9  cuasm   4482-4490    :217
+     0x0c030-0x0c140    18  cuasm   4492-4509    :217
+     0x10620-0x10690     8  cuasm   5632-5639    :263
+     0x10700-0x11320   195  cuasm   5646-5840    :263
+     0x14970-0x149e0     8  cuasm   6727-6734    :299
+     0x14a50-0x15670   195  cuasm   6741-6935    :299
+
+[inv_mod]  890 instrs  8.9% of kernel  1 call site(s)
+#  src  extent(off)      extent(cuasm lines)     N   density
+   :159  0x01c90-0x06220    1814-2967       890    79.9%
+#  contiguous blocks >= 8 instrs:
+     0x02a40-0x02d60    51  cuasm   2033-2086    :159
+     0x02db0-0x02f90    31  cuasm   2091-2122    :159
+     0x03090-0x04370   303  cuasm   2139-2453    :159
+     0x04390-0x04e80   176  cuasm   2455-2636    :159
+     0x04ec0-0x06220   311  cuasm   2640-2967    :159
+
+[sub_mod]  250 instrs  2.5% of kernel  14 call site(s)
+#  src  extent(off)      extent(cuasm lines)     N   density
+   :144  0x008f0-0x00a80    1492-1518        24    92.3%
+   :150  0x00b50-0x00c60    1533-1551        18   100.0%
+   :156  0x01b00-0x01c70    1787-1811        23    95.8%
+   :173  0x06370-0x07260    2990-3230        14     5.8%
+   :179  0x08fd0-0x09120    3704-3726        22   100.0%
+   :214  0x0a4d0-0x0a630    4052-4075        13    56.5%
+   :220  0x0c370-0x0c4b0    4546-4567        21   100.0%
+   :243  0x0d880-0x0d950    4895-4909        14   100.0%
+   :260  0x0e890-0x0f7f0    5157-5404        13     5.3%
+   :266  0x11570-0x116b0    5879-5900        21   100.0%
+   :288  0x12ac0-0x12bf0    6232-6252        14    70.0%
+   :296  0x12c10-0x13b20    6255-6497        23     9.5%
+   :303  0x15890-0x15960    6971-6985        14   100.0%
+   :305  0x15980-0x16840    6988-7226        16     6.8%
+#  contiguous blocks >= 8 instrs:
+     0x008f0-0x009c0    14  cuasm   1492-1505    :144
+     0x00a00-0x00a80     9  cuasm   1509-1518    :144
+     0x00b50-0x00c60    18  cuasm   1533-1551    :150
+     0x01b20-0x01c70    22  cuasm   1789-1811    :156
+     0x071f0-0x07260     8  cuasm   3222-3230    :173
+     0x08fd0-0x09120    22  cuasm   3704-3726    :179
+     0x0a5c0-0x0a630     8  cuasm   4067-4075    :214
+     0x0c370-0x0c4b0    21  cuasm   4546-4567    :220
+     0x0d880-0x0d950    14  cuasm   4895-4909    :243
+     0x11570-0x116b0    21  cuasm   5879-5900    :266
+     0x12b40-0x12bf0    12  cuasm   6240-6252    :288
+     0x13ab0-0x13b20     8  cuasm   6489-6497    :296
+     0x15890-0x15960    14  cuasm   6971-6985    :303
+     0x167a0-0x16840    11  cuasm   7214-7226    :305
+
+[sub_mod3]  125 instrs  1.3% of kernel  4 call site(s)
+#  src  extent(off)      extent(cuasm lines)     N   density
+   :177  0x07290-0x08fc0    3234-3702        31     6.6%
+   :218  0x0a650-0x0c360    4078-4544        30     6.4%
+   :264  0x0f850-0x11560    5411-5877        30     6.4%
+   :301  0x13b50-0x15880    6501-6969        34     7.3%
+#  contiguous blocks >= 8 instrs:
+     0x08e60-0x08fc0    23  cuasm   3679-3702    :177
+     0x0c200-0x0c360    23  cuasm   4521-4544    :218
+     0x11410-0x11560    22  cuasm   5855-5877    :264
+     0x15710-0x15880    24  cuasm   6945-6969    :301
+
+[neg_mod]  24 instrs  0.2% of kernel  2 call site(s)
+#  src  extent(off)      extent(cuasm lines)     N   density
+   :212  0x0a480-0x0a5b0    4047-4066        12    60.0%
+   :258  0x0e8c0-0x0f700    5160-5388        12     5.2%
+#  contiguous blocks >= 8 instrs:
+
+[sub_mod_is_odd]  27 instrs  0.3% of kernel  3 call site(s)
+#  src  extent(off)      extent(cuasm lines)     N   density
+   :183  0x09f20-0x0a000    3951-3965         9    60.0%
+   :224  0x0d2b0-0x0d390    4792-4806         9    60.0%
+   :270  0x124a0-0x125a0    6124-6140         9    52.9%
+#  contiguous blocks >= 8 instrs:
+
+[add_mod]  not present in TestKernel
+
+
+[non-Math.cuh]
+   <hash>                                   4066   40.7%
+   <kernel:GpuCore.cu>                       370    3.7%
+   <kernel:sm_30_intrinsics.hpp>              95    1.0%
+   <kernel:GpuHash.cuh>                       73    0.7%
+   <kernel:GpuCore.cuh>                       64    0.6%
+   <kernel:sm_60_atomic_functions.hpp>        40    0.4%
+   <kernel:Math.cuh>                           3    0.0%
+
+# <hash> = getHash160_w2_from_limbs (GpuHash.cu), one contiguous block
+# 0x171e0-0x26ff0, cuasm lines 7453-11522. Static count, not dynamic:
+# it is emitted once and called from 4 sites.

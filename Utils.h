@@ -107,10 +107,9 @@ static int hex_digit_val(char c) {
     return -1;
 }
 
-// Parses exactly len hex digits at s. Rejects any non-hex character rather than stopping at it.
-// std::stoull is deliberately not used here: with pos = nullptr it silently truncates at the
-// first bad character ("1z" -> 1), and it throws std::invalid_argument when a group has no
-// leading digit at all -- and nothing in this program catches that.
+// Parses exactly len hex digits at s, rejecting any non-hex character rather than stopping at it.
+// Not std::stoull: it silently truncates at the first bad character ("1z" -> 1) and throws
+// std::invalid_argument on a group with no leading digit, which nothing in this program catches.
 static bool hex_to_u64(const char* s, size_t len, uint64_t* out) {
     uint64_t v = 0ULL;
     for (size_t i = 0; i < len; ++i) {

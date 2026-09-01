@@ -3,13 +3,10 @@
 #include <cstdint>
 
 //#define NO_GPU_MODE				1
-#define DEBUG_MODE				0
 
 #define SHOW_STAT_INTERVAL_SECS	5
 
-#ifndef MAX_BATCH_SIZE
 #define MAX_BATCH_SIZE			1024
-#endif
 
 #define MAX_GPU_CNT				32
 #define THREADS_PER_BLOCK		256
@@ -27,11 +24,14 @@ typedef unsigned char u8;
 typedef char i8;
 typedef __uint128_t uint128_t;
 
+// Lives in zero-copy mapped host memory: device writes, host reads, so the two flags are a
+// publication protocol, not bookkeeping (see publish_found in GpuCore.cu). uint32_t, not bool: CUDA atomics have no bool overload.
 struct TFindResult {
     uint64_t scalar[4];
     uint64_t rx[4];
     uint64_t ry[4];
-	bool     found;
+	uint32_t claimed;	// CAS'd by the first finder; only that thread writes scalar
+	uint32_t found;		// set last, after a release fence: scalar is complete when this reads 1
 };
 
 //gpu kernel parameters

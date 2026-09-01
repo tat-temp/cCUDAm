@@ -1,9 +1,26 @@
 # Build output
 *.o
 cCUDAHurricane
+*.cubin
+# ...except the RCAsm probe fixtures, which are inputs rather than build output
+!rcasm_test/*.cubin
+# ...and the hand-written kernel. Rebuilding it needs an RCAsm checkout plus pyelftools
+# and sympy, which the GPU host has no other reason to have -- and the machine that can
+# BUILD it is not the machine that can RUN it. Committed so the A/B test is one command.
+!asm/tk/*.cubin
+# Compiled probes: unlike the cubins, these rebuild from committed sources in one command
+rcasm_test/rcasm_load_test
+rcasm_test/mbench/mbench
+
+# Disassembly dumps -- regenerable with `make sass`
+*.cuasm
 
 # Test output
 tests_results.txt
 
 # Python
 __pycache__/
+
+# A/B harness build output
+rcasm_test/abtest/abtest
+rcasm_test/abtest/ab_compiled.cubin

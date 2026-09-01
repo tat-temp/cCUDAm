@@ -26,6 +26,14 @@ public:
 	GpuPuzzle() : m_stopFlag(false), m_stat_idx(0), m_speed_stat{},
               CudaIndex(0), Failed(false), Found(false), m_cudaStream(nullptr) { Kparams = {0}; }
 
+	// Release() otherwise only runs at the end of Execute(), so a GPU that prepared but never ran
+	// would carry its device buffers and pinned result page to process exit. Calling it twice is a no-op.
+	~GpuPuzzle() { Release(); }
+
+	// Owns raw CUDA allocations, so a copy would free them twice.
+	GpuPuzzle(const GpuPuzzle&) = delete;
+	GpuPuzzle& operator=(const GpuPuzzle&) = delete;
+
 	int CudaIndex; //gpu index in cuda
 	bool Failed;
 	bool Found;
