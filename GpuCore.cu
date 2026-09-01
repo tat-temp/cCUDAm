@@ -235,10 +235,7 @@ __global__ void TestKernel(
                 sub_mod(s, x1, px3); 
                 mul_mod(s, s, lam);
 
-				uint8_t odd;
-				sub_mod_is_odd(&odd, s, y1);
-
-				uint8_t prefix = odd ? 0x03 : 0x02;
+				uint8_t prefix = sub_mod_is_odd_prefix(s, y1);
 #if NO_HASH
 				HASH_CONSUME(sink, prefix, px3);
 #else
@@ -276,10 +273,7 @@ __global__ void TestKernel(
                 sub_mod(s, x1, px3);
                 mul_mod(s, s, lam);
 
-				uint8_t odd;
-				sub_mod_is_odd(&odd, s, y1);
-
-				uint8_t prefix = odd ? 0x03 : 0x02;
+				uint8_t prefix = sub_mod_is_odd_prefix(s, y1);
 #if NO_HASH
 				HASH_CONSUME(sink, prefix, px3);
 #else
@@ -324,10 +318,7 @@ __global__ void TestKernel(
             sub_mod(s, x1, px3);
             mul_mod(s, s, lam);
 
-			uint8_t odd;
-			sub_mod_is_odd(&odd, s, y1);
-
-			uint8_t prefix = odd ? 0x03 : 0x02;
+			uint8_t prefix = sub_mod_is_odd_prefix(s, y1);
 #if NO_HASH
 			HASH_CONSUME(sink, prefix, px3);
 #else
