@@ -24,13 +24,18 @@
 #define subc_32(res, a, b)				asm volatile ("subc.u32 %0, %1, %2;" : "=r"(res) : "r"(a), "r"(b));
 
 #define madc_lo_32(res, a, b, c)		asm volatile ("madc.lo.u32 %0, %1, %2, %3;" : "=r"(res) : "r"(a), "r"(b), "r"(c));
+#define mad_lo_cc(res,a,b,c)   			asm volatile ("mad.lo.cc.u32 %0, %1, %2, %3;"  : "=r"(res) : "r"(a), "r"(b), "r"(c));
+#define madc_hi_cc(res,a,b,c)  			asm volatile ("madc.hi.cc.u32 %0, %1, %2, %3;" : "=r"(res) : "r"(a), "r"(b), "r"(c));
+#define madc_lo_cc(res,a,b,c)  			asm volatile ("madc.lo.cc.u32 %0, %1, %2, %3;" : "=r"(res) : "r"(a), "r"(b), "r"(c));
+#define mad_wide_32(res,a,b,c)			asm volatile ("mad.wide.u32 %0, %1, %2, %3;" : "=l"(res) : "r"(a), "r"(b), "l"(c) );
 
 #define mul_wide_32(res, a, b)			asm volatile ("mul.wide.u32 %0, %1, %2;" : "=l"(res) : "r"(a), "r"(b));
-#define mad_wide_32(res,a,b,c)			asm volatile ("mad.wide.u32 %0, %1, %2, %3;" : "=l"(res) : "r"(a), "r"(b), "l"(c) );
+#define mul_lo_32(res, a, b) 			asm volatile ("mul.lo.u32 %0, %1, %2;" : "=r"(res) : "r"(a), "r"(b));
 
 //P-related constants
 #define P_0			0xFFFFFFFEFFFFFC2Full
 #define P_123		0xFFFFFFFFFFFFFFFFull
+
 #define P_INV32		0x000003D1
 
 #define Copy_u64_x4(dst, src) {\
@@ -240,159 +245,345 @@ __device__ __forceinline__ void mul_256_by_P0inv(uint32_t* res, uint32_t* val)
 	addc_32(res[9], 0, 0);
 }
 
-// r = a * b (mod P)
+
+// generated: even/odd column-split 256x256 -> 512, fused MAC form
+__device__ __forceinline__ void mul512_split(uint32_t* p, const uint32_t* a, const uint32_t* b)
+{
+	uint32_t e[16], o[16];
+	#pragma unroll
+	for (int i = 0; i < 16; i++) { e[i] = 0; o[i] = 0; }
+	mad_lo_cc(e[0], a[0], b[0], e[0]);
+	madc_hi_cc(e[1], a[0], b[0], e[1]);
+	madc_lo_cc(e[2], a[0], b[2], e[2]);
+	madc_hi_cc(e[3], a[0], b[2], e[3]);
+	madc_lo_cc(e[4], a[0], b[4], e[4]);
+	madc_hi_cc(e[5], a[0], b[4], e[5]);
+	madc_lo_cc(e[6], a[0], b[6], e[6]);
+	madc_hi_cc(e[7], a[0], b[6], e[7]);
+	madc_lo_cc(e[8], a[1], b[7], e[8]);
+	madc_hi_cc(e[9], a[1], b[7], e[9]);
+	madc_lo_cc(e[10], a[3], b[7], e[10]);
+	madc_hi_cc(e[11], a[3], b[7], e[11]);
+	madc_lo_cc(e[12], a[5], b[7], e[12]);
+	madc_hi_cc(e[13], a[5], b[7], e[13]);
+	madc_lo_cc(e[14], a[7], b[7], e[14]);
+	madc_hi_cc(e[15], a[7], b[7], e[15]);
+	mad_lo_cc(e[2], a[1], b[1], e[2]);
+	madc_hi_cc(e[3], a[1], b[1], e[3]);
+	madc_lo_cc(e[4], a[1], b[3], e[4]);
+	madc_hi_cc(e[5], a[1], b[3], e[5]);
+	madc_lo_cc(e[6], a[1], b[5], e[6]);
+	madc_hi_cc(e[7], a[1], b[5], e[7]);
+	madc_lo_cc(e[8], a[2], b[6], e[8]);
+	madc_hi_cc(e[9], a[2], b[6], e[9]);
+	madc_lo_cc(e[10], a[4], b[6], e[10]);
+	madc_hi_cc(e[11], a[4], b[6], e[11]);
+	madc_lo_cc(e[12], a[6], b[6], e[12]);
+	madc_hi_cc(e[13], a[6], b[6], e[13]);
+	addc_32(e[14], e[14], 0);
+	mad_lo_cc(e[2], a[2], b[0], e[2]);
+	madc_hi_cc(e[3], a[2], b[0], e[3]);
+	madc_lo_cc(e[4], a[2], b[2], e[4]);
+	madc_hi_cc(e[5], a[2], b[2], e[5]);
+	madc_lo_cc(e[6], a[2], b[4], e[6]);
+	madc_hi_cc(e[7], a[2], b[4], e[7]);
+	madc_lo_cc(e[8], a[3], b[5], e[8]);
+	madc_hi_cc(e[9], a[3], b[5], e[9]);
+	madc_lo_cc(e[10], a[5], b[5], e[10]);
+	madc_hi_cc(e[11], a[5], b[5], e[11]);
+	madc_lo_cc(e[12], a[7], b[5], e[12]);
+	madc_hi_cc(e[13], a[7], b[5], e[13]);
+	addc_32(e[14], e[14], 0);
+	mad_lo_cc(e[4], a[3], b[1], e[4]);
+	madc_hi_cc(e[5], a[3], b[1], e[5]);
+	madc_lo_cc(e[6], a[3], b[3], e[6]);
+	madc_hi_cc(e[7], a[3], b[3], e[7]);
+	madc_lo_cc(e[8], a[4], b[4], e[8]);
+	madc_hi_cc(e[9], a[4], b[4], e[9]);
+	madc_lo_cc(e[10], a[6], b[4], e[10]);
+	madc_hi_cc(e[11], a[6], b[4], e[11]);
+	addc_32(e[12], e[12], 0);
+	mad_lo_cc(e[4], a[4], b[0], e[4]);
+	madc_hi_cc(e[5], a[4], b[0], e[5]);
+	madc_lo_cc(e[6], a[4], b[2], e[6]);
+	madc_hi_cc(e[7], a[4], b[2], e[7]);
+	madc_lo_cc(e[8], a[5], b[3], e[8]);
+	madc_hi_cc(e[9], a[5], b[3], e[9]);
+	madc_lo_cc(e[10], a[7], b[3], e[10]);
+	madc_hi_cc(e[11], a[7], b[3], e[11]);
+	addc_32(e[12], e[12], 0);
+	mad_lo_cc(e[6], a[5], b[1], e[6]);
+	madc_hi_cc(e[7], a[5], b[1], e[7]);
+	madc_lo_cc(e[8], a[6], b[2], e[8]);
+	madc_hi_cc(e[9], a[6], b[2], e[9]);
+	addc_32(e[10], e[10], 0);
+	mad_lo_cc(e[6], a[6], b[0], e[6]);
+	madc_hi_cc(e[7], a[6], b[0], e[7]);
+	madc_lo_cc(e[8], a[7], b[1], e[8]);
+	madc_hi_cc(e[9], a[7], b[1], e[9]);
+	addc_32(e[10], e[10], 0);
+	mad_lo_cc(o[0], a[0], b[1], o[0]);
+	madc_hi_cc(o[1], a[0], b[1], o[1]);
+	madc_lo_cc(o[2], a[0], b[3], o[2]);
+	madc_hi_cc(o[3], a[0], b[3], o[3]);
+	madc_lo_cc(o[4], a[0], b[5], o[4]);
+	madc_hi_cc(o[5], a[0], b[5], o[5]);
+	madc_lo_cc(o[6], a[0], b[7], o[6]);
+	madc_hi_cc(o[7], a[0], b[7], o[7]);
+	madc_lo_cc(o[8], a[2], b[7], o[8]);
+	madc_hi_cc(o[9], a[2], b[7], o[9]);
+	madc_lo_cc(o[10], a[4], b[7], o[10]);
+	madc_hi_cc(o[11], a[4], b[7], o[11]);
+	madc_lo_cc(o[12], a[6], b[7], o[12]);
+	madc_hi_cc(o[13], a[6], b[7], o[13]);
+	addc_32(o[14], o[14], 0);
+	mad_lo_cc(o[0], a[1], b[0], o[0]);
+	madc_hi_cc(o[1], a[1], b[0], o[1]);
+	madc_lo_cc(o[2], a[1], b[2], o[2]);
+	madc_hi_cc(o[3], a[1], b[2], o[3]);
+	madc_lo_cc(o[4], a[1], b[4], o[4]);
+	madc_hi_cc(o[5], a[1], b[4], o[5]);
+	madc_lo_cc(o[6], a[1], b[6], o[6]);
+	madc_hi_cc(o[7], a[1], b[6], o[7]);
+	madc_lo_cc(o[8], a[3], b[6], o[8]);
+	madc_hi_cc(o[9], a[3], b[6], o[9]);
+	madc_lo_cc(o[10], a[5], b[6], o[10]);
+	madc_hi_cc(o[11], a[5], b[6], o[11]);
+	madc_lo_cc(o[12], a[7], b[6], o[12]);
+	madc_hi_cc(o[13], a[7], b[6], o[13]);
+	addc_32(o[14], o[14], 0);
+	mad_lo_cc(o[2], a[2], b[1], o[2]);
+	madc_hi_cc(o[3], a[2], b[1], o[3]);
+	madc_lo_cc(o[4], a[2], b[3], o[4]);
+	madc_hi_cc(o[5], a[2], b[3], o[5]);
+	madc_lo_cc(o[6], a[2], b[5], o[6]);
+	madc_hi_cc(o[7], a[2], b[5], o[7]);
+	madc_lo_cc(o[8], a[4], b[5], o[8]);
+	madc_hi_cc(o[9], a[4], b[5], o[9]);
+	madc_lo_cc(o[10], a[6], b[5], o[10]);
+	madc_hi_cc(o[11], a[6], b[5], o[11]);
+	addc_32(o[12], o[12], 0);
+	mad_lo_cc(o[2], a[3], b[0], o[2]);
+	madc_hi_cc(o[3], a[3], b[0], o[3]);
+	madc_lo_cc(o[4], a[3], b[2], o[4]);
+	madc_hi_cc(o[5], a[3], b[2], o[5]);
+	madc_lo_cc(o[6], a[3], b[4], o[6]);
+	madc_hi_cc(o[7], a[3], b[4], o[7]);
+	madc_lo_cc(o[8], a[5], b[4], o[8]);
+	madc_hi_cc(o[9], a[5], b[4], o[9]);
+	madc_lo_cc(o[10], a[7], b[4], o[10]);
+	madc_hi_cc(o[11], a[7], b[4], o[11]);
+	addc_32(o[12], o[12], 0);
+	mad_lo_cc(o[4], a[4], b[1], o[4]);
+	madc_hi_cc(o[5], a[4], b[1], o[5]);
+	madc_lo_cc(o[6], a[4], b[3], o[6]);
+	madc_hi_cc(o[7], a[4], b[3], o[7]);
+	madc_lo_cc(o[8], a[6], b[3], o[8]);
+	madc_hi_cc(o[9], a[6], b[3], o[9]);
+	addc_32(o[10], o[10], 0);
+	mad_lo_cc(o[4], a[5], b[0], o[4]);
+	madc_hi_cc(o[5], a[5], b[0], o[5]);
+	madc_lo_cc(o[6], a[5], b[2], o[6]);
+	madc_hi_cc(o[7], a[5], b[2], o[7]);
+	madc_lo_cc(o[8], a[7], b[2], o[8]);
+	madc_hi_cc(o[9], a[7], b[2], o[9]);
+	addc_32(o[10], o[10], 0);
+	mad_lo_cc(o[6], a[6], b[1], o[6]);
+	madc_hi_cc(o[7], a[6], b[1], o[7]);
+	addc_32(o[8], o[8], 0);
+	mad_lo_cc(o[6], a[7], b[0], o[6]);
+	madc_hi_cc(o[7], a[7], b[0], o[7]);
+	addc_32(o[8], o[8], 0);
+	// p = e + (o << 32)
+	add_cc_32(p[1], e[1], o[0]);
+	addc_cc_32(p[2], e[2], o[1]);
+	addc_cc_32(p[3], e[3], o[2]);
+	addc_cc_32(p[4], e[4], o[3]);
+	addc_cc_32(p[5], e[5], o[4]);
+	addc_cc_32(p[6], e[6], o[5]);
+	addc_cc_32(p[7], e[7], o[6]);
+	addc_cc_32(p[8], e[8], o[7]);
+	addc_cc_32(p[9], e[9], o[8]);
+	addc_cc_32(p[10], e[10], o[9]);
+	addc_cc_32(p[11], e[11], o[10]);
+	addc_cc_32(p[12], e[12], o[11]);
+	addc_cc_32(p[13], e[13], o[12]);
+	addc_cc_32(p[14], e[14], o[13]);
+	addc_cc_32(p[15], e[15], o[14]);
+	p[0] = e[0];
+}
+
+
+// r = a * b (mod P)   [split-column fused-MAC 512-bit core]
 __device__ __forceinline__ void mul_mod(uint64_t *r, uint64_t *a, uint64_t *b)
 {
-	uint64_t buff[8], tmp[5], tmp2[2], tmp3;
-	
-//calc 512 bits
-	mul_256_by_64(tmp, a, b[1]);
-	mul_256_by_64(buff, a, b[0]);
-	add_320_to_256(buff + 1, tmp);
-	mul_256_by_64(tmp, a, b[2]);
-	add_320_to_256(buff + 2, tmp);
-	mul_256_by_64(tmp, a, b[3]);
-	add_320_to_256(buff + 3, tmp);
-//fast mod P
+	__align__(16) uint64_t buff[8];
+	uint64_t tmp[5], tmp2[2];
+	mul512_split((uint32_t*)buff, (const uint32_t*)a, (const uint32_t*)b);
 	mul_256_by_P0inv((uint32_t*)tmp, (uint32_t*)(buff + 4));
 	add_cc_64(buff[0], buff[0], tmp[0]);
 	addc_cc_64(buff[1], buff[1], tmp[1]);
 	addc_cc_64(buff[2], buff[2], tmp[2]);
 	addc_cc_64(buff[3], buff[3], tmp[3]);
 	addc_64(tmp[4], tmp[4], 0ull);
-//see mul_256_by_P0inv for details
 	uint32_t* t32 = (uint32_t*)tmp;
 	uint32_t* a32 = (uint32_t*)tmp2;
-	uint32_t* k = (uint32_t*)&tmp3;
 	mul_wide_32(tmp2[0], t32[8], P_INV32);
-	mul_wide_32(tmp3, t32[9], P_INV32);
-	add_cc_32(a32[1], a32[1], k[0]);
-	addc_32(a32[2], k[1], 0); //we cannot get carry here for a32[3]
+	uint32_t k0; mul_lo_32(k0, t32[9], P_INV32);   // t32[9] <= 2, so 977*t32[9] < 2^32
+	add_cc_32(a32[1], a32[1], k0);
+	addc_32(a32[2], 0, 0);
 	add_cc_32(a32[1], a32[1], t32[8]);
 	addc_cc_32(a32[2], a32[2], t32[9]);
 	addc_32(a32[3], 0, 0);
-
 	add_cc_64(r[0], buff[0], tmp2[0]);
 	addc_cc_64(r[1], buff[1], tmp2[1]);
 	addc_cc_64(r[2], buff[2], 0ull);
 	addc_64(r[3], buff[3], 0ull);
 }
 
-__device__ __forceinline__ void add_320_to_256s(uint32_t* res, uint64_t _v1, uint64_t _v2, uint64_t _v3, uint64_t _v4, uint64_t _v5, uint64_t _v6, uint64_t _v7, uint64_t _v8)
+// generated: split-column fused-MAC 256-bit square -> 512
+__device__ __forceinline__ void sqr512_split(uint32_t* p, const uint32_t* a)
 {
-	uint32_t* v1 = (uint32_t*)&_v1;
-	uint32_t* v2 = (uint32_t*)&_v2;
-	uint32_t* v3 = (uint32_t*)&_v3;
-	uint32_t* v4 = (uint32_t*)&_v4;
-	uint32_t* v5 = (uint32_t*)&_v5;
-	uint32_t* v6 = (uint32_t*)&_v6;
-	uint32_t* v7 = (uint32_t*)&_v7;
-	uint32_t* v8 = (uint32_t*)&_v8;
-
-	add_cc_32(res[0], res[0], v1[0]);
-	addc_cc_32(res[1], res[1], v1[1]);
-	addc_cc_32(res[2], res[2], v3[0]);
-	addc_cc_32(res[3], res[3], v3[1]);
-	addc_cc_32(res[4], res[4], v5[0]);
-	addc_cc_32(res[5], res[5], v5[1]);
-	addc_cc_32(res[6], res[6], v7[0]);
-	addc_cc_32(res[7], res[7], v7[1]);
-	addc_32(res[8], res[8], 0);
-
-	add_cc_32(res[1], res[1], v2[0]);
-	addc_cc_32(res[2], res[2], v2[1]);
-	addc_cc_32(res[3], res[3], v4[0]);
-	addc_cc_32(res[4], res[4], v4[1]);
-	addc_cc_32(res[5], res[5], v6[0]);
-	addc_cc_32(res[6], res[6], v6[1]);
-	addc_cc_32(res[7], res[7], v8[0]);
-	addc_cc_32(res[8], res[8], v8[1]);
-	addc_32(res[9], 0, 0);
+	uint32_t e[16], o[16];
+	#pragma unroll
+	for (int i = 0; i < 16; i++) { e[i] = 0; o[i] = 0; }
+	mad_lo_cc(e[2], a[0], a[2], e[2]);
+	madc_hi_cc(e[3], a[0], a[2], e[3]);
+	madc_lo_cc(e[4], a[0], a[4], e[4]);
+	madc_hi_cc(e[5], a[0], a[4], e[5]);
+	madc_lo_cc(e[6], a[0], a[6], e[6]);
+	madc_hi_cc(e[7], a[0], a[6], e[7]);
+	madc_lo_cc(e[8], a[1], a[7], e[8]);
+	madc_hi_cc(e[9], a[1], a[7], e[9]);
+	madc_lo_cc(e[10], a[3], a[7], e[10]);
+	madc_hi_cc(e[11], a[3], a[7], e[11]);
+	madc_lo_cc(e[12], a[5], a[7], e[12]);
+	madc_hi_cc(e[13], a[5], a[7], e[13]);
+	addc_32(e[14], e[14], 0);
+	mad_lo_cc(e[4], a[1], a[3], e[4]);
+	madc_hi_cc(e[5], a[1], a[3], e[5]);
+	madc_lo_cc(e[6], a[1], a[5], e[6]);
+	madc_hi_cc(e[7], a[1], a[5], e[7]);
+	madc_lo_cc(e[8], a[2], a[6], e[8]);
+	madc_hi_cc(e[9], a[2], a[6], e[9]);
+	madc_lo_cc(e[10], a[4], a[6], e[10]);
+	madc_hi_cc(e[11], a[4], a[6], e[11]);
+	addc_32(e[12], e[12], 0);
+	mad_lo_cc(e[6], a[2], a[4], e[6]);
+	madc_hi_cc(e[7], a[2], a[4], e[7]);
+	madc_lo_cc(e[8], a[3], a[5], e[8]);
+	madc_hi_cc(e[9], a[3], a[5], e[9]);
+	addc_32(e[10], e[10], 0);
+	mad_lo_cc(o[0], a[0], a[1], o[0]);
+	madc_hi_cc(o[1], a[0], a[1], o[1]);
+	madc_lo_cc(o[2], a[0], a[3], o[2]);
+	madc_hi_cc(o[3], a[0], a[3], o[3]);
+	madc_lo_cc(o[4], a[0], a[5], o[4]);
+	madc_hi_cc(o[5], a[0], a[5], o[5]);
+	madc_lo_cc(o[6], a[0], a[7], o[6]);
+	madc_hi_cc(o[7], a[0], a[7], o[7]);
+	madc_lo_cc(o[8], a[2], a[7], o[8]);
+	madc_hi_cc(o[9], a[2], a[7], o[9]);
+	madc_lo_cc(o[10], a[4], a[7], o[10]);
+	madc_hi_cc(o[11], a[4], a[7], o[11]);
+	madc_lo_cc(o[12], a[6], a[7], o[12]);
+	madc_hi_cc(o[13], a[6], a[7], o[13]);
+	addc_32(o[14], o[14], 0);
+	mad_lo_cc(o[2], a[1], a[2], o[2]);
+	madc_hi_cc(o[3], a[1], a[2], o[3]);
+	madc_lo_cc(o[4], a[1], a[4], o[4]);
+	madc_hi_cc(o[5], a[1], a[4], o[5]);
+	madc_lo_cc(o[6], a[1], a[6], o[6]);
+	madc_hi_cc(o[7], a[1], a[6], o[7]);
+	madc_lo_cc(o[8], a[3], a[6], o[8]);
+	madc_hi_cc(o[9], a[3], a[6], o[9]);
+	madc_lo_cc(o[10], a[5], a[6], o[10]);
+	madc_hi_cc(o[11], a[5], a[6], o[11]);
+	addc_32(o[12], o[12], 0);
+	mad_lo_cc(o[4], a[2], a[3], o[4]);
+	madc_hi_cc(o[5], a[2], a[3], o[5]);
+	madc_lo_cc(o[6], a[2], a[5], o[6]);
+	madc_hi_cc(o[7], a[2], a[5], o[7]);
+	madc_lo_cc(o[8], a[4], a[5], o[8]);
+	madc_hi_cc(o[9], a[4], a[5], o[9]);
+	addc_32(o[10], o[10], 0);
+	mad_lo_cc(o[6], a[3], a[4], o[6]);
+	madc_hi_cc(o[7], a[3], a[4], o[7]);
+	addc_32(o[8], o[8], 0);
+	// p = 2*(e + (o << 32))
+	add_cc_32(p[1], e[1], o[0]);
+	addc_cc_32(p[2], e[2], o[1]);
+	addc_cc_32(p[3], e[3], o[2]);
+	addc_cc_32(p[4], e[4], o[3]);
+	addc_cc_32(p[5], e[5], o[4]);
+	addc_cc_32(p[6], e[6], o[5]);
+	addc_cc_32(p[7], e[7], o[6]);
+	addc_cc_32(p[8], e[8], o[7]);
+	addc_cc_32(p[9], e[9], o[8]);
+	addc_cc_32(p[10], e[10], o[9]);
+	addc_cc_32(p[11], e[11], o[10]);
+	addc_cc_32(p[12], e[12], o[11]);
+	addc_cc_32(p[13], e[13], o[12]);
+	addc_cc_32(p[14], e[14], o[13]);
+	addc_cc_32(p[15], e[15], o[14]);
+	p[0] = e[0];
+	add_cc_32(p[0], p[0], p[0]);
+	addc_cc_32(p[1], p[1], p[1]);
+	addc_cc_32(p[2], p[2], p[2]);
+	addc_cc_32(p[3], p[3], p[3]);
+	addc_cc_32(p[4], p[4], p[4]);
+	addc_cc_32(p[5], p[5], p[5]);
+	addc_cc_32(p[6], p[6], p[6]);
+	addc_cc_32(p[7], p[7], p[7]);
+	addc_cc_32(p[8], p[8], p[8]);
+	addc_cc_32(p[9], p[9], p[9]);
+	addc_cc_32(p[10], p[10], p[10]);
+	addc_cc_32(p[11], p[11], p[11]);
+	addc_cc_32(p[12], p[12], p[12]);
+	addc_cc_32(p[13], p[13], p[13]);
+	addc_cc_32(p[14], p[14], p[14]);
+	addc_cc_32(p[15], p[15], p[15]);
+	// += diagonal squares a[i]^2 at column 2i
+	mad_lo_cc(p[0], a[0], a[0], p[0]);
+	madc_hi_cc(p[1], a[0], a[0], p[1]);
+	madc_lo_cc(p[2], a[1], a[1], p[2]);
+	madc_hi_cc(p[3], a[1], a[1], p[3]);
+	madc_lo_cc(p[4], a[2], a[2], p[4]);
+	madc_hi_cc(p[5], a[2], a[2], p[5]);
+	madc_lo_cc(p[6], a[3], a[3], p[6]);
+	madc_hi_cc(p[7], a[3], a[3], p[7]);
+	madc_lo_cc(p[8], a[4], a[4], p[8]);
+	madc_hi_cc(p[9], a[4], a[4], p[9]);
+	madc_lo_cc(p[10], a[5], a[5], p[10]);
+	madc_hi_cc(p[11], a[5], a[5], p[11]);
+	madc_lo_cc(p[12], a[6], a[6], p[12]);
+	madc_hi_cc(p[13], a[6], a[6], p[13]);
+	madc_lo_cc(p[14], a[7], a[7], p[14]);
+	madc_hi_cc(p[15], a[7], a[7], p[15]);
 }
 
-// r = a ^ 2 (mod P)
+
+// r = a ^ 2 (mod P)   [split-column fused-MAC 512-bit core]
 __device__ __forceinline__ void sqr_mod(uint64_t* r, uint64_t* aTmp)
 {
-	//buff needs 17 words, not 16: the last add_320_to_256s starts at b32+7 and writes 10 words, so it reaches b32[16].
-	uint64_t buff[9], tmp[5], tmp2[2], tmp3, mm;
-	uint32_t* a = (uint32_t*)aTmp;
-	uint64_t mar[28];
-	uint32_t* b32 = (uint32_t*)buff;
-	uint32_t* m32 = (uint32_t*)mar;
-//calc 512 bits
-	mul_wide_32(mar[0], a[1], a[0]); //ab
-	mul_wide_32(mar[1], a[2], a[0]); //ac
-	mul_wide_32(mar[2], a[3], a[0]); //ad
-	mul_wide_32(mar[3], a[4], a[0]); //ae
-	mul_wide_32(mar[4], a[5], a[0]); //af
-	mul_wide_32(mar[5], a[6], a[0]); //ag
-	mul_wide_32(mar[6], a[7], a[0]); //ah
-	mul_wide_32(mar[7], a[2], a[1]); //bc
-	mul_wide_32(mar[8], a[3], a[1]); //bd
-	mul_wide_32(mar[9], a[4], a[1]); //be
-	mul_wide_32(mar[10], a[5], a[1]); //bf
-	mul_wide_32(mar[11], a[6], a[1]); //bg
-	mul_wide_32(mar[12], a[7], a[1]); //bh
-	mul_wide_32(mar[13], a[3], a[2]); //cd
-	mul_wide_32(mar[14], a[4], a[2]); //ce
-	mul_wide_32(mar[15], a[5], a[2]); //cf
-	mul_wide_32(mar[16], a[6], a[2]); //cg
-	mul_wide_32(mar[17], a[7], a[2]); //ch
-	mul_wide_32(mar[18], a[4], a[3]); //de
-	mul_wide_32(mar[19], a[5], a[3]); //df
-	mul_wide_32(mar[20], a[6], a[3]); //dg
-	mul_wide_32(mar[21], a[7], a[3]); //dh
-	mul_wide_32(mar[22], a[5], a[4]); //ef
-	mul_wide_32(mar[23], a[6], a[4]); //eg
-	mul_wide_32(mar[24], a[7], a[4]); //eh
-	mul_wide_32(mar[25], a[6], a[5]); //fg
-	mul_wide_32(mar[26], a[7], a[5]); //fh
-	mul_wide_32(mar[27], a[7], a[6]); //gh
-//a
-	mul_wide_32(buff[0], a[0], a[0]); //aa
-	add_cc_32(b32[1], b32[1], m32[0]);
-	addc_cc_32(b32[2], m32[1], m32[2]);
-	addc_cc_32(b32[3], m32[3], m32[4]);
-	addc_cc_32(b32[4], m32[5], m32[6]);
-	addc_cc_32(b32[5], m32[7], m32[8]);
-	addc_cc_32(b32[6], m32[9], m32[10]);
-	addc_cc_32(b32[7], m32[11], m32[12]);
-	addc_cc_32(b32[8], m32[13], 0);
-	b32[9] = 0;
-//b+	 
-	mul_wide_32(mm, a[1], a[1]); //bb
-	add_320_to_256s(b32 + 1, mar[0], mm, mar[7], mar[8], mar[9], mar[10], mar[11], mar[12]);
-	mul_wide_32(mm, a[2], a[2]); //cc
-	add_320_to_256s(b32 + 2, mar[1], mar[7], mm, mar[13], mar[14], mar[15], mar[16], mar[17]);
-	mul_wide_32(mm, a[3], a[3]); //dd
-	add_320_to_256s(b32 + 3, mar[2], mar[8], mar[13], mm, mar[18], mar[19], mar[20], mar[21]);
-	mul_wide_32(mm, a[4], a[4]); //ee
-	add_320_to_256s(b32 + 4, mar[3], mar[9], mar[14], mar[18], mm, mar[22], mar[23], mar[24]);
-	mul_wide_32(mm, a[5], a[5]); //ff
-	add_320_to_256s(b32 + 5, mar[4], mar[10], mar[15], mar[19], mar[22], mm, mar[25], mar[26]);
-	mul_wide_32(mm, a[6], a[6]); //gg
-	add_320_to_256s(b32 + 6, mar[5], mar[11], mar[16], mar[20], mar[23], mar[25], mm, mar[27]);
-	mul_wide_32(mm, a[7], a[7]); //hh
-	add_320_to_256s(b32 + 7, mar[6], mar[12], mar[17], mar[21], mar[24], mar[26], mar[27], mm);
-//fast mod P
+	__align__(16) uint64_t buff[8];
+	uint64_t tmp[5], tmp2[2];
+	sqr512_split((uint32_t*)buff, (const uint32_t*)aTmp);
 	mul_256_by_P0inv((uint32_t*)tmp, (uint32_t*)(buff + 4));
 	add_cc_64(buff[0], buff[0], tmp[0]);
 	addc_cc_64(buff[1], buff[1], tmp[1]);
 	addc_cc_64(buff[2], buff[2], tmp[2]);
 	addc_cc_64(buff[3], buff[3], tmp[3]);
 	addc_64(tmp[4], tmp[4], 0ull);
-//see mul_256_by_P0inv for details
 	uint32_t* t32 = (uint32_t*)tmp;
 	uint32_t* a32 = (uint32_t*)tmp2;
-	uint32_t* k = (uint32_t*)&tmp3;
 	mul_wide_32(tmp2[0], t32[8], P_INV32);
-	mul_wide_32(tmp3, t32[9], P_INV32);
-	add_cc_32(a32[1], a32[1], k[0]);
-	addc_32(a32[2], k[1], 0); //we cannot get carry here for a32[3]
+	uint32_t k0; mul_lo_32(k0, t32[9], P_INV32);   // t32[9] <= 2, so 977*t32[9] < 2^32
+	add_cc_32(a32[1], a32[1], k0);
+	addc_32(a32[2], 0, 0);
 	add_cc_32(a32[1], a32[1], t32[8]);
 	addc_cc_32(a32[2], a32[2], t32[9]);
 	addc_32(a32[3], 0, 0);
-
 	add_cc_64(r[0], buff[0], tmp2[0]);
 	addc_cc_64(r[1], buff[1], tmp2[1]);
 	addc_cc_64(r[2], buff[2], 0ull);
