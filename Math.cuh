@@ -24,14 +24,18 @@
 #define subc_32(res, a, b)				asm volatile ("subc.u32 %0, %1, %2;" : "=r"(res) : "r"(a), "r"(b));
 
 #define madc_lo_32(res, a, b, c)		asm volatile ("madc.lo.u32 %0, %1, %2, %3;" : "=r"(res) : "r"(a), "r"(b), "r"(c));
+#define mad_lo_cc(res,a,b,c)   			asm volatile ("mad.lo.cc.u32 %0, %1, %2, %3;"  : "=r"(res) : "r"(a), "r"(b), "r"(c));
+#define madc_hi_cc(res,a,b,c)  			asm volatile ("madc.hi.cc.u32 %0, %1, %2, %3;" : "=r"(res) : "r"(a), "r"(b), "r"(c));
+#define madc_lo_cc(res,a,b,c)  			asm volatile ("madc.lo.cc.u32 %0, %1, %2, %3;" : "=r"(res) : "r"(a), "r"(b), "r"(c));
+#define mad_wide_32(res,a,b,c)			asm volatile ("mad.wide.u32 %0, %1, %2, %3;" : "=l"(res) : "r"(a), "r"(b), "l"(c) );
 
 #define mul_wide_32(res, a, b)			asm volatile ("mul.wide.u32 %0, %1, %2;" : "=l"(res) : "r"(a), "r"(b));
-#define mad_wide_32(res,a,b,c)			asm volatile ("mad.wide.u32 %0, %1, %2, %3;" : "=l"(res) : "r"(a), "r"(b), "l"(c) );
+#define mul_lo_32(res, a, b) 			asm volatile ("mul.lo.u32 %0, %1, %2;" : "=r"(res) : "r"(a), "r"(b));
 
 //P-related constants
 #define P_0			0xFFFFFFFEFFFFFC2Full
 #define P_123		0xFFFFFFFFFFFFFFFFull
-#define mul_lo_32(res, a, b) asm volatile ("mul.lo.u32 %0, %1, %2;" : "=r"(res) : "r"(a), "r"(b));
+
 #define P_INV32		0x000003D1
 
 #define Copy_u64_x4(dst, src) {\
@@ -242,9 +246,6 @@ __device__ __forceinline__ void mul_256_by_P0inv(uint32_t* res, uint32_t* val)
 }
 
 
-#define mad_lo_cc(res,a,b,c)   asm volatile ("mad.lo.cc.u32 %0, %1, %2, %3;"  : "=r"(res) : "r"(a), "r"(b), "r"(c));
-#define madc_hi_cc(res,a,b,c)  asm volatile ("madc.hi.cc.u32 %0, %1, %2, %3;" : "=r"(res) : "r"(a), "r"(b), "r"(c));
-#define madc_lo_cc(res,a,b,c)  asm volatile ("madc.lo.cc.u32 %0, %1, %2, %3;" : "=r"(res) : "r"(a), "r"(b), "r"(c));
 // generated: even/odd column-split 256x256 -> 512, fused MAC form
 __device__ __forceinline__ void mul512_split(uint32_t* p, const uint32_t* a, const uint32_t* b)
 {
