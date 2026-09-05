@@ -31,7 +31,7 @@ The hash body is **2026 SASS instructions, pure ALU, zero memory ops**: SHF 661,
 LOP3 494, LEA 280, PRMT 18. It is SHA-256 (all 64 rounds) plus RIPEMD-160 trimmed to 153 of
 160 rounds for word 2 — already at its algorithmic floor.
 
-## 2. Bottleneck verdict — register-pressure-limited, and the shipping setting is already optimal
+## 2. Bottleneck verdict — a latency-hiding / register-pressure balance point, and the shipping setting sits on it
 
 **Occupancy has an interior optimum at 16 warps/SM, and the shipping setting sits exactly on it.**
 An earlier revision called the curve "monotonically decreasing in warps"; that is only the right-hand
@@ -54,15 +54,13 @@ build gets 140 registers and the cleanest per-thread code of any variant here �
 **balance point between latency hiding and register pressure**, and every direction off it is
 downhill.
 
-Two explanations fit that table, and they were confounded: 2 → 3 blocks/SM raises the resident
-local footprint per SM by 50% *and* forces ptxas from 122 registers down to 80, which starts
-spilling. P4 separates them. Holding the instruction stream byte-for-byte fixed and cutting the
-frame from 16 KB to 256 B, the small-frame build at 3 blocks/SM **still loses 1.93%** to its own
-2-block build, with identical registers and identical spills on both sides.
-
-**The footprint is not what makes extra warps unprofitable — the register ceiling is.** The
-kernel is register-pressure-limited. Footprint is a real but small second-order cost, worth at
-most 4.13% in total and unreachable in practice (§P4).
+On the right-hand side a third explanation was also in play and had to be ruled out: 2 → 3 blocks/SM
+raises the resident local footprint per SM by 50% *as well as* forcing ptxas from 122 registers down
+to 80. P4 separates the two. Holding the instruction stream byte-for-byte fixed and cutting the frame
+from 16 KB to 256 B, the small-frame build at 3 blocks/SM **still loses 1.93%** to its own 2-block
+build, with identical registers and identical spills on both sides. **Footprint is not what makes
+extra warps unprofitable — the register ceiling is.** It is a real but small second-order cost, worth
+at most 4.13% in total and unreachable in practice (§P4).
 
 - **Instruction mix is not the limiter.** 78.6% of `TestKernel`'s 8304 SASS instructions are
   ALU-class (IADD 2210, SHF 1422, LOP3 1243, IADD3 597, LEA 584, MOV/SEL/ISETP 425) against 1354
