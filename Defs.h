@@ -11,7 +11,7 @@
 #define MAX_GPU_CNT				32
 #define THREADS_PER_BLOCK		256
 #define MIN_THREADS_PER_BLOCK	32
-#define BLOCKS_PER_SM			2
+#define BLOCKS_PER_SM			3
 #define WARP_SIZE				32
 
 typedef unsigned long long u64;
