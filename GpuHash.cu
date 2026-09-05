@@ -578,7 +578,23 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(uint32_t sha_state_l
 // __noinline__ here is MEASURED RATHER THAN ASSUMED: dropping it is 0.8-1.3% SLOWER on an RTX
 // 5090, so the attribute stays. Inlining saves ~0.07% of instructions and costs +60% code size
 // in instruction-fetch footprint -- so do not reach for __forceinline__ here either.
-__device__ __noinline__ uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U256 x)
+//
+// HASH_INLINE=1 exists to re-test that under the pipe model rather than the code-size one: a
+// CALL is a hard scheduling barrier, so with it in place ptxas can never interleave the walk's
+// IMAD-heavy field arithmetic with the hash's ALUHEAVY-heavy rounds, and the SM's two math pipes
+// end up nearly ADDITIVE instead of overlapped. Inlining is the only source-level way to give
+// the scheduler one region containing both. It should also be re-checked against the
+// no_instruction stall (0.03 today), which is what the code-size objection predicts will grow.
+#ifndef HASH_INLINE
+#define HASH_INLINE 0
+#endif
+#if HASH_INLINE
+#define HASH_HOT_ATTR __forceinline__
+#else
+#define HASH_HOT_ATTR __noinline__
+#endif
+
+__device__ HASH_HOT_ATTR uint32_t getHash160_w2_from_limbs(uint8_t prefix02_03, U256 x)
 {
     uint32_t sha_state[16];
     SHA256_33_from_limbs(prefix02_03, x.v, sha_state);
