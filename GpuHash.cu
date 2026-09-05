@@ -34,8 +34,16 @@ __device__ __forceinline__ uint32_t ror32(uint32_t x, int n)
 // the new bottleneck, so more is not better -- see the A/B ladder.
 //   0 = off (shipping behaviour)   1 = plain shifts only (1:1, free)
 //   2 = + small-sigma rotates      3 = + big-sigma inner rotates
+//
+// MEASURED on an RTX 5090, 3 interleaved rounds, --grid 1024,36, medians of the settled rounds:
+//   L0 11510   L1 11518 (+0.07%)   L2 10935 (-5.0%)   L3 10162 (-11.7%)  MKeys/s
+// So the default is 0 and stays 0. The ncu counters behind that verdict are in the commit that
+// added this and are worth reading before anyone tries pipe rebalancing again: at L3 ALUHEAVY
+// falls 79.8% -> 62.3% and FMAHEAVY rises 45.1% -> 66.1%, NEITHER pipe is saturated, and the
+// kernel still gets 13% slower -- because +7.7% instructions cost more than a pipe imbalance
+// ever did. This kernel is issue/latency limited, not pipe-throughput limited.
 #ifndef HASH_IMAD_LEVEL
-#define HASH_IMAD_LEVEL 3
+#define HASH_IMAD_LEVEL 0
 #endif
 
 template<int N> __device__ __forceinline__ uint32_t ror_imad(uint32_t x)

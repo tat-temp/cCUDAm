@@ -87,6 +87,12 @@ __device__ __forceinline__ void load4_const(uint64_t* r, const uint64_t* src)
 #define NO_HASH 0
 #endif
 
+// Start the loop-carried `inverse` update at the TOP of the walk body instead of the bottom.
+// Pure reordering, no arithmetic change; see the comment at the use site.
+#ifndef WALK_HOIST_INV
+#define WALK_HOIST_INV 0
+#endif
+
 #if NO_HASH
 #define HASH_CONSUME(sink, prefix, X) \
 	do { (sink) ^= (X)[0] ^ (X)[1] ^ (X)[2] ^ (X)[3] ^ (uint64_t)(prefix); } while (0)
@@ -230,6 +236,22 @@ __global__ void TestKernel(
             uint64_t dx_inv_i[4];
             mul_mod(dx_inv_i, subp[i], inverse);
 
+#if WALK_HOIST_INV
+            // The loop-carried critical path is inverse -> dx_inv_i -> lam -> ... -> next inverse,
+            // and `inverse *= (Gx[i] - x1)` depends on nothing but the OLD inverse and x1. Started
+            // here instead of at the bottom of the body it can overlap the two point-adds and both
+            // hash calls; left at the bottom it cannot, because a __noinline__ CALL is a hard
+            // scheduling barrier for ptxas and there are two of them in between. Same arithmetic,
+            // same operand values -- dx_inv_i above has already consumed the old `inverse`.
+            {
+                __align__(16) uint64_t gx_h[4];
+                uint64_t gxm_h[4];
+                load4_const(gx_h, &c_Gx[(size_t)i*4]);
+                sub_mod(gxm_h, gx_h, x1);
+                mul_mod(inverse, inverse, gxm_h);
+            }
+#endif
+
 			{
 				uint64_t px3[4], s[4], lam[4];
                 __align__(16) uint64_t px_i[4], py_i[4];
@@ -305,11 +327,13 @@ __global__ void TestKernel(
 #endif
 			}
 			
+#if !WALK_HOIST_INV
 			uint64_t gxmi[4];
 			__align__(16) uint64_t gx_i[4];
             load4_const(gx_i, &c_Gx[(size_t)i*4]);
             sub_mod(gxmi, gx_i, x1);
             mul_mod(inverse, inverse, gxmi);
+#endif
 		}
 		
 		{
