@@ -33,15 +33,26 @@ LOP3 494, LEA 280, PRMT 18. It is SHA-256 (all 64 rounds) plus RIPEMD-160 trimme
 
 ## 2. Bottleneck verdict — register-pressure-limited, and the shipping setting is already optimal
 
-**More warps make this kernel slower, monotonically.** Measured on the RTX 5090, every occupancy
-setting against the others:
+**Occupancy has an interior optimum at 16 warps/SM, and the shipping setting sits exactly on it.**
+An earlier revision called the curve "monotonically decreasing in warps"; that is only the right-hand
+half. Driving occupancy *below* 16 — reachable by relaxing `__launch_bounds__`, which lets ptxas take
+140 registers and so fit fewer blocks — is much worse than raising it:
 
-| blocks/SM | warps/SM | registers | spill st / ld | MKeys/s |
-|---:|---:|---:|---|---:|
-| **2 (shipping)** | 16 | 122 | 0 / 0 | **11533** |
-| 3 | 24 | 80 | 184 / 300 | 11352 (−1.57%) |
-| 4 | 32 | 64 | 408 / 796 | ~10960 |
-| 5 | 40 | 48 | 928 / 1496 | ~10576 |
+| warps/SM | how | registers | spill st / ld | MKeys/s | delta |
+|---:|---|---:|---|---:|---:|
+| 8 | `__launch_bounds__(256,1)` → 1 blk | 140 | 0 / 0 | 10782 | **−6.63%** |
+| 12 | `__launch_bounds__(128,2)` → 3 blk | 140 | 0 / 0 | 11420 | −1.10% |
+| **16 (shipping)** | `(256,2)` → 2 blk | 122 | 0 / 0 | **11546** | — |
+| 24 | `(256,3)` → 3 blk | 80 | 184 / 300 | 11371 | −1.44% |
+| 32 | `(256,4)` → 4 blk | 64 | 408 / 796 | 11366 | −1.49% |
+| 40 | `(256,5)` → 5 blk | 48 | 928 / 1496 | ~10576 | ~−8% |
+
+The two sides fail for **different** reasons, which is why the peak is where it is. Above 16 warps
+the register ceiling collapses and ptxas spills. Below 16 there are no spills at all — the 8-warp
+build gets 140 registers and the cleanest per-thread code of any variant here — and it still loses
+6.6%, because there is not enough parallelism to hide the latency. The kernel is sitting on the
+**balance point between latency hiding and register pressure**, and every direction off it is
+downhill.
 
 Two explanations fit that table, and they were confounded: 2 → 3 blocks/SM raises the resident
 local footprint per SM by 50% *and* forces ptxas from 122 registers down to 80, which starts
@@ -79,6 +90,8 @@ gain is real and positive.
 | P3 | ~~Walk-loop ILP~~ — interleave the ±i point work | **−0.19% MEASURED** | done | — | **done: no gain, reverted** |
 | P5 | ~~Host wave-sizing~~ (round threads to a whole wave) | **−0.13% MEASURED** | done | done | **done: neutral, kept for exactness** |
 | P4 | ~~Shrink the per-thread `subp` frame~~ (two-level ladder) | **−0.38 … −1.70% MEASURED** | done | — | **done: negative, reverted** |
+| P8 | ~~Block size~~ `THREADS_PER_BLOCK` 256 → 128 / 64 / 512 | **−0.17 … −0.22% MEASURED** | done | — | **done: non-dimension** |
+| P9 | ~~Lower occupancy~~ (8 / 12 warps/SM, 140 regs, no spill) | **−6.63 / −1.10% MEASURED** | done | — | **done: 16 warps is the peak** |
 | P7 | **Hand-written SASS full kernel** (`asm/tk` track) | +8 … +15% | med | weeks | rcasm_test/abtest |
 | P6 | ~~Hash micro-opt~~ (pipe-balance adds to IMAD) | ~0 | **very low** | 2–4 d | **demoted: not pipe-bound** |
 | P2 | ~~Batch-size sweep~~ B=1024→…→64 | **0 … −4% MEASURED** | — | — | **done: negative, skip** |
@@ -109,9 +122,41 @@ to reclaim — 80 is already the next step down the 8-register granularity ladde
 **This was retried with a smaller frame, and it still loses.** The earlier revision of this
 section assumed occupancy and footprint were coupled and deferred the question. They are not:
 with the frame cut to 256 B and the instruction stream unchanged, 3 blocks/SM is still −1.93%
-against its own 2-block build (§P4). The register ceiling is the whole story. **Occupancy is
-closed** — it cannot be re-opened by anything that does not first cut registers below 85, and
-80 is already the next step down the 8-register granularity ladder from 85.
+against its own 2-block build (§P4). Above 16 warps the register ceiling is the whole story, and
+it cannot be re-opened by anything that does not first cut registers below 85 — 80 is already the
+next step down the 8-register granularity ladder from 85.
+
+**The other direction is closed too, and harder.** Relaxing `__launch_bounds__` to `(256,1)` lets
+ptxas take 140 registers with *zero* spill — the cleanest per-thread code of any build measured —
+and drops residency to 1 block, 8 warps/SM. It loses **6.63%**. `(128,2)` gives 140 registers at
+12 warps and loses 1.10%. So the occupancy curve is not monotone: it peaks at 16 warps and falls
+away on both sides, for opposite reasons (§2). **Occupancy is closed in both directions**, and the
+shipping setting is the maximum, not a corner.
+
+### P8 — block size (`THREADS_PER_BLOCK`) — **CLOSED, a non-dimension**
+
+The one launch parameter never swept. Holding warps/SM and the register ceiling fixed at the
+shipping values (512 threads/SM, ceiling 128, 122 registers, 0 spills in **all four** builds), only
+the block shape changes. Grid pinned to 1 566 720 threads for every variant, wave-exact at each
+geometry. All four pass `verify.py` 17/17:
+
+| `__launch_bounds__` | threads/block | blocks launched | MKeys/s | delta |
+|---|---:|---:|---:|---:|
+| **(256, 2) shipping** | 256 | 6 120 | **11547** | — |
+| (128, 4) | 128 | 12 240 | 11527 | −0.17% |
+| (64, 8) | 64 | 24 480 | 11522 | −0.22% |
+| (512, 1) | 512 | 3 060 | 11526 | −0.18% |
+
+A 4× spread in block size and an 8× spread in block count move throughput by 0.22%. Every non-256
+variant sits a consistent ~0.2% low, which is at the noise floor and in any case the wrong sign.
+Block granularity does not matter to this kernel: the walk is per-thread, the only warp-level
+operations are `__ballot_sync`/`__any_sync` within a warp, and there is no `__syncthreads` for a
+larger block to amortize. **Leave `THREADS_PER_BLOCK` at 256.**
+
+Two things worth separating, because `--grid A,B` invites confusing them with the launch bounds:
+`--grid 128,4` is a *runtime* setting — batch size 128 and a 4-blocks/SM cap, i.e. a 680-block grid
+— and measures **−3.73%**, which is P2's known −2.11% for B=128 plus ~−1.6% for a grid too small
+(2 waves) to cover its own tail. It is not the same experiment as `__launch_bounds__(128,4)`.
 
 ### P2 — batch-size sweep — **CLOSED, negative in both directions**
 
@@ -506,10 +551,18 @@ as the most promising lever — are all refuted. What is left:
 - **Get counters** (§4). Every conclusion here still rests on throughput A/Bs plus purpose-built
   probes. That worked, but it cost six builds and two hours per question. Everything remaining is
   expensive enough that guessing wrong costs days.
-- **Register pressure** is the newly-identified limiter and the only lever with a mechanism behind
-  it: 122 registers against a 128 ceiling at 2 blocks/SM, and nothing fits at 85. Cutting live
-  state in the walk body is the one change that could re-open occupancy — but note P3 already
-  showed the scheduler is not short of work, so this is a long shot.
+- **Register pressure — now the best-motivated lever in the document, with a number attached.**
+  The occupancy curve peaks at 16 warps because both neighbours are handicapped, and the two
+  handicaps are separable. The left side proves the kernel *does* profit from more warps: 8 → 12 →
+  16 gains 6.6% with spills held at zero throughout. The right side loses only because ptxas must
+  drop 122 → 80 registers and spill 184/300 B. So the −1.44% at 24 warps is a *net* of a real
+  latency-hiding gain against a spill cost that currently exceeds it. **Get the walk body under 85
+  live registers with no spill and 24 warps/SM should win.** That is a concrete, falsifiable target,
+  and it is the only remaining lever whose mechanism is understood.
+- Note the tension with P3: interleaving the ±i chains found the scheduler was *not* short of ready
+  work at 16 warps. Both can be true — more warps help by hiding memory latency, not by supplying
+  ILP — but it means the register work should be tested at 24 warps directly, not justified by ILP
+  arguments.
 - **P7 (hand-written SASS)** — unchanged, still weeks of work, still gated on the above.
 - **P6** stays demoted; the pipe imbalance is real but is not the limiter.
 
@@ -539,3 +592,25 @@ that comparison launches exactly 6120 blocks.
    that shell's own command line. A wait-loop written as `while pgrep -f bench; do sleep; done`
    never exits, and `pkill -f build_x` kills the session issuing it. Use `pgrep -f 'benc[h]'` or
    match on a marker file instead.
+
+### Block-size and low-occupancy session — 2026-09-06
+
+Method as above; grid pinned to 1 566 720 threads for every variant by choosing the blocks/SM cap
+per build (`cap = 9216 / THREADS_PER_BLOCK`), which is wave-exact at all geometries tested. All six
+builds pass `verify.py` 17/17.
+
+Two traps specific to this dimension:
+
+* **`__launch_bounds__(T, B)`'s second argument is a *minimum*, not a cap.** It constrains the
+  register ceiling to `65536/(T·B)`; actual residency is then `floor(65536/(T·regs))`. That is why
+  `(256,1)` does not simply mean "1 block/SM" — it means "ptxas may use up to 256 registers", it
+  takes 140, and residency *falls out* at 1 block. It is also the only lever that lowers occupancy
+  without touching the code, which is what made the sub-16-warp measurements possible.
+* **`--grid A,B` is unrelated to `__launch_bounds__(A,B)`** despite looking identical. `A` is the
+  runtime batch size and `B` the blocks/SM cap used to size the grid. `--grid 128,4` measures
+  −3.73%; `__launch_bounds__(128,4)` measures −0.17%. Do not quote one for the other.
+
+The host's SSH daemon dropped connections twice during this session while the machine itself stayed
+up (uptime unbroken). Both benchmark runs survived because they were launched with
+`setsid nohup`; the polling loops died and were simply restarted. This is the third distinct way
+the remote link has corrupted or nearly corrupted a measurement — detach everything.
