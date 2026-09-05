@@ -16,6 +16,58 @@ __device__ __forceinline__ uint32_t ror32(uint32_t x, int n)
 #endif
 }
 
+// ---- Pipe-balancing rotates/shifts ------------------------------------------------------------
+// On sm_120 the SM has two independent issue pipes of 2 warp-instructions/clock each: ALUHEAVY
+// (SHF, LEA, IADD3, IADD.64, SEL, PRMT, ISETP) and FMAHEAVY (IMAD, plus an "alulite" sub-pipe
+// that takes LOP3 and MOV). Measured on the shipping kernel with ncu on an RTX 5090: ALUHEAVY
+// 79.8% of peak, FMAHEAVY 34.6%. ALUHEAVY is the binding constraint, so a rotate moved off SHF
+// onto IMAD is a direct win even when it costs one extra instruction overall.
+//
+// ror(x,N) == lo32(x * 2^(32-N)) | hi32(x * 2^(32-N))  -- the halves are bit-disjoint, so the OR
+//             may be written as XOR and folded into the surrounding LOP3 xor-tree.
+// (x >> N) == hi32(x * 2^(32-N))                       -- 1 IMAD.HI for 1 SHF, a free 1:1 swap.
+//
+// Exact for 1 <= N <= 31. ptxas does NOT strength-reduce these back into shifts: IMAD.WIDE.U32 /
+// IMAD.HI.U32 with the power-of-two immediate survive -O3 (verified in SASS).
+//
+// HASH_IMAD_LEVEL selects how far to push the swap. Past the balance point the FMA pipe becomes
+// the new bottleneck, so more is not better -- see the A/B ladder.
+//   0 = off (shipping behaviour)   1 = plain shifts only (1:1, free)
+//   2 = + small-sigma rotates      3 = + big-sigma inner rotates
+#ifndef HASH_IMAD_LEVEL
+#define HASH_IMAD_LEVEL 3
+#endif
+
+template<int N> __device__ __forceinline__ uint32_t ror_imad(uint32_t x)
+{
+    uint64_t t;
+    asm("mul.wide.u32 %0, %1, %2;" : "=l"(t) : "r"(x), "n"(1u << (32 - N)));
+    return (uint32_t)t ^ (uint32_t)(t >> 32);
+}
+
+template<int N> __device__ __forceinline__ uint32_t shr_imad(uint32_t x)
+{
+    uint32_t h;
+    asm("mul.hi.u32 %0, %1, %2;" : "=r"(h) : "r"(x), "n"(1u << (32 - N)));
+    return h;
+}
+
+#if HASH_IMAD_LEVEL >= 1
+#define SHR_P(x, N) shr_imad<N>(x)
+#else
+#define SHR_P(x, N) ((x) >> (N))
+#endif
+#if HASH_IMAD_LEVEL >= 2
+#define ROR_S(x, N) ror_imad<N>(x)
+#else
+#define ROR_S(x, N) ror32(x, N)
+#endif
+#if HASH_IMAD_LEVEL >= 3
+#define ROR_B(x, N) ror_imad<N>(x)
+#else
+#define ROR_B(x, N) ror32(x, N)
+#endif
+
 // a ^ b ^ c. Plain C, never forced lop3.b32 asm: ptxas folds it to one LOP3 (0x96) and stays
 // free to fuse across op boundaries; the asm form BLOCKS that fusion, costing +2 LOP3.
 __device__ __forceinline__ uint32_t xor3(uint32_t a, uint32_t b, uint32_t c){
@@ -24,10 +76,10 @@ __device__ __forceinline__ uint32_t xor3(uint32_t a, uint32_t b, uint32_t c){
 
 // Sigma0/Sigma1 with the common rotate hoisted OUT of the xor -- an exact GF(2)-linear identity
 // (host-verified bit-exact), same op count, betting on LEA fusion at the surviving outer rotate.
-__device__ __forceinline__ uint32_t bigS0(uint32_t x) { return ror32(xor3(x, ror32(x, 11), ror32(x, 20)), 2); }
-__device__ __forceinline__ uint32_t bigS1(uint32_t x) { return ror32(xor3(x, ror32(x,  5), ror32(x, 19)), 6); }
-__device__ __forceinline__ uint32_t smallS0(uint32_t x){ return xor3(ror32(x, 7), ror32(x, 18), (x >> 3)); }
-__device__ __forceinline__ uint32_t smallS1(uint32_t x){ return xor3(ror32(x,17), ror32(x, 19), (x >>10)); }
+__device__ __forceinline__ uint32_t bigS0(uint32_t x) { return ror32(xor3(x, ROR_B(x, 11), ROR_B(x, 20)), 2); }
+__device__ __forceinline__ uint32_t bigS1(uint32_t x) { return ror32(xor3(x, ROR_B(x,  5), ROR_B(x, 19)), 6); }
+__device__ __forceinline__ uint32_t smallS0(uint32_t x){ return xor3(ROR_S(x, 7), ROR_S(x, 18), SHR_P(x, 3)); }
+__device__ __forceinline__ uint32_t smallS1(uint32_t x){ return xor3(ROR_S(x,17), ROR_S(x, 19), SHR_P(x,10)); }
 
 // Ch -> one LOP3 (0xCA); Maj -> 0xE8. Plain C, not asm, so ptxas may fuse -- see the xor3 note.
 __device__ __forceinline__ uint32_t Ch (uint32_t x,uint32_t y,uint32_t z){

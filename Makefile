@@ -16,6 +16,12 @@ GENCODE   := $(foreach arch,$(SM_ARCHS),-gencode arch=compute_$(arch),code=sm_$(
 # Same optimization flags as cCUDA.
 CXXFLAGS  := -std=c++17
 NVCCFLAGS := -O3 -use_fast_math --ptxas-options=-O3 $(GENCODE) $(CXXFLAGS)
+
+# Escape hatch for A/B experiments: `make EXTRA=-DHASH_IMAD_LEVEL=1`. Appended AFTER the shipped
+# flags so an experiment can only add to them, never silently replace them (assigning NVCCFLAGS
+# on the command line would drop -O3 and the -gencode and still build something that runs).
+EXTRA     ?=
+NVCCFLAGS += $(EXTRA)
 CCFLAGS   := -O3 $(CXXFLAGS) -pthread -I$(CUDA_PATH)/include
 LDFLAGS   := -cudart=static -lpthread -lm
 
