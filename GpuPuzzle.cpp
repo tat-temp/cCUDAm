@@ -367,7 +367,29 @@ uint64_t GetThreadsCount(cudaDeviceProp* prop, uint64_t threadsPerBlock, const u
 	// block_count = threadsTotal / threadsPerBlock truncates, so leftover threads still get a
 	// sub-range and start point in PrepareHost but are never launched -- their keys are silently
 	// skipped. Round DOWN: rounding up could exceed the memory budget or the user's blocks/SM cap.
-	result -= result % threadsPerBlock;
+	//
+	// Round down to a whole number of resident WAVES, not merely a whole number of blocks. Every
+	// block runs the same uniform budget (see PrepareHost), so all blocks take the same time and
+	// the launch costs ceil(blocks / waveBlocks) wave-times regardless of how full the last wave
+	// is. A partial tail wave is therefore paid for in full and only partly used. At 170 SMs,
+	// BLOCKS_PER_SM=3 and 256 threads/block a wave is 510 blocks = 130560 threads; block-granular
+	// rounding left 7980 blocks = 15.65 waves, paying 16 wave-times for 15.65 waves of work and
+	// throwing away 2.2%. Dropping to 7650 blocks does 4.1% less work in 6.25% less time.
+	//
+	// waveThreads is exact rather than a guess: __launch_bounds__(THREADS_PER_BLOCK, BLOCKS_PER_SM)
+	// makes ptxas guarantee BLOCKS_PER_SM blocks are co-resident, spilling if it must, so the
+	// occupancy this assumes is the occupancy the kernel is compiled to achieve.
+	const uint64_t waveThreads =
+		(uint64_t)prop->multiProcessorCount * (uint64_t)BLOCKS_PER_SM * threadsPerBlock;
+
+	if (result >= waveThreads) {
+		result -= result % waveThreads;
+	} else {
+		// Unreachable while minThreads == waveThreads above, but keep the block-granular floor
+		// correct if that ever stops holding -- a sub-wave launch must still be a whole number
+		// of blocks.
+		result -= result % threadsPerBlock;
+	}
 
 	return result;
 }
