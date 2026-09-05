@@ -1,6 +1,7 @@
 # Performance optimization plan — branch `f1`
 
-Target: NVIDIA RTX 5090 (sm_120, Blackwell, 170 SMs), CUDA 13.0.88. Kernel: `TestKernel`
+Target: NVIDIA RTX 5090 (sm_120, Blackwell, 170 SMs); GPU host `nvcc` **13.3.73** (§P1–§P3 were
+measured under 12.8.93 — see the §7 addendum), laptop 13.0.88. Kernel: `TestKernel`
 in `GpuCore.cu`. This plan supersedes nothing in `DEVPLAN.md` (deleted, not used); all
 numbers below are either measured on the 5090 by the repo's own harnesses or modelled
 statically from the current SASS on branch `f1` and labelled as such.
@@ -30,7 +31,7 @@ The hash body is **2026 SASS instructions, pure ALU, zero memory ops**: SHF 661,
 LOP3 494, LEA 280, PRMT 18. It is SHA-256 (all 64 rounds) plus RIPEMD-160 trimmed to 153 of
 160 rounds for word 2 — already at its algorithmic floor.
 
-## 2. Bottleneck verdict — footprint-limited, and the shipping setting is already optimal
+## 2. Bottleneck verdict — register-pressure-limited, and the shipping setting is already optimal
 
 **More warps make this kernel slower, monotonically.** Measured on the RTX 5090, every occupancy
 setting against the others:
@@ -42,19 +43,23 @@ setting against the others:
 | 4 | 32 | 64 | 408 / 796 | ~10960 |
 | 5 | 40 | 48 | 928 / 1496 | ~10576 |
 
-That is the signature of a kernel limited by **per-thread memory footprint, not by latency**.
-Every resident thread carries a 16 KB `subp[512][4]` local frame, so 2 → 3 blocks/SM raises the
-resident local footprint per SM by 50% *and* forces ptxas from 122 registers down to 80, which
-starts spilling. Both effects push the same way, and extra warps never buy back enough latency
-hiding to pay for them.
+Two explanations fit that table, and they were confounded: 2 → 3 blocks/SM raises the resident
+local footprint per SM by 50% *and* forces ptxas from 122 registers down to 80, which starts
+spilling. P4 separates them. Holding the instruction stream byte-for-byte fixed and cutting the
+frame from 16 KB to 256 B, the small-frame build at 3 blocks/SM **still loses 1.93%** to its own
+2-block build, with identical registers and identical spills on both sides.
+
+**The footprint is not what makes extra warps unprofitable — the register ceiling is.** The
+kernel is register-pressure-limited. Footprint is a real but small second-order cost, worth at
+most 4.13% in total and unreachable in practice (§P4).
 
 - **Instruction mix is not the limiter.** 78.6% of `TestKernel`'s 8304 SASS instructions are
   ALU-class (IADD 2210, SHF 1422, LOP3 1243, IADD3 597, LEA 584, MOV/SEL/ISETP 425) against 1354
   IMAD (16.3%) on the separate FMA pipe — a 4.8:1 imbalance. Rebalancing it (P6) is still not
-  indicated, but for a different reason than this document previously gave: the machine is short
-  of cache and memory bandwidth, not of issue slots.
-- **The 41% points-only half** is the same story: the 16 KB/thread local frame, 64 B of local
-  load/store per key.
+  indicated: the ALU pipe is not saturated, and neither is memory.
+- **The 41% points-only half** carries the 16 KB/thread local frame and 64 B of local load/store
+  per key. That traffic is real — removing it entirely is worth 4.13% — but it is *not* the wall,
+  and no algorithm reachable from here removes it (§P4).
 
 > **Correction.** An earlier revision of this document claimed the opposite — that the kernel is
 > latency-bound, and that 3 blocks/SM was worth **+7.76%**. That was wrong, and it was committed
@@ -73,7 +78,7 @@ gain is real and positive.
 | P1 | ~~3 blocks/SM~~ (`BLOCKS_PER_SM=3`) | **−1.57% MEASURED** | done | — | **REVERTED: regression** |
 | P3 | ~~Walk-loop ILP~~ — interleave the ±i point work | **−0.19% MEASURED** | done | — | **done: no gain, reverted** |
 | P5 | ~~Host wave-sizing~~ (round threads to a whole wave) | **−0.13% MEASURED** | done | done | **done: neutral, kept for exactness** |
-| P4 | **Field lazy reduction / subp prefetch** | +2 … +5% | med | 3–5 d | abtest oracle + abbench |
+| P4 | ~~Shrink the per-thread `subp` frame~~ (two-level ladder) | **−0.38 … −1.70% MEASURED** | done | — | **done: negative, reverted** |
 | P7 | **Hand-written SASS full kernel** (`asm/tk` track) | +8 … +15% | med | weeks | rcasm_test/abtest |
 | P6 | ~~Hash micro-opt~~ (pipe-balance adds to IMAD) | ~0 | **very low** | 2–4 d | **demoted: not pipe-bound** |
 | P2 | ~~Batch-size sweep~~ B=1024→…→64 | **0 … −4% MEASURED** | — | — | **done: negative, skip** |
@@ -101,8 +106,12 @@ raises the resident footprint per SM by 50%; and the register ceiling falls from
 to reclaim — 80 is already the next step down the 8-register granularity ladder from 85 — so
 `-maxrregcount` cannot buy a cheaper 3-block build. The lever simply points the wrong way.
 
-**Do not retry this without first shrinking the per-thread frame.** Occupancy and footprint are
-coupled here; more warps is only worth re-testing once `subp` is smaller.
+**This was retried with a smaller frame, and it still loses.** The earlier revision of this
+section assumed occupancy and footprint were coupled and deferred the question. They are not:
+with the frame cut to 256 B and the instruction stream unchanged, 3 blocks/SM is still −1.93%
+against its own 2-block build (§P4). The register ceiling is the whole story. **Occupancy is
+closed** — it cannot be re-opened by anything that does not first cut registers below 85, and
+80 is already the next step down the 8-register granularity ladder from 85.
 
 ### P2 — batch-size sweep — **CLOSED, negative in both directions**
 
@@ -117,9 +126,15 @@ Smaller B is monotonically worse. Measured, interleaved, 3 rounds each:
 | 64 | 10090 | −4.03% | 0.12% |
 
 The premise was wrong: **`subp[MAX_BATCH_SIZE/2][4]` is statically sized**, so a smaller *runtime*
-B does not shrink the 16 KB frame or improve occupancy at all — it only reduces bytes touched.
-That cache win is real but far smaller than the loss from amortizing the once-per-batch inversion
-over fewer keys, exactly as the ~10 → ~160 instr/key model predicted.
+B does not shrink the 16 KB frame or improve occupancy at all. It does not even reduce bytes
+touched *per key* — the ladder writes and reads one 32-byte entry per two keys at every B, so the
+32 B/key of local traffic is invariant. What is left is pure loss: the once-per-batch inversion
+amortizes over fewer keys.
+
+§P4 closes the remaining half of this question by rebuilding with a smaller *compile-time*
+`MAX_BATCH_SIZE`, which the sweep above could not vary. Shrinking the frame from 16 KB to 8 KB at
+identical arithmetic is worth **+0.03%**. **1024 is the right batch size, statically and at
+runtime; stop tuning this dimension.**
 
 Larger B is closed too. The gain per doubling is halving (64→128 +2.00%, 128→256 +1.09%,
 256→512 +0.72%, 512→1024 +0.32%), so 1024→2048 extrapolates to ~+0.15% — and it does not even
@@ -153,15 +168,120 @@ What the SASS confirmed did work, without helping: LDC 15 → 13, VOTE 10 → 8.
 BSSY/BSYNC stayed at 44 pairs, so the reconvergence cost is dominated by something other than the
 two filter checks. Instructions went 8456 → 8568.
 
-### P4 — field lazy reduction + subp prefetch
+### P4 — shrink the per-thread `subp` frame — **IMPLEMENTED, MEASURED, REVERTED**
 
-`mul_mod`/`sqr_mod` already skip the final conditional subtract (C8, results in `[0,2^256)`).
-Extend laziness: keep intermediate field values non-canonical through the ladder and walk, reduce
-fully only where canonical form is required (the parity byte and the hashed x-coordinate). Prefetch
-`subp[i+1]` one iteration ahead into registers. Both touch only the 41% half; points-only
-instruction cuts historically returned 11–16% there. Correctness risk is the parity/prefix byte
-(P is odd → a non-canonical value flips bit 0) — gate every variant through `verify.py` and
-`proof.py`.
+The 16 KB/thread `subp[512][4]` frame was the last untested structural lever, and §2 pointed at
+it. It is now closed in three steps: measure the ceiling, try to reach it, and explain the gap.
+
+#### Step 1 — the ceiling is +4.13%, and it is measured, not modelled
+
+Before writing an algorithm, find out what the frame is worth *if the arithmetic to shrink it
+were free*. A 12-line probe does that: keep every store and every load, wrap the index, shrink
+the array.
+
+```c
+#ifdef FRAME_PROBE
+#define SUBP_N   (FRAME_PROBE)
+#define SUBP(k)  subp[(k) & (FRAME_PROBE - 1)]
+#else
+#define SUBP_N   (MAX_BATCH_SIZE / 2)
+#define SUBP(k)  subp[k]
+#endif
+```
+with `subp[SUBP_N][4]` and every use routed through `SUBP(...)`. The build computes **wrong
+keys** and cannot find one — that is the point. It performs all 511 stores and 512 loads into a
+small hot window, so the instruction stream is untouched and only the working set moves. ptxas
+confirms the isolation is exact:
+
+| build | frame | registers | spill st/ld | SASS instr | **MKeys/s** | delta |
+|---|---:|---:|---|---:|---:|---:|
+| base | 16384 B | 122 | 0 / 0 | 8304 | 11540 | — |
+| `FRAME_PROBE=128` | 4096 B | 120 | 0 / 0 | 8304 | 11697 | +1.38% |
+| `FRAME_PROBE=32` | 1024 B | 120 | 0 / 0 | 8304 | 11950 | +3.55% |
+| `FRAME_PROBE=8` | 256 B | 120 | 0 / 0 | 8304 | **12018** | **+4.14%** |
+
+Same instruction count, same zero spills, 2 registers apart. **4.13% is the hard ceiling on
+every footprint idea in this document**, and it is strongly sub-linear — you have to get under
+~1 KB to collect most of it.
+
+#### Step 2 — the occupancy question P1 deferred, answered
+
+§P1 said "do not retry occupancy without first shrinking the frame". Done, with the probe:
+
+| build | frame | blk/SM | registers | spill st/ld | MKeys/s | vs base |
+|---|---:|---:|---:|---|---:|---:|
+| base | 16384 B | 2 | 122 | 0 / 0 | 11538 | — |
+| base | 16496 B | 3 | 80 | 184 / 300 | 11371 | −1.44% |
+| probe | 256 B | 2 | 120 | 0 / 0 | **12014** | **+4.13%** |
+| probe | 368 B | 3 | 80 | 184 / 300 | 11782 | +2.12% |
+| probe | 432 B | 4 | 64 | 408 / 796 | 11366 | −1.49% |
+
+At 3 blocks/SM the 256 B build and the 16 KB build carry *identical* registers and *identical*
+spills, so this isolates footprint cleanly. Going 2 → 3 blocks costs **−1.93%** even with a
+256 B frame. Footprint was never the reason occupancy failed. **Occupancy is closed.**
+
+#### Step 3 — the real algorithm, and why it cannot reach the ceiling
+
+Implemented in full: a **two-level (checkpointed) batch inversion**. Keep one checkpoint per
+chunk of `LADDER_T` instead of all `half` suffix products, and rebuild a chunk's suffixes into a
+small buffer immediately before consuming them. The invariant is unchanged —
+`subp[i] = d_J · prod_{k>i} d_k` — and a chunk rebuilds downward through
+`subp[i] = subp[i+1] · d_{i+1}`. Frame becomes `(half/T + T)` elements instead of `half`.
+
+Every loop needs `#pragma unroll 1`. Without it `LADDER_T` is a compile-time constant, nvcc
+unrolls the walk loop — which contains two full hash160 evaluations — and the kernel goes from
+8304 to **809,632** instructions with spills. Pinned, all three builds land at 8344 instructions,
+120 registers, zero spills: directly comparable to base.
+
+| build | frame | extra `mul_mod`/batch | verify.py | MKeys/s | vs base |
+|---|---:|---:|---|---:|---:|
+| base | 16384 B | — | 17/17 PASS | 11537 | — |
+| ladder `T=8` | 2304 B | 448 | 17/17 PASS | 11493 | **−0.38%** |
+| ladder `T=16` | 1536 B | 480 | 17/17 PASS | 11437 | **−0.87%** |
+| ladder `T=32` | 1536 B | 496 | 17/17 PASS | 11340 | **−1.70%** |
+| probe (free arithmetic) | 256 B | 0 | — | 12013 | +4.13% |
+
+**The ranking tracks the multiply count, not the frame.** `T=8` has the *larger* frame and is the
+least bad, because it does 48 fewer multiplies per batch than `T=32`. The rebuild costs
+`half − chunks` extra `mul_mod` — ~10% of the batch's ~4600 field multiplies — and that is more
+than the memory it buys.
+
+#### Why allocation is irrelevant, and traffic is what matters
+
+One control separates the two things the probe conflates. `subp` is sized by `MAX_BATCH_SIZE`, so
+rebuilding with a smaller compile-time bound shrinks the *allocation* while leaving bytes-touched
+per key at 32 B — exactly what the P2 runtime-B sweep could not vary:
+
+| build | frame | runtime B | MKeys/s | vs base |
+|---|---:|---:|---:|---:|
+| base | 16384 B | 1024 | 11536 | — |
+| base | 16384 B | 512 | 11495 | −0.36% |
+| `MAX_BATCH_SIZE=512` | **8192 B** | 512 | 11498 | −0.34% |
+| `MAX_BATCH_SIZE=256` | 4096 B | 256 | 11403 | −1.15% |
+| `MAX_BATCH_SIZE=128` | 2048 B | 128 | 11262 | −2.37% |
+
+Halving the allocation at identical arithmetic and identical bytes-touched is worth **+0.03%**.
+So the probe's 4.13% is not about allocating less — it is about the working set becoming
+*cache-resident*. The probe's 256 B × 512 resident threads is 128 KB per SM, exactly L1; the real
+frame is 8 MB per SM against a 128 MB-class L2 shared by 170 SMs, so every entry round-trips to
+DRAM. Even the ladder's 1536 B is 768 KB per SM — 6× L1 — so it only thins the traffic, never
+makes it resident, and collects nowhere near 4%.
+
+#### Why there is no cheaper scheme
+
+Single-inversion batch inversion needs the total product before it can emit any reciprocal, so
+the suffix products are produced in exactly reverse-consumption order: a stack of depth `half`.
+That stack is intrinsic. The only two trades are
+
+* **recompute** the suffixes — extra `mul_mod`; cheapest measured variant is −0.38%; or
+* **more inversions** — sub-batch into K groups, storage `half/K`, cost `(K−1)` extra `inv_mod`.
+  `inv_mod` is a ~20-round divstep chain, order 8000 dynamic instructions, so K=16 adds ~120k
+  instructions to a ~1.7M-instruction batch: ~+7%, worse than the ladder and far worse than the
+  4.13% ceiling.
+
+Both cost more than the ceiling pays. **P4 is closed. Do not reopen footprint work on this
+kernel.** The endomorphism trick that would cut `half` in half does not apply either — λ·k is not
+in the scanned range, so its images do not cover a contiguous `--range`.
 
 ### P5 — host wave-sizing — **DONE, and the modelled gain does not exist**
 
@@ -214,9 +334,12 @@ the experiment could catch it, because a throughput A/B produces one number per 
 internal consistency check. A profiler would have shown immediately that the 2-block build was not
 issue-starved.
 
-What the corrected occupancy ladder actually supports is a **footprint/cache limit** (§2), not a
-latency limit — but that is an inference from four throughput numbers, not a measurement of where
-the cycles go. Treat it as a hypothesis until counters confirm it.
+That hypothesis — a **footprint/cache limit** — has since been tested directly and is **wrong**,
+or rather it is right and small. §P4's probe holds the instruction stream byte-identical and moves
+only the working set: the entire footprint effect is 4.13%, and the occupancy regression survives
+unchanged when the frame is 64× smaller. The kernel is register-pressure-limited. That correction
+came from a purpose-built probe, not from counters — but it is exactly the kind of question a
+profiler answers in one capture instead of six builds and two hours of interleaved runs.
 
 **Nsight Compute is unavailable on the current GPU host** and this is not fixable from inside it:
 
@@ -371,13 +494,48 @@ configuration — `BLOCKS_PER_SM=2`, `MAX_BATCH_SIZE=1024`, no interleave — is
 tried. Net throughput change from this whole exercise: **zero**, plus a neutral wave-rounding
 tidy-up and a much better-mapped search space.
 
-That is a real result: it says the remaining headroom is not in scheduling knobs. What is left:
+That is a real result: it says the remaining headroom is not in scheduling knobs.
 
-- **P4 (field lazy reduction + `subp` prefetch)** — untested, and now the most interesting lever,
-  because §2 points at footprint rather than issue rate. Anything that shrinks the 16 KB/thread
-  frame attacks the actual limiter and would also re-open P1, since occupancy and footprint are
-  coupled.
-- **Get counters** (§4). Four throughput numbers can only ever support an inference about *why*.
-  Every remaining lever is expensive enough that guessing wrong costs days.
+**P4 is now measured too, and it closes the footprint dimension entirely.** The ceiling on all
+footprint work is +4.13% (probe, arithmetic free); the cheapest real algorithm that reaches for it
+costs more than it returns (−0.38% at best); halving the allocation at fixed arithmetic is worth
++0.03%; and shrinking the frame does not re-open occupancy. Three hypotheses this document was
+holding open — footprint as the limiter, occupancy pending a smaller frame, and `subp` work
+as the most promising lever — are all refuted. What is left:
+
+- **Get counters** (§4). Every conclusion here still rests on throughput A/Bs plus purpose-built
+  probes. That worked, but it cost six builds and two hours per question. Everything remaining is
+  expensive enough that guessing wrong costs days.
+- **Register pressure** is the newly-identified limiter and the only lever with a mechanism behind
+  it: 122 registers against a 128 ceiling at 2 blocks/SM, and nothing fits at 85. Cutting live
+  state in the walk body is the one change that could re-open occupancy — but note P3 already
+  showed the scheduler is not short of work, so this is a long shot.
 - **P7 (hand-written SASS)** — unchanged, still weeks of work, still gated on the above.
 - **P6** stays demoted; the pipe imbalance is real but is not the limiter.
+
+### P4 session addendum — toolchain change and two protocol lessons
+
+**The host toolchain moved under the experiment.** `nvcc` on the GPU host is now **13.3.73**;
+the numbers in §P1/§P2/§P3 were taken under 12.8.93. The baseline is unchanged across the move
+(11533 → 11537 MKeys/s at `BLOCKS_PER_SM=2`, well inside drift), and every §P4 table above was
+re-baselined on 13.3 in the same interleaved run as the variants it is compared against. Do not
+mix a pre-13.3 number with a post-13.3 one without re-measuring the baseline alongside.
+
+**Grid pinning.** `--grid B,N` sets the runtime batch size and the blocks/SM cap, and the cap is
+what fixes the geometry: `maxThreadsByUser = SMs · N · 256`. Wave-rounding then truncates to a
+whole number of resident waves, which differs per `BLOCKS_PER_SM`, so a cap chosen for 2 blocks
+silently produces a *different grid* at 3 or 4. For the occupancy tables above the cap is **36**
+— 1 566 720 threads, divisible by the wave size at 2, 3 *and* 4 blocks/SM — so every build in
+that comparison launches exactly 6120 blocks.
+
+**Two failure modes cost real time in this session, both worth remembering:**
+
+1. **An SSH-carried `make` dies with its connection.** A dropped channel SIGHUPs the build and
+   leaves a half-linked tree that the next `make` will happily complete into a mixed-vintage
+   binary. This is the same class of fault that produced the wrong P1 number (§ above). Run every
+   remote build under `setsid nohup … > log 2>&1` and poll the log for a completion marker; after
+   any interruption, `make clean` before rebuilding.
+2. **`pgrep -f X` / `pkill -f X` match the shell running them,** because the pattern appears in
+   that shell's own command line. A wait-loop written as `while pgrep -f bench; do sleep; done`
+   never exits, and `pkill -f build_x` kills the session issuing it. Use `pgrep -f 'benc[h]'` or
+   match on a marker file instead.
