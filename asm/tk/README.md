@@ -241,6 +241,30 @@ regenerate the nine ladder rungs — `git log --diff-filter=D` is where it lives
 
 ## Status
 
+**2026-09-07 (branch f1m): re-validated against HEAD after commits #4–#7.** The compiled
+kernel had moved on — `counts256` dropped from the signature (7 params now), the host-negated
+`c_GyNeg` table added (#4), 128-bit loads (#5), split-column fused-MAC field arithmetic (#6,
++11.85%). The fixtures were silently broken against it: `main.asm`'s body still loaded the old
+8-param constant offsets, and the harness still launched 8 arguments and never uploaded
+`c_GyNeg`. Fixed both — four `LDC` immediates in `main.asm` (verified in isolation by SASS
+diff, nothing else moved) and the 7-param harness ABI — rebuilt `TestKernel{,_loop,_occ255}.cubin`,
+and re-ran on the RTX 5090 (CUDA 13.3.73, REG:128 both sides, occupancy-matched at 2 blocks/SM):
+
+| grid | waves | A `GpuCore_nohash` median | B this median | B/A | manual lead |
+|---|---:|---:|---:|---:|---:|
+| 43,520 | 1 | 7.35 ms | 6.91 ms | 0.940 | **5.5%** |
+| 174,080 | 2 | 25.10 ms | 23.50 ms | 0.937 | **6.9%** |
+
+Both EXACT thread-for-thread, A≡B on every limb, replicated (two invocations agree to ~0.2%),
+thermally clean (best-vs-median ratios agree within 1%). The occupancy control (`occ255`, same
+stream at REG:255 → 1 block/SM) is 11.4% slower than the REG:128 build, so the register work
+still pays. **The lead has narrowed from the historical 11% (grid 170) because #6's fused-MAC
+gave the compiled side most of the arithmetic advantage the hand-scheduling used to hold** —
+the manual kernel still leads, but by single digits, and it still carries the now-dead
+`NegMod256` per-point work that the compiled side replaced with the `c_GyNeg` table. The other
+ten rung fixtures are still stale 8-param builds (`variants.py`, which regenerated them, is not
+in this repo) and must not be launched through the current harness.
+
 | stage | what | state |
 |---|---|---|
 | 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
