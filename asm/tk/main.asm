@@ -23,11 +23,15 @@
 //     is obsolete; any range is safe.
 //   * blockDim.x is assumed to be 256 (see the gid comment).
 //
-// Constant bank 3 -- the DEVICE-LINKED (-rdc) layout, which is NOT declaration order:
-//     c_Jy 0x0    c_Jx 0x20    c_Gy 0x40    c_Gx 0x4040    c_target_words 0x8040
-// Confirmed against emitted code: the shipped kernel reads c[0x3][URZ] for c_Jy,
-// c[0x3][0x20] for c_Jx and c[0x3][0x8040] for c_target_words. Writing against the
-// plain -cubin offsets would read c_Jy where c_target_words lives.
+// Constant bank 3 -- the DEVICE-LINKED (-rdc) layout, which is NOT declaration order and
+// is MEASURED from the built cubin (readelf -s / cuobjdump -elf), not guessed:
+//     c_Jx 0x0    c_Jy 0x20    c_Gy 0x40    c_GyNeg 0x8040    c_Gx 0x4040    c_target_words 0xc040
+// This is byte-identical to GpuCore_nohash.cubin's bank-3 layout, because tmpl_TestKernel.cu
+// now declares the same six tables in the same order. c_GyNeg (the host-negated Gy table,
+// GpuCore.cu commit 604d47b) is read directly on the minus branch instead of loading c_Gy and
+// negating it with NegMod256. NOTE: adding c_GyNeg to the template SWAPPED c_Jx and c_Jy versus
+// the old five-table layout (c_Jy was 0x0, c_Jx 0x20) -- the -rdc ordering is opaque and shifts
+// when the table set changes, so every one of these offsets was re-read off the cubin.
 //
 // Parameters, c[0x0], sm_120 (PARAM_BASE 0x380 = the sm_89 0x160 + 0x220):
 //     0x380 Px          0x388 Py           0x390 start_scalars
@@ -36,9 +40,12 @@
 // CHANGED: counts256 was removed from the signature, so everything after start_scalars moved
 // DOWN one 8-byte slot from the layout this file was originally written against
 // (find_result 0x3a0 -> 0x398, threadsTotal 0x3a8 -> 0x3a0, batch_size 0x3b0 -> 0x3a8,
-// batches_per_launch 0x3b4 -> 0x3ac). Any body below still reading the old offsets loads
-// find_result where threadsTotal now sits. The committed asm/tk/*.cubin fixtures predate
-// this and are STALE until rebuilt through asm/tk/build.sh.
+// batches_per_launch 0x3b4 -> 0x3ac). The BODY was brought onto these offsets on branch f1m
+// (the four live loads: Thr, BpL and the two Half sites); before that only this comment had
+// been updated and every fixture cubin carried the old 8-param loads. TestKernel.cubin and
+// TestKernel_loop.cubin are rebuilt from the fixed source; the OTHER ten rung fixtures are
+// still the stale 8-param builds and variants.py, which regenerated them, is not in this
+// repo -- do not launch them through the 7-argument harness.
 //
 // Every idiom below is copied from what ptxas actually emits for THIS kernel rather
 // than invented: global access is `LDG.E.64 Rd, desc[UR][Raddr.64+off]` with the
@@ -354,7 +361,7 @@ KERNEL TestKernel(regcnt=128, \
     [B------:R-:W3:-:S01]    LDC.64 AddrX, c[0x0][0x380]
     [B------:R-:W3:-:S01]    LDC.64 AddrY, c[0x0][0x388]
     [B------:R-:W3:-:S01]    LDC.64 AddrS, c[0x0][0x390]
-    [B------:R-:W3:-:S02]    LDC.64 Thr,   c[0x0][0x3a8]
+    [B------:R-:W3:-:S02]    LDC.64 Thr,   c[0x0][0x3a0]
 
     [B0-----:R-:W-:-:S02]    IADD3 R1, PT, PT, R1, -0x4000, RZ
 
@@ -486,14 +493,14 @@ KERNEL TestKernel(regcnt=128, \
 // the rungs below this one, which cut this region entirely. One redundant constant load per
 // batch against 1023 points is not worth a third register.
 //@@LOOPTOP_BEGIN
-    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3b0]
+    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]
     [B-----5:R-:W-:-:S05]    IMAD BDone, RZ, RZ, RZ
 .label_batch_loop:
 // BpL is RELOADED every iteration rather than held across the batch, which is what lets it
 // live in overlay C where InvT will overwrite it. One LDC against a batch's ~76,000
 // instructions, and it is half of what moves the top of the allocation from R126 to R124 --
 // i.e. half of what buys the second resident block. See the register table.
-    [B------:R-:W5:-:S02]    LDC BpL, c[0x0][0x3b4]
+    [B------:R-:W5:-:S02]    LDC BpL, c[0x0][0x3ac]
 // ONE guard, where there used to be two. The `rem >= B` half is gone with rem itself -- see
 // the note in the prologue -- leaving the batch counter, which is warp-uniform by
 // construction because BpL is a kernel parameter. Every lane of the warp takes this branch
@@ -591,7 +598,7 @@ KERNEL TestKernel(regcnt=128, \
 // is j and the store index is j-1, which is exactly the C++ (i+1) and i.
 //@@SUFP_BEGIN
 //---- acc = SubMod256(c_Jx, x1) ; subp[half-1] = acc ---------------------------------
-// c_Jx is at c[0x3][0x20] in the -rdc layout. Loaded into MulB and reduced in place,
+// c_Jx is at c[0x3][0x0] in the -rdc layout. Loaded into MulB and reduced in place,
 // straight into MulA, which is where the accumulator lives for the rest of the ladder.
 // Barriers 4 and 5, NOT 0 and 1. Barrier 0 already carries the four PntX loads from the
 // prologue and is not drained until this point, so arming it four more times here put
@@ -599,11 +606,11 @@ KERNEL TestKernel(regcnt=128, \
 // still in flight, so MulB4..MulB7 were read stale. That is what made the ladder wrong:
 // see the note on barrier hygiene at the top of this file. The wait covers both groups,
 // because the call reads MulB (barrier 4) and PntX (barrier 0).
-    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x20]
-    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x28]
-    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x30]
-    [B------:R-:W4:-:S01]    LDC.64 MulB6, c[0x3][0x38]
-    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3b0]
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x0]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x8]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x10]
+    [B------:R-:W4:-:S01]    LDC.64 MulB6, c[0x3][0x18]
+    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]
     [B0---4-:R-:W-:-:S01]    NOP
 inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0)
 
@@ -921,13 +928,13 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 //  [B------:R-:W-:-:S01]    MOV Acc7, MulR7
 //@@PACC_END
 
-//---- the - branch: identical, on -c_Gy[i]. x(-Q) == x(Q), so dx_inv_i is reused --------
-    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x40]
-    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x48]
-    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x50]
-    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x58]
+//---- the - branch: reads c_GyNeg[i] = -c_Gy[i] directly, so no NegMod256. x(-Q) == x(Q),
+//     so dx_inv_i is reused. c_GyNeg is at c[0x3][0x8040]; element i at 0x8040 + i*32 = COfs+0x8040.
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x8040]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x8048]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x8050]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x8058]
     [B----4-:R-:W-:-:S01]    NOP
-inc_func NegMod256(Rio=MulB, Pt=0)
 inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)
 inc_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0)
 inc_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0)
@@ -1000,12 +1007,12 @@ inc_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0)
 // `s1 + half`, which is what makes consecutive batches abut with no gap and no duplicate.
 // Every call binding here is one the loop above already used, so this costs no new bodies.
 //@@PLUST_BEGIN
-    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x40]
-    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x48]
-    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x50]
-    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x58]
+// c_GyNeg[i] direct, no NegMod256 -- same as the minus branch above.
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x8040]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x8048]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x8050]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x8058]
     [B----4-:R-:W-:-:S01]    NOP
-inc_func NegMod256(Rio=MulB, Pt=0)
 inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)
 inc_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0)
 inc_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0)
@@ -1103,21 +1110,22 @@ inc_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
     [B------:R-:W-:-:S01]    MOV Dxi5, Rinv5
     [B------:R-:W-:-:S01]    IMAD Dxi6, RZ, RZ, Rinv6
     [B------:R-:W-:-:S02]    MOV Dxi7, Rinv7
-// s = c_Jy - y1. c_Jy is at c[0x3][0x0] in the -rdc layout, c_Jx at 0x20.
-    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x0]
-    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x8]
-    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x10]
-    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][0x18]
-    [B----4-:R-:W-:-:S01]    NOP
-inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)
-// lam = s * inverse
-inc_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0)
-// x3 = lam^2 - x1 - Jx, one reduction
-inc_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0)
+// s = c_Jy - y1. c_Jy is at c[0x3][0x20] in the -rdc layout, c_Jx at 0x0 (swapped from the
+// old five-table layout when c_GyNeg was added -- both re-read off the cubin).
     [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x20]
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x28]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x30]
     [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][0x38]
+    [B----4-:R-:W-:-:S01]    NOP
+inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)
+// lam = s * inverse
+inc_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0)
+// x3 = lam^2 - x1 - Jx, one reduction. c_Jx is at c[0x3][0x0] in the -rdc layout.
+inc_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0)
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x0]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x8]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x10]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][0x18]
     [B----4-:R-:W-:-:S01]    NOP
 inc_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0)
 // y3 = (x1 - x3)*lam - y1
@@ -1198,6 +1206,11 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W3:-:S01]    LDC.64 AddrX, c[0x0][0x380]
     [B------:R-:W3:-:S01]    LDC.64 AddrY, c[0x0][0x388]
     [B------:R-:W3:-:S01]    LDC.64 AddrS, c[0x0][0x390]
+// 0x398 is find_result now, not counts256 -- the slot counts256 vacated. AddrC is DEAD in
+// the production kernel: only the gated STORELAM region ever dereferences it, and that rung
+// cannot be regenerated without variants.py. The load stays so the instruction stream (and
+// the ladder's reconstruction arithmetic) is untouched; if STORELAM ever comes back it must
+// NOT store through this -- there is no per-thread output array behind find_result.
     [B------:R-:W3:-:S02]    LDC.64 AddrC, c[0x0][0x398]
     [B---3--:R-:W-:-:S01]    IMAD.WIDE.U32 AddrX, gID, 0x20, AddrX
     [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrY, gID, 0x20, AddrY

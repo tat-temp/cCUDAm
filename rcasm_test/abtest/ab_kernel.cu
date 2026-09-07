@@ -2,21 +2,27 @@
 // hand-written SASS kernel (asm/tk/main.asm) currently computes, so the two are
 // diffable.
 //
-// Signature, constant tables and launch bounds are identical to the real TestKernel --
-// this is deliberately not a reduced stand-in, because the parameter ABI is one of the
-// things under test.
+// Signature and launch bounds are identical to the real TestKernel -- SEVEN parameters,
+// counts256 dropped exactly as GpuCore.cu dropped it at 61f0e6c. rem is seeded in-kernel at
+// 0x4000 (the value the harness's hc[] carries for the oracle's model) instead of being read
+// from a buffer, and nothing writes a counts array any more. The constant tables are the
+// five the walk consumes; the real kernel also declares c_GyNeg (host-negated Gy, 604d47b),
+// which this stand-in does not need -- it negates c_Gy on the device like the hand-written
+// side, and the two spellings are bit-identical (both are a plain P - y borrow chain).
+//
+// The counts256 diagnostic channel (pts rung's lam^2) died with the parameter. The pre-loop
+// ladder rungs are retired anyway: their committed cubins are 8-param and variants.py, which
+// regenerated them, is gone.
 //
 // Stage 1b semantics (default):
 //     Px       = mul_mod(x1, y1)      <- the operation being compared
 //     Py       = y1                   <- identity
 //     scalars  = s1                   <- identity
-//     counts   = rem                  <- identity
 //
 // Stage 2a semantics (-DSTAGE_SUFP=1), mirroring GpuCore.cu:224-233 exactly:
 //     Px       = acc                  <- the whole suffix product
 //     Py       = subp[half-1]         <- read back out of the local frame
 //     scalars  = s1                   <- identity
-//     counts   = rem                  <- identity
 //
 // Build it the same way the template is built (-rdc=true, two-step device link), so the
 // five __constant__ tables get GLOBAL binding and one harness can upload to both cubins
@@ -53,7 +59,6 @@ __global__ void TestKernel(
     uint64_t* __restrict__ Px,
     uint64_t* __restrict__ Py,
     uint64_t* __restrict__ start_scalars,
-    uint64_t* __restrict__ counts256,
     TFindResult* __restrict__ find_result,
     uint64_t threadsTotal,
     uint32_t batch_size,
@@ -68,12 +73,11 @@ __global__ void TestKernel(
         x1[k]  = Px[idx];
         y1[k]  = Py[idx];
         s1[k]  = start_scalars[idx];
-        rem[k] = counts256[idx];
+        // Seeded where the harness used to H2D it: 0x4000 keys, matching the hc[] the
+        // oracle still models rem from. The loop guard below keeps its ge256_u64 half so
+        // `rem >= B` means here what it meant when rem was a real input.
+        rem[k] = (k == 0) ? 0x4000ull : 0ull;
     }
-
-    // The SASS kernel bails here too; keeping it makes the two agree on which threads
-    // write anything at all.
-    if ((rem[0] | rem[1] | rem[2] | rem[3]) == 0ull) return;
 
 #if STAGE_LOOP
 #define STAGE_JUMP 1
@@ -157,7 +161,7 @@ __global__ void TestKernel(
 #if STAGE_JUMP
     #define SINK_CONSUME(X, ODD) sink ^= (X)[0] ^ (X)[1] ^ (X)[2] ^ (X)[3] ^ (uint64_t)(ODD)
 #else
-    #define SINK_CONSUME(X, ODD) do { } while (0)
+    #define SINK_CONSUME(X, ODD) do { (void)(X); (void)(ODD); } while (0)
 #endif
     #define PTS_BRANCH(NEG)                                                            \
         do {                                                                           \
@@ -174,7 +178,7 @@ __global__ void TestKernel(
             sub_mod3(px3, sq, x1, px_i);                                               \
             sub_mod(s, x1, px3);                                                       \
             mul_mod(s, s, lam);                                                        \
-            (void)sub_mod_is_odd_prefix(s, y1);                                        \
+            const uint8_t odd = sub_mod_is_odd_prefix(s, y1);                          \
             mul_mod(wacc, wacc, px3);                                                  \
             for (int k = 0; k < 4; k++) {                                              \
                 lastpx3[k] = px3[k]; lastlam[k] = lam[k]; lastsqr[k] = sq[k];          \
@@ -272,7 +276,6 @@ __global__ void TestKernel(
         Px[idx]            = x1[k];
         Py[idx]            = y1[k];
         start_scalars[idx] = s1[k];
-        counts256[idx]     = rem[k];
 #else
 #if STAGE_WALK
         Px[idx]            = wacc[k];
@@ -290,10 +293,11 @@ __global__ void TestKernel(
 #endif
 #if STAGE_PTS
         start_scalars[idx] = lastlam[k];
-        counts256[idx]     = lastsqr[k];
+        // lastsqr's counts256 channel died with the parameter. sqr_mod itself survives --
+        // its sq feeds px3 through sub_mod3, and px3 is written as Py -- so the rung loses
+        // only the lam^2 diagnostic, not the code under test.
 #else
         start_scalars[idx] = s1[k];
-        counts256[idx]     = rem[k];
 #endif
 #endif
     }
@@ -306,7 +310,6 @@ __global__ void TestKernel(
         Px[idx]            = prod[k];
         Py[idx]            = y1[k];
         start_scalars[idx] = s1[k];
-        counts256[idx]     = rem[k];
     }
 #endif
 }

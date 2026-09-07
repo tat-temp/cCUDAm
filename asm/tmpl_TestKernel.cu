@@ -30,13 +30,19 @@ struct TFindResult {
     uint32_t found;
 };
 
-// The five __constant__ tables, verbatim from GpuCore.cu:63-67. They must be here:
-// they define .nv.constant3 and the host reaches them through cuModuleGetGlobal.
+// The six __constant__ tables, verbatim from GpuCore.cu:64-71 -- same order, same sizes,
+// same __align__(16). They must be here: they define .nv.constant3 and the host reaches
+// them through cuModuleGetGlobal. Declaring them identically to GpuCore.cu makes the
+// injected kernel's -rdc bank-3 layout byte-identical to the shipped kernel's, so
+// main.asm's constant offsets are the ones cuobjdump reports for both cubins. c_GyNeg is
+// the host-negated Gy table (604d47b): the minus branch reads it directly instead of
+// negating c_Gy on the device with NegMod256.
 __device__ __constant__ uint32_t c_target_words[5];
-__device__ __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
-__device__ __constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
-__device__ __constant__ uint64_t c_Jx[4];
-__device__ __constant__ uint64_t c_Jy[4];
+__device__ __constant__ __align__(16) uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
+__device__ __constant__ __align__(16) uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
+__device__ __constant__ __align__(16) uint64_t c_GyNeg[(MAX_BATCH_SIZE/2) * 4];
+__device__ __constant__ __align__(16) uint64_t c_Jx[4];
+__device__ __constant__ __align__(16) uint64_t c_Jy[4];
 
 extern "C" __launch_bounds__(THREADS_PER_BLOCK, BLOCKS_PER_SM)
 __global__ void TestKernel(
@@ -53,7 +59,7 @@ __global__ void TestKernel(
 	const uint64_t t = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
 	if (t >= threadsTotal) return;
 	const uint64_t v = t + batch_size + batches_per_launch
-	                 + c_Gx[0] + c_Gy[0] + c_Jx[0] + c_Jy[0] + c_target_words[2];
+	                 + c_Gx[0] + c_Gy[0] + c_GyNeg[0] + c_Jx[0] + c_Jy[0] + c_target_words[2];
 
 	// Force the SAME 16 KB local frame the shipped kernel allocates, and it is not
 	// cosmetic. GpuCore's prologue is
