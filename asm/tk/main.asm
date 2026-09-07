@@ -36,9 +36,12 @@
 // CHANGED: counts256 was removed from the signature, so everything after start_scalars moved
 // DOWN one 8-byte slot from the layout this file was originally written against
 // (find_result 0x3a0 -> 0x398, threadsTotal 0x3a8 -> 0x3a0, batch_size 0x3b0 -> 0x3a8,
-// batches_per_launch 0x3b4 -> 0x3ac). Any body below still reading the old offsets loads
-// find_result where threadsTotal now sits. The committed asm/tk/*.cubin fixtures predate
-// this and are STALE until rebuilt through asm/tk/build.sh.
+// batches_per_launch 0x3b4 -> 0x3ac). The BODY was brought onto these offsets on branch f1m
+// (the four live loads: Thr, BpL and the two Half sites); before that only this comment had
+// been updated and every fixture cubin carried the old 8-param loads. TestKernel.cubin and
+// TestKernel_loop.cubin are rebuilt from the fixed source; the OTHER ten rung fixtures are
+// still the stale 8-param builds and variants.py, which regenerated them, is not in this
+// repo -- do not launch them through the 7-argument harness.
 //
 // Every idiom below is copied from what ptxas actually emits for THIS kernel rather
 // than invented: global access is `LDG.E.64 Rd, desc[UR][Raddr.64+off]` with the
@@ -354,7 +357,7 @@ KERNEL TestKernel(regcnt=128, \
     [B------:R-:W3:-:S01]    LDC.64 AddrX, c[0x0][0x380]
     [B------:R-:W3:-:S01]    LDC.64 AddrY, c[0x0][0x388]
     [B------:R-:W3:-:S01]    LDC.64 AddrS, c[0x0][0x390]
-    [B------:R-:W3:-:S02]    LDC.64 Thr,   c[0x0][0x3a8]
+    [B------:R-:W3:-:S02]    LDC.64 Thr,   c[0x0][0x3a0]
 
     [B0-----:R-:W-:-:S02]    IADD3 R1, PT, PT, R1, -0x4000, RZ
 
@@ -486,14 +489,14 @@ KERNEL TestKernel(regcnt=128, \
 // the rungs below this one, which cut this region entirely. One redundant constant load per
 // batch against 1023 points is not worth a third register.
 //@@LOOPTOP_BEGIN
-    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3b0]
+    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]
     [B-----5:R-:W-:-:S05]    IMAD BDone, RZ, RZ, RZ
 .label_batch_loop:
 // BpL is RELOADED every iteration rather than held across the batch, which is what lets it
 // live in overlay C where InvT will overwrite it. One LDC against a batch's ~76,000
 // instructions, and it is half of what moves the top of the allocation from R126 to R124 --
 // i.e. half of what buys the second resident block. See the register table.
-    [B------:R-:W5:-:S02]    LDC BpL, c[0x0][0x3b4]
+    [B------:R-:W5:-:S02]    LDC BpL, c[0x0][0x3ac]
 // ONE guard, where there used to be two. The `rem >= B` half is gone with rem itself -- see
 // the note in the prologue -- leaving the batch counter, which is warp-uniform by
 // construction because BpL is a kernel parameter. Every lane of the warp takes this branch
@@ -603,7 +606,7 @@ KERNEL TestKernel(regcnt=128, \
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x28]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x30]
     [B------:R-:W4:-:S01]    LDC.64 MulB6, c[0x3][0x38]
-    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3b0]
+    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]
     [B0---4-:R-:W-:-:S01]    NOP
 inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0)
 
@@ -1198,6 +1201,11 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W3:-:S01]    LDC.64 AddrX, c[0x0][0x380]
     [B------:R-:W3:-:S01]    LDC.64 AddrY, c[0x0][0x388]
     [B------:R-:W3:-:S01]    LDC.64 AddrS, c[0x0][0x390]
+// 0x398 is find_result now, not counts256 -- the slot counts256 vacated. AddrC is DEAD in
+// the production kernel: only the gated STORELAM region ever dereferences it, and that rung
+// cannot be regenerated without variants.py. The load stays so the instruction stream (and
+// the ladder's reconstruction arithmetic) is untouched; if STORELAM ever comes back it must
+// NOT store through this -- there is no per-thread output array behind find_result.
     [B------:R-:W3:-:S02]    LDC.64 AddrC, c[0x0][0x398]
     [B---3--:R-:W-:-:S01]    IMAD.WIDE.U32 AddrX, gID, 0x20, AddrX
     [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrY, gID, 0x20, AddrY
