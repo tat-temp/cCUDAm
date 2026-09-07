@@ -260,10 +260,31 @@ thermally clean (best-vs-median ratios agree within 1%). The occupancy control (
 stream at REG:255 → 1 block/SM) is 11.4% slower than the REG:128 build, so the register work
 still pays. **The lead has narrowed from the historical 11% (grid 170) because #6's fused-MAC
 gave the compiled side most of the arithmetic advantage the hand-scheduling used to hold** —
-the manual kernel still leads, but by single digits, and it still carries the now-dead
-`NegMod256` per-point work that the compiled side replaced with the `c_GyNeg` table. The other
-ten rung fixtures are still stale 8-param builds (`variants.py`, which regenerated them, is not
-in this repo) and must not be launched through the current harness.
+the manual kernel still leads, but by single digits. The other ten rung fixtures are still
+stale 8-param builds (`variants.py`, which regenerated them, is not in this repo) and must not
+be launched through the current harness.
+
+**2026-09-07 (f1m, port 2): ported the per-point `NegMod256` onto the host-negated `c_GyNeg`
+table, and it bought nothing measurable.** The minus branch and the tail now read
+`c_GyNeg[i] = P − c_Gy[i]` directly (bank offset 0x8040) instead of loading `c_Gy` and negating
+it on the device — 16 SASS instructions per point removed, ~65k per thread per launch, and the
+kernel dropped from 3,248 to 3,232 instructions. Adding `c_GyNeg` to `tmpl_TestKernel.cu` made
+the injected bank-3 layout byte-identical to `GpuCore.cu`'s (measured off the cubin: `c_Jx` 0x0,
+`c_Jy` 0x20, `c_Gy` 0x40, `c_GyNeg` 0x8040, `c_Gx` 0x4040), which also SWAPPED `c_Jx`/`c_Jy`
+versus the old five-table layout — the `-rdc` ordering shifts when the table set changes, so
+every offset was re-read off the cubin rather than predicted. Re-raced, both sides REG:128:
+
+| grid | A median | B median | B/A | manual lead | Δ vs before the port |
+|---|---:|---:|---:|---:|---:|
+| 43,520 | 7.34 ms | 6.88 ms | 0.937 | **6.0%** | +0.5 pt (noise) |
+| 174,080 | 25.11 ms | 23.46 ms | 0.933 | **6.9%** | ±0 |
+
+Still EXACT thread-for-thread on hardware. Side A was stable across the two suites (25.10→25.11,
+7.35→7.34 ms), so the B times are directly comparable and moved ~0.2–0.4% — inside run-to-run
+noise. **This is the memory-bound signature stated all over this file, confirmed once more: the
+issue side does not matter here.** Removing dead arithmetic is a maintenance win (the kernel no
+longer needs `NegMod256`, and the template now agrees with `GpuCore.cu` exactly), not a speed
+one.
 
 | stage | what | state |
 |---|---|---|
