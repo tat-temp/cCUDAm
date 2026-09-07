@@ -30,3 +30,7 @@ __pycache__/
 # A/B harness build output
 rcasm_test/abtest/abtest
 rcasm_test/abtest/ab_compiled.cubin
+
+# Full-pipeline build: generated concatenation of inc.asm + the renumbered hash FUNCTION
+asm/tk/inc_full.asm
+asm/tk/hd_hash_rn.cubin
