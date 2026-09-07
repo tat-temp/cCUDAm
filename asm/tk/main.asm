@@ -419,18 +419,17 @@ KERNEL TestKernel(regcnt=128, \
 // batch-loop constants. One read barrier for all twelve is right rather than one per group --
 // a barrier is a counter, the wait drains all twelve, and the twelve are one group by any
 // reading. ptxas puts twelve LDGs on one barrier in the stage-2d kernels.
-    [B--2---:R4:W0:-:S01]    LDG.E.64 PntX0, desc[uDesc][AddrX.64]
-    [B------:R4:W0:-:S01]    LDG.E.64 PntX2, desc[uDesc][AddrX.64+0x8]
-    [B------:R4:W0:-:S01]    LDG.E.64 PntX4, desc[uDesc][AddrX.64+0x10]
-    [B------:R4:W0:-:S01]    LDG.E.64 PntX6, desc[uDesc][AddrX.64+0x18]
-    [B------:R4:W1:-:S01]    LDG.E.64 PntY0, desc[uDesc][AddrY.64]
-    [B------:R4:W1:-:S01]    LDG.E.64 PntY2, desc[uDesc][AddrY.64+0x8]
-    [B------:R4:W1:-:S01]    LDG.E.64 PntY4, desc[uDesc][AddrY.64+0x10]
-    [B------:R4:W1:-:S01]    LDG.E.64 PntY6, desc[uDesc][AddrY.64+0x18]
-    [B------:R4:W2:-:S01]    LDG.E.64 Scal0, desc[uDesc][AddrS.64]
-    [B------:R4:W2:-:S01]    LDG.E.64 Scal2, desc[uDesc][AddrS.64+0x8]
-    [B------:R4:W2:-:S01]    LDG.E.64 Scal4, desc[uDesc][AddrS.64+0x10]
-    [B------:R4:W2:-:S01]    LDG.E.64 Scal6, desc[uDesc][AddrS.64+0x18]
+// 128-bit global loads: two per 256-bit value instead of four 64-bit ones. PntX/PntY/Scal
+// all sit on multiples of 4 (R8/R16/R24), so the .128 data-register-alignment rule holds, and
+// AddrX/Y/S are 32-aligned (gid*32 off a cuMemAlloc base), so [Addr] and [Addr+0x10] are both
+// 16-aligned. Same barriers as the .64 form: R4 protects the address pair (overlay A is reused),
+// W0/W1/W2 gate PntX/PntY/Scal data-ready. This is ptxas's own idiom -- LDG.E.128 desc[UR][R.64].
+    [B--2---:R4:W0:-:S01]    LDG.E.128 PntX0, desc[uDesc][AddrX.64]
+    [B------:R4:W0:-:S01]    LDG.E.128 PntX4, desc[uDesc][AddrX.64+0x10]
+    [B------:R4:W1:-:S01]    LDG.E.128 PntY0, desc[uDesc][AddrY.64]
+    [B------:R4:W1:-:S01]    LDG.E.128 PntY4, desc[uDesc][AddrY.64+0x10]
+    [B------:R4:W2:-:S01]    LDG.E.128 Scal0, desc[uDesc][AddrS.64]
+    [B------:R4:W2:-:S01]    LDG.E.128 Scal4, desc[uDesc][AddrS.64+0x10]
 // The drain, and it has to live HERE rather than at each of the places that clobber overlay A.
 // Those differ per variant -- the write-back for the four rungs with no body, the ladder's
 // first Rinv write for the six with one -- and a rule enforced in six places is a rule with
@@ -1228,10 +1227,11 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], Prod6
 //@@STOREPROD_END
 //@@STOREPNTX_BEGIN
-    [B0-----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64], PntX0
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x8], PntX2
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x10], PntX4
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrX.64+0x18], PntX6
+// 128-bit stores: two per value. PntX is R8 (multiple of 4) and AddrX is 32-aligned, so the
+// .128 rule holds. No read barrier: the kernel EXITs after the write-back, so PntX is never
+// rewritten (no WAR). B0 waits PntX's data-ready as before.
+    [B0-----:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrX.64], PntX0
+    [B------:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrX.64+0x10], PntX4
 //@@STOREPNTX_END
 // Stage 2a's write-back: Px = acc (the whole suffix product) and Py = subp[half-1] read
 // back out of the frame. Py is deliberately NOT acc -- it is the value stored BEFORE the
@@ -1322,10 +1322,9 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 //  [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], MulB6
 //@@STOREWALK_END
 //@@STOREPNTY_BEGIN
-    [B-1----:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64], PntY0
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x8], PntY2
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x10], PntY4
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrY.64+0x18], PntY6
+// PntY is R16 (multiple of 4); AddrY 32-aligned. B1 waits PntY's data-ready.
+    [B-1----:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrY.64], PntY0
+    [B------:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrY.64+0x10], PntY4
 //@@STOREPNTY_END
 // Scal, which is an identity copy on every rung below `jump` and the real advanced state on
 // `jump` and `loop` -- the same four stores either way, because `s1 += B` happens in
@@ -1339,10 +1338,10 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 // the harness proves, taken deliberately: Px and Py after the batch completes are what carry
 // the walk, the jump and the loop, and rem was only ever an identity copy plus a subtract.
 //@@STOREID_BEGIN
-    [B--2---:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64], Scal0
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x8], Scal2
-    [B------:R-:W-:-:S01]    STG.E.64 desc[uDesc][AddrS.64+0x10], Scal4
-    [B------:R-:W-:-:S05]    STG.E.64 desc[uDesc][AddrS.64+0x18], Scal6
+// Scal is R24 (multiple of 4); AddrS 32-aligned. B2 waits Scal's data-ready; S05 on the last
+// store is the kernel's exit stall, kept on the final .128.
+    [B--2---:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrS.64], Scal0
+    [B------:R-:W-:-:S05]    STG.E.128 desc[uDesc][AddrS.64+0x10], Scal4
 //@@STOREID_END
 // The tail point's two intermediates, so one launch says WHERE the tail diverges rather
 // than only that it does:

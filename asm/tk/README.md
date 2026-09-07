@@ -286,6 +286,24 @@ issue side does not matter here.** Removing dead arithmetic is a maintenance win
 longer needs `NegMod256`, and the template now agrees with `GpuCore.cu` exactly), not a speed
 one.
 
+**2026-09-07 (f1m, port 3): widened the global I/O to 128-bit (`LDG.E.64`→`LDG.E.128`,
+`STG.E.64`→`STG.E.128`); the high-volume `LDC.64` constant reads CANNOT be widened.** Register-
+indexed constant-bank loads are 64-bit max in the sm_120 ISA — the compiled kernel, even after
+its own #5 "widen the hot-path memory accesses to 128 bits", still emits `LDC.64` for exactly the
+`c[0x3][R+…]` table reads (only static warp-uniform reads become `LDCU.128`, into *uniform*
+registers), and the encoder repository has no `LDC.128`. The `subp[]` local frame — the dominant
+memory traffic — was already `STL.128`/`LDL.128`. So the only widenable ops were the prologue
+loads (x1/y1/s1) and the write-back stores (Px/Py/start_scalars): 12 `LDG.E.64`→6 `LDG.E.128` and
+12 `STG.E.64`→6 `STG.E.128`. Data registers `PntX`/`PntY`/`Scal` (R8/R16/R24) are 4-aligned and
+the addresses 32-aligned, so the .128 rule holds; the assembler adds 4 NOP padding instructions
+(3,232→3,224 total, the only opcode delta besides the LDG/STG swap). Verified EXACT on the RTX
+5090 at grids 256 and 174080 (no alignment fault at launch), and the speed is **bit-for-bit the
+same** as before the widening — B/A 0.933 (174080) / 0.937 (43520), B medians 23.44 / 6.88 ms
+unchanged. Expected: the global I/O runs once per launch, so trimming 12 instructions out of
+~300k/thread is nothing. A correctness-preserving idiom match with the compiled kernel, not a
+speed change. There is no `.64` memory op left in the manual kernel that both matters and can be
+widened.
+
 | stage | what | state |
 |---|---|---|
 | 1 | prologue, parameter loads, gid, bounds bail, 64-bit global I/O, 16 KB frame | **runs on hardware** — 64 instructions |
