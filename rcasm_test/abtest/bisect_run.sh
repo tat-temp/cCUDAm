@@ -1,4 +1,9 @@
 #!/bin/bash
+# STALE: the harness moved to the 7-parameter TestKernel ABI (counts256 dropped), and every
+# committed rung cubin below `loop` is still 8-param -- launching one through the current
+# abtest shifts every scalar argument one slot. Regenerating the rungs needs variants.py,
+# which is not in this repo. Do not run this until the ladder is rebuilt.
+#
 # Run the four-variant ladder and say which construct faults.
 #
 #   ./bisect_run.sh

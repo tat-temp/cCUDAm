@@ -302,6 +302,25 @@ static int upload_const(CUmodule m, const char* sym, const void* src, size_t n)
 	return 0;
 }
 
+// Like upload_const, but a module that does not declare the symbol is a NOTE, not a failure.
+// Exists for c_GyNeg: GpuCore.cu reads the host-negated table (commit 604d47b) so a module
+// built from it must have it filled -- all zeros makes every minus-branch point wrong with no
+// diagnostic -- while the injection template (asm/tmpl_TestKernel.cu) deliberately keeps the
+// five-table layout main.asm's bank-3 offsets are written against, so the hand-written side
+// has no such symbol and negates c_Gy on the device. Verified equivalent: device neg_mod
+// (Math.cuh:48) and host neg_mod_p_host (GpuPuzzle.cpp:66) are both a plain P - y borrow
+// chain, so the two spellings are bit-identical for the canonical inputs this harness feeds.
+static int upload_const_optional(CUmodule m, const char* sym, const void* src, size_t n)
+{
+	CUdeviceptr d = 0; size_t sz = 0;
+	if (cuModuleGetGlobal(&d, &sz, m, sym) != CUDA_SUCCESS) {
+		printf("       %s: not declared by this module -- skipped (expected for the"
+		       " hand-written side)\n", sym);
+		return 0;
+	}
+	return upload_const(m, sym, src, n);
+}
+
 static void dump256(const char* tag, const uint64_t v[4])
 {
 	// %-6s, not %-5s: "delta" is exactly five characters, so the narrower field left it the
@@ -696,12 +715,32 @@ int main(int argc, char** argv)
 		for (size_t i = 0; i < nlimb; i += 4) canonP(&hx[i]);
 	}
 
+	// The host-negated table, computed from the (post-canonP) gy exactly as GpuPuzzle.cpp's
+	// neg_mod_p_host does: a plain 256-bit P - y with borrow, no reduction. Uploaded via
+	// upload_const_optional -- consumed by a GpuCore.cu-built side, absent from the template.
+	std::vector<uint64_t> gyneg(gy.size());
+	for (size_t i = 0; i < gy.size(); i += 4) {
+		uint64_t borrow = 0ull;
+		for (int k = 0; k < 4; k++) {
+			const uint64_t d = P[k] - gy[i + k];
+			const uint64_t b = (uint64_t)((P[k] < gy[i + k]) | (d < borrow));
+			gyneg[i + k] = d - borrow;
+			borrow = b;
+		}
+	}
+
 	// Hoisted out of the per-module loop so both argument blocks are alive at once: the timing
 	// loop alternates between them, and each holds pointers into its own module's allocations.
 	// thrTotal/batch/bpl are shared by both sides by definition.
 	unsigned long long thrTotal = threads;
 	unsigned batch = BATCH, bpl = BPL;
-	void* args[2][8];
+	// SEVEN arguments, matching the 7-parameter TestKernel signature that dropped counts256
+	// (GpuCore.cu at 61f0e6c). The driver reads exactly as many entries as the kernel declares
+	// parameters, so an 8-entry block against a 7-param kernel silently shifts every scalar one
+	// slot -- batch_size receives the thread count and the guard returns without writing. The
+	// committed 8-param rung cubins (TestKernel_id .. TestKernel_pts, ab_compiled_* rebuilt
+	// before this change) are retired until regenerated; only 7-param cubins run here now.
+	void* args[2][7];
 
 	for (int m = 0; m < 2; m++) {
 		printf("---- %s : %s\n", M[m].name, paths[m]);
@@ -727,6 +766,7 @@ int main(int argc, char** argv)
 
 		if (upload_const(M[m].mod, "c_Gx", gx.data(), gx.size() * 8)) return 1;
 		if (upload_const(M[m].mod, "c_Gy", gy.data(), gy.size() * 8)) return 1;
+		if (upload_const_optional(M[m].mod, "c_GyNeg", gyneg.data(), gyneg.size() * 8)) return 1;
 		if (upload_const(M[m].mod, "c_Jx", jx, sizeof(jx))) return 1;
 		if (upload_const(M[m].mod, "c_Jy", jy, sizeof(jy))) return 1;
 		if (upload_const(M[m].mod, "c_target_words", tw, sizeof(tw))) return 1;
@@ -739,8 +779,8 @@ int main(int argc, char** argv)
 		CK(cuMemsetD8(M[m].fr, 0, 128), "memset fr");
 
 		args[m][0] = &M[m].px; args[m][1] = &M[m].py; args[m][2] = &M[m].sc;
-		args[m][3] = &M[m].ct; args[m][4] = &M[m].fr;
-		args[m][5] = &thrTotal; args[m][6] = &batch; args[m][7] = &bpl;
+		args[m][3] = &M[m].fr;
+		args[m][4] = &thrTotal; args[m][5] = &batch; args[m][6] = &bpl;
 		printf("\n");
 	}
 
@@ -771,7 +811,8 @@ int main(int argc, char** argv)
 			CK(cuMemcpyHtoD(M[m].px, hx.data(), bytes), "H2D px");
 			CK(cuMemcpyHtoD(M[m].py, hy.data(), bytes), "H2D py");
 			CK(cuMemcpyHtoD(M[m].sc, hs.data(), bytes), "H2D sc");
-			CK(cuMemcpyHtoD(M[m].ct, hc.data(), bytes), "H2D ct");
+			// No ct upload: no 7-param kernel takes the buffer. rem is seeded in-kernel at
+			// 0x4000 (ab_kernel.cu), the same value hc[] carries for the oracle's model.
 			CK(cuCtxSynchronize(), "sync before");
 			cuEventRecord(e0, 0);
 			CK(cuLaunchKernel(M[m].fn, grid, 1, 1, block, 1, 1, 0, 0, args[m], nullptr),
