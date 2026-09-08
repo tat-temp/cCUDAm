@@ -331,7 +331,7 @@ KERNEL TestKernel(regcnt=128, \
     Lam=R72, Sqr=R80, PxN=R88, \
     Tmp=R96, SqrT=R96, Pt3T=R96, COfs=R122, BpL=R123, \
     Acc=R128, \
-    uDesc=UR4, uCallI=UR8, uInvT=UR10, uCallH=UR12, uCallP=UR14 )
+    uDesc=UR4, uHashSel=UR6, uCallI=UR8, uInvT=UR10, uCallH=UR12, uCallP=UR14 )
 {
 //---- frame ------------------------------------------------------------------------
 // The driver hands the thread's local-memory base in c[0x0][0x37c]; the kernel carves
@@ -526,7 +526,14 @@ KERNEL TestKernel(regcnt=128, \
 // yet), so R48..R106 is free. This is the FIRST reader of the prologue's PntX(bar0)/PntY(bar1)
 // loads on iteration 1 -> drain [B01----]; on later iterations those barriers are already empty
 // (the jump updates PntX/PntY via register writes, not loads), so the wait is a no-op. (3a: unused.)
-    [B01----:R-:W-:-:S02]    LOP3.LUT R52, PntY0, 0x1, RZ, 0xc0, !PT
+    // S05 (was S02, the ROOT BUG): LOP3 producer latency is 4 cycles (RCAsm rule 2), and this LOP3 is
+    // IMMEDIATELY followed by an IADD3 that reads R52. At S02 that IADD3 read a STALE R52 (pre-LOP3
+    // leftover), so prefix = garbage+2 instead of (y&1)+2 -> wrong SHA input -> wrong hw2 -> the filter
+    // never matched -> found=0 on a planted target (verified: S05 fixes it, found=1 scalar=S[0]). The
+    // plus/minus/tail sites compute the prefix via `LOP3 TmpA [S05]` with ~9 instrs before the IADD3
+    // reads TmpA, so only the seed site (LOP3 then IADD3 back-to-back) was starved. hd_test never hit
+    // this -- it LOADS the prefix from memory; the LOP3+IADD3 prefix is unique to the walk marshalling.
+    [B01----:R-:W-:-:S04]    LOP3.LUT R52, PntY0, 0x1, RZ, 0xc0, !PT
     [B------:R-:W-:-:S02]    IADD3 R52, R52, 0x2, RZ
     [B------:R-:W-:-:S02]    IMAD R54, RZ, RZ, PntX0
     [B------:R-:W-:-:S02]    MOV  R55, PntX1
@@ -536,15 +543,34 @@ KERNEL TestKernel(regcnt=128, \
     [B------:R-:W-:-:S02]    MOV  R59, PntX5
     [B------:R-:W-:-:S02]    IMAD R60, RZ, RZ, PntX6
     [B------:R-:W-:-:S06]    MOV  R61, PntX7
-    [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_w2) //RCASM:CallPointH0
-call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH0
+    [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_33) //RCASM:CallPointH0
+call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH0
 // filter: pref = (hw2 == c_target_words[2]); VOTE.ANY across the warp (== GpuCore's __any_sync).
-// Cold branch is inert for now (target -> next instr); Stage-3b swaps it for the publish path.
-    [B------:R-:W5:-:S02]    LDC R62, c[0x3][0xc048]
-    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P2, PT, R52, R62, PT
-    [B------:R-:W-:Y:S13]    VOTE.ANY P3, P2
+// c_target_words is at bank-3 offset 0xc040 (six-table full layout, line 28), so word 2 is 0xc048.
+// A PURE-IMMEDIATE `LDC R62, c[0x3][0xc048]` does NOT work: the immediate constant-offset field is
+// signed and 0xc048 wraps to -0x3fb8, silently reading the wrong constant so the filter never fires
+// (found=0 on a planted target; verified on hardware). Load it register-indexed instead -- the same
+// `c[0x3][Rn+imm]` form the walk uses for c_Gy/c_GyNeg above 0x8000. R60/R62/R63 are dead here (the
+// hash body just clobbered R48..R106, leaving only hw2 in R52).
+    [B------:R-:W-:-:S06]    MOV R60, 0xc040
+    [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
+    [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P2, PT, R54, R62, PT
+    [B------:R-:W-:Y:S05] @!P2 BRA `(.hskip_s)
+// full_match (cold, only when the w2 filter fired ~2^-32): AND-chain all 5 hash160 words vs
+// c_target_words[0..4] -- GpuCore.cu's `pref && hash160_full_match`. words w0=R52 w1=R53 w2=R54(=P2)
+// w3=R55 w4=R56; tw[2],tw[3] already in R62,R63; R60 still 0xc040; R48-R50 are dead hash temps. Only a
+// TRUE 5-word match (2^-160) sets P3 -> preservation stays EXACT on a spurious w2, and publish+EXIT
+// below fire ONLY on a real find (== GpuCore's return-on-find; also fixes the publish-and-continue
+// hang: a matched lane STOPS instead of walking on). Single scoreboard B5 (just drained by the filter),
+// drained between the two LDCs.
+    [B------:R-:W5:-:S02]    LDC.64 R48, c[0x3][R60+0x0]
+    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R52, R48, P2
+    [B------:R-:W5:-:S02]    LDC    R50, c[0x3][R60+0x10]
+    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R53, R49, P3
+    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
+    [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_s)
-// seed found: hit = s1 = Scal -> R64..R71, then publish (guarded by P2 inside getPublish).
+// seed found: hit = s1 = Scal -> R64..R71, then publish (guarded by P3 = full match inside getPublish).
     [B------:R-:W-:-:S02]    IMAD R64, RZ, RZ, Scal0
     [B------:R-:W-:-:S02]    MOV  R65, Scal1
     [B------:R-:W-:-:S02]    IMAD R66, RZ, RZ, Scal2
@@ -554,7 +580,11 @@ call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM
     [B------:R-:W-:-:S02]    IMAD R70, RZ, RZ, Scal6
     [B------:R-:W-:-:S04]    MOV  R71, Scal7
     [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP0
-call_func getPublish(Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP0
+call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP0
+// EXIT on a true find (P3), matching GpuCore's return. P3 is long-produced (survives getPublish, which
+// only writes P5/P6) so the guarded EXIT's 13-cycle predicate window is satisfied; no block sync exists
+// so a per-lane EXIT is safe (non-matching lanes branched to .hskip_s and walk on).
+    [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_s:
 //@@HASHS_END
 
@@ -969,11 +999,21 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S02]    MOV  R59, PxN5
     [B------:R-:W-:-:S02]    IMAD R60, RZ, RZ, PxN6
     [B------:R-:W-:-:S06]    MOV  R61, PxN7
-    [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_w2) //RCASM:CallPointH1
-call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH1
-    [B------:R-:W5:-:S02]    LDC R62, c[0x3][0xc048]
-    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P2, PT, R52, R62, PT
-    [B------:R-:W-:Y:S13]    VOTE.ANY P3, P2
+    [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_33) //RCASM:CallPointH1
+call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH1
+    [B------:R-:W-:-:S06]    MOV R60, 0xc040
+    [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
+    [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P2, PT, R54, R62, PT
+    [B------:R-:W-:Y:S05] @!P2 BRA `(.hskip_p)
+// full_match (cold): AND-chain all 5 hash160 words vs c_target_words[0..4] (see the seed site). w0=R52
+// w1=R53 w2=R54(=P2) w3=R55 w4=R56; tw[2],tw[3] in R62,R63; R60=0xc040; R48-R50 dead. P3 = true 5-word
+// match -> publish+EXIT only on a real find; spurious w2 falls through to .hskip_p and walks on.
+    [B------:R-:W5:-:S02]    LDC.64 R48, c[0x3][R60+0x0]
+    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R52, R48, P2
+    [B------:R-:W5:-:S02]    LDC    R50, c[0x3][R60+0x10]
+    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R53, R49, P3
+    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
+    [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_p)
 // + found: hit = s1 + (i+1), i = COfs>>5 -> R64..R71, then publish.
     [B------:R-:W-:-:S02]    SHF.R.U32 R79, COfs, 0x5, RZ
@@ -987,7 +1027,8 @@ call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM
     [B------:R-:W-:-:S04]    IADD3.X R70, P4, PT, Scal6, RZ, RZ, P4, !PT
     [B------:R-:W-:-:S04]    IADD3.X R71, P4, PT, Scal7, RZ, RZ, P4, !PT
     [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP1
-call_func getPublish(Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP1
+call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP1
+    [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_p:
 //@@HASHP_END
 // Acc *= px3 -- THE PTS RUNG'S INSTRUMENT, AND NOTHING ELSE'S. It is the product of every
@@ -1044,11 +1085,21 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S02]    MOV  R59, PxN5
     [B------:R-:W-:-:S02]    IMAD R60, RZ, RZ, PxN6
     [B------:R-:W-:-:S06]    MOV  R61, PxN7
-    [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_w2) //RCASM:CallPointH2
-call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH2
-    [B------:R-:W5:-:S02]    LDC R62, c[0x3][0xc048]
-    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P2, PT, R52, R62, PT
-    [B------:R-:W-:Y:S13]    VOTE.ANY P3, P2
+    [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_33) //RCASM:CallPointH2
+call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH2
+    [B------:R-:W-:-:S06]    MOV R60, 0xc040
+    [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
+    [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P2, PT, R54, R62, PT
+    [B------:R-:W-:Y:S05] @!P2 BRA `(.hskip_m)
+// full_match (cold): AND-chain all 5 hash160 words vs c_target_words[0..4] (see the seed site). w0=R52
+// w1=R53 w2=R54(=P2) w3=R55 w4=R56; tw[2],tw[3] in R62,R63; R60=0xc040; R48-R50 dead. P3 = true 5-word
+// match -> publish+EXIT only on a real find; spurious w2 falls through to .hskip_m and walks on.
+    [B------:R-:W5:-:S02]    LDC.64 R48, c[0x3][R60+0x0]
+    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R52, R48, P2
+    [B------:R-:W5:-:S02]    LDC    R50, c[0x3][R60+0x10]
+    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R53, R49, P3
+    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
+    [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_m)
 // - found: hit = s1 - (i+1), i = COfs>>5 -> R64..R71 (two's-complement subtract), then publish.
     [B------:R-:W-:-:S02]    SHF.R.U32 R79, COfs, 0x5, RZ
@@ -1062,7 +1113,8 @@ call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM
     [B------:R-:W-:-:S04]    IADD3.X R70, P4, PT, Scal6, 0xFFFFFFFF, RZ, P4, !PT
     [B------:R-:W-:-:S04]    IADD3.X R71, P4, PT, Scal7, 0xFFFFFFFF, RZ, P4, !PT
     [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP2
-call_func getPublish(Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP2
+call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP2
+    [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_m:
 //@@HASHM_END
 // Acc *= px3, the minus branch's half. Same gate as PACC, separate region only because the
@@ -1155,11 +1207,21 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S02]    MOV  R59, PxN5
     [B------:R-:W-:-:S02]    IMAD R60, RZ, RZ, PxN6
     [B------:R-:W-:-:S06]    MOV  R61, PxN7
-    [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_w2) //RCASM:CallPointH3
-call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH3
-    [B------:R-:W5:-:S02]    LDC R62, c[0x3][0xc048]
-    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P2, PT, R52, R62, PT
-    [B------:R-:W-:Y:S13]    VOTE.ANY P3, P2
+    [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_33) //RCASM:CallPointH3
+call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH3
+    [B------:R-:W-:-:S06]    MOV R60, 0xc040
+    [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
+    [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P2, PT, R54, R62, PT
+    [B------:R-:W-:Y:S05] @!P2 BRA `(.hskip_t)
+// full_match (cold): AND-chain all 5 hash160 words vs c_target_words[0..4] (see the seed site). w0=R52
+// w1=R53 w2=R54(=P2) w3=R55 w4=R56; tw[2],tw[3] in R62,R63; R60=0xc040; R48-R50 dead. P3 = true 5-word
+// match -> publish+EXIT only on a real find; spurious w2 falls through to .hskip_t and walks on.
+    [B------:R-:W5:-:S02]    LDC.64 R48, c[0x3][R60+0x0]
+    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R52, R48, P2
+    [B------:R-:W5:-:S02]    LDC    R50, c[0x3][R60+0x10]
+    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R53, R49, P3
+    [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
+    [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_t)
 // tail found: hit = s1 - (i+1) = s1 - half (COfs = (half-1)*0x20 at the tail) -> R64..R71, publish.
     [B------:R-:W-:-:S02]    SHF.R.U32 R79, COfs, 0x5, RZ
@@ -1173,7 +1235,8 @@ call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM
     [B------:R-:W-:-:S04]    IADD3.X R70, P4, PT, Scal6, 0xFFFFFFFF, RZ, P4, !PT
     [B------:R-:W-:-:S04]    IADD3.X R71, P4, PT, Scal7, 0xFFFFFFFF, RZ, P4, !PT
     [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP3
-call_func getPublish(Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP3
+call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP3
+    [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_t:
 //@@HASHT_END
 // Acc *= px3, the tail's. Once per batch rather than per point, so this one is not about speed

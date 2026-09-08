@@ -49,12 +49,18 @@ int main(int argc,char**argv){
     auto rnd=[&](){ r=r*6364136223846793005ull+1442695040888963407ull; return r; };
     for(size_t i=0;i<(size_t)N*4;i++){ X[i]=rnd(); Y[i]=rnd(); S[i]=rnd(); }
 
-    // planted target = seed hw2 of thread 0: prefix = 0x02 | (Y[0].v[0] & 1); x = X[0..3]
+    // planted target = seed hash160 of thread 0: prefix = 0x02 | (Y[0].v[0] & 1); x = X[0..3].
+    // The kernel's publish gate is a FULL 5-word match (GpuCore.cu:198 hash160_full_match), so a
+    // word-2-only plant never publishes -- even on the known-correct compiled kernel. Plant all 5.
     U256 x0; x0.v[0]=X[0]; x0.v[1]=X[1]; x0.v[2]=X[2]; x0.v[3]=X[3];
     uint8_t pf0 = 0x02u | (uint8_t)(Y[0] & 1ull);
-    uint32_t planted = getHash160_w2_from_limbs(pf0, x0);
-    uint32_t tw[5]={0,0,planted,0,0};
-    printf("planted: thread0 prefix=%02x  hw2(c_target_words[2])=%08x\n", pf0, planted);
+    H160 h0 = getHash160_33_from_limbs(pf0, x0);
+    uint32_t tw[5]={h0.w[0],h0.w[1],h0.w[2],h0.w[3],h0.w[4]};
+    uint32_t planted = h0.w[2];
+    printf("planted: thread0 prefix=%02x  hash160=%08x %08x %08x %08x %08x  (w2=%08x)\n",
+           pf0, h0.w[0],h0.w[1],h0.w[2],h0.w[3],h0.w[4], planted);
+    printf("DEBUG: X[0].lo32=%08x  X[3].hi32=%08x  Y[0].lo32=%08x  (prefix exp %d)\n",
+           (uint32_t)X[0], (uint32_t)(X[3]>>32), (uint32_t)Y[0], pf0);
     printf("expected scalar = %016llx %016llx %016llx %016llx\n",
            (unsigned long long)S[0],(unsigned long long)S[1],(unsigned long long)S[2],(unsigned long long)S[3]);
 
