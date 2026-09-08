@@ -331,7 +331,7 @@ KERNEL TestKernel(regcnt=128, \
     Lam=R72, Sqr=R80, PxN=R88, \
     Tmp=R96, SqrT=R96, Pt3T=R96, COfs=R122, BpL=R123, \
     Acc=R128, \
-    uDesc=UR4, uCallI=UR8, uInvT=UR10, uCallH=UR12 )
+    uDesc=UR4, uCallI=UR8, uInvT=UR10, uCallH=UR12, uCallP=UR14 )
 {
 //---- frame ------------------------------------------------------------------------
 // The driver hands the thread's local-memory base in c[0x0][0x37c]; the kernel carves
@@ -359,6 +359,8 @@ KERNEL TestKernel(regcnt=128, \
     [B------:R-:W-:-:S01]    UMOV uCallI1, 0xFFFFFFFF
 // High word of the getHash160_w2 call_func return pair (uCallH=UR12), same one-per-pair rule.
     [B------:R-:W-:-:S01]    UMOV uCallH1, 0xFFFFFFFF
+// ...and the getPublish return pair (uCallP=UR14).
+    [B------:R-:W-:-:S01]    UMOV uCallP1, 0xFFFFFFFF
     [B------:R-:W2:-:S01]    LDCU.64 uDesc, c[0x0][0x358]
     [B------:R-:W3:-:S01]    LDC.64 AddrX, c[0x0][0x380]
     [B------:R-:W3:-:S01]    LDC.64 AddrY, c[0x0][0x388]
@@ -536,6 +538,24 @@ KERNEL TestKernel(regcnt=128, \
     [B------:R-:W-:-:S06]    MOV  R61, PntX7
     [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_w2) //RCASM:CallPointH0
 call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH0
+// filter: pref = (hw2 == c_target_words[2]); VOTE.ANY across the warp (== GpuCore's __any_sync).
+// Cold branch is inert for now (target -> next instr); Stage-3b swaps it for the publish path.
+    [B------:R-:W5:-:S02]    LDC R62, c[0x3][0xc048]
+    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P2, PT, R52, R62, PT
+    [B------:R-:W-:Y:S13]    VOTE.ANY P3, P2
+    [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_s)
+// seed found: hit = s1 = Scal -> R64..R71, then publish (guarded by P2 inside getPublish).
+    [B------:R-:W-:-:S02]    IMAD R64, RZ, RZ, Scal0
+    [B------:R-:W-:-:S02]    MOV  R65, Scal1
+    [B------:R-:W-:-:S02]    IMAD R66, RZ, RZ, Scal2
+    [B------:R-:W-:-:S02]    MOV  R67, Scal3
+    [B------:R-:W-:-:S02]    IMAD R68, RZ, RZ, Scal4
+    [B------:R-:W-:-:S02]    MOV  R69, Scal5
+    [B------:R-:W-:-:S02]    IMAD R70, RZ, RZ, Scal6
+    [B------:R-:W-:-:S04]    MOV  R71, Scal7
+    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP0
+call_func getPublish(Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP0
+.hskip_s:
 //@@HASHS_END
 
 //====================================================================================
@@ -951,6 +971,24 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S06]    MOV  R61, PxN7
     [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_w2) //RCASM:CallPointH1
 call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH1
+    [B------:R-:W5:-:S02]    LDC R62, c[0x3][0xc048]
+    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P2, PT, R52, R62, PT
+    [B------:R-:W-:Y:S13]    VOTE.ANY P3, P2
+    [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_p)
+// + found: hit = s1 + (i+1), i = COfs>>5 -> R64..R71, then publish.
+    [B------:R-:W-:-:S02]    SHF.R.U32 R79, COfs, 0x5, RZ
+    [B------:R-:W-:-:S04]    IADD3 R79, R79, 0x1, RZ
+    [B------:R-:W-:-:S02]    IADD3 R64, P4, PT, Scal0, R79, RZ
+    [B------:R-:W-:-:S04]    IADD3.X R65, P4, PT, Scal1, RZ, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R66, P4, PT, Scal2, RZ, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R67, P4, PT, Scal3, RZ, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R68, P4, PT, Scal4, RZ, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R69, P4, PT, Scal5, RZ, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R70, P4, PT, Scal6, RZ, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R71, P4, PT, Scal7, RZ, RZ, P4, !PT
+    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP1
+call_func getPublish(Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP1
+.hskip_p:
 //@@HASHP_END
 // Acc *= px3 -- THE PTS RUNG'S INSTRUMENT, AND NOTHING ELSE'S. It is the product of every
 // candidate x-coordinate, which is what lets one 256-bit output stand for 1,023 points; the
@@ -1008,6 +1046,24 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S06]    MOV  R61, PxN7
     [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_w2) //RCASM:CallPointH2
 call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH2
+    [B------:R-:W5:-:S02]    LDC R62, c[0x3][0xc048]
+    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P2, PT, R52, R62, PT
+    [B------:R-:W-:Y:S13]    VOTE.ANY P3, P2
+    [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_m)
+// - found: hit = s1 - (i+1), i = COfs>>5 -> R64..R71 (two's-complement subtract), then publish.
+    [B------:R-:W-:-:S02]    SHF.R.U32 R79, COfs, 0x5, RZ
+    [B------:R-:W-:-:S04]    IADD3 R79, R79, 0x1, RZ
+    [B------:R-:W-:-:S04]    IADD3.X R64, P4, PT, Scal0, ~R79, RZ, !PT, PT
+    [B------:R-:W-:-:S04]    IADD3.X R65, P4, PT, Scal1, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R66, P4, PT, Scal2, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R67, P4, PT, Scal3, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R68, P4, PT, Scal4, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R69, P4, PT, Scal5, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R70, P4, PT, Scal6, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R71, P4, PT, Scal7, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP2
+call_func getPublish(Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP2
+.hskip_m:
 //@@HASHM_END
 // Acc *= px3, the minus branch's half. Same gate as PACC, separate region only because the
 // two are not contiguous.
@@ -1101,6 +1157,24 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S06]    MOV  R61, PxN7
     [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_w2) //RCASM:CallPointH3
 call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH3
+    [B------:R-:W5:-:S02]    LDC R62, c[0x3][0xc048]
+    [B-----5:R-:W-:-:S05]    ISETP.EQ.U32.AND P2, PT, R52, R62, PT
+    [B------:R-:W-:Y:S13]    VOTE.ANY P3, P2
+    [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_t)
+// tail found: hit = s1 - (i+1) = s1 - half (COfs = (half-1)*0x20 at the tail) -> R64..R71, publish.
+    [B------:R-:W-:-:S02]    SHF.R.U32 R79, COfs, 0x5, RZ
+    [B------:R-:W-:-:S04]    IADD3 R79, R79, 0x1, RZ
+    [B------:R-:W-:-:S04]    IADD3.X R64, P4, PT, Scal0, ~R79, RZ, !PT, PT
+    [B------:R-:W-:-:S04]    IADD3.X R65, P4, PT, Scal1, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R66, P4, PT, Scal2, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R67, P4, PT, Scal3, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R68, P4, PT, Scal4, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R69, P4, PT, Scal5, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R70, P4, PT, Scal6, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S04]    IADD3.X R71, P4, PT, Scal7, 0xFFFFFFFF, RZ, P4, !PT
+    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP3
+call_func getPublish(Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP3
+.hskip_t:
 //@@HASHT_END
 // Acc *= px3, the tail's. Once per batch rather than per point, so this one is not about speed
 // -- it is gated with the other two because the accumulator has to be all on or all off to mean
