@@ -241,6 +241,30 @@ regenerate the nine ladder rungs — `git log --diff-filter=D` is where it lives
 
 ## Status
 
+**2026-09-08 (branch f2m): the FULL pipeline (walk + lifted `getHash160_33` + `full_match` +
+publish/EXIT) now runs within ~1% of the newest compiler.** `main_full.asm` calls the lifted
+full hash at four sites; `build_full.sh` builds `TestKernel_hash.cubin` (REG:128, 2 blocks/SM).
+The hash body is lifted verbatim from the compiler's `getHash160_33`, so it inherits *that
+compiler's* schedule — which turned out to decide the whole speed story:
+
+| B (manual full) vs A (compiled full) | best B/A | verdict |
+|---|---:|---|
+| vs **CUDA 13.3** compiler | **1.011** | B 1.1% slower |
+| vs **CUDA 13.0** compiler | **0.918** | B **8.2% faster** |
+
+The hash is ~58% of wall clock and the two compilers schedule it very differently (13.3 emits
+plain `IADD` + `.reuse` for ~13% denser dual-issue; 13.0 uses `IADD3`) — identical instruction
+counts, a pure scheduling win. Lifting the hash from a **13.3** build (`hd_hash33_inc_133_param.asm`,
+the default) instead of a 13.0 build closed the gap from −9% to −1% against the 13.3 compiler.
+That default needs one extra additive teach — `./teach_iadd.sh` (plain 32-bit `IADD`, from the
+committed `GpuCore_133.cubin`) — alongside `./teach_publish_atomics.sh`. `HASH_PARAM=hd_hash33_inc_param.asm
+./build_full.sh` builds the 13.0-lifted hash instead (needs no `teach_iadd.sh`). Preservation
+EXACT 174,080/174,080 ×4, thermally clean; the placed hash body is bit-exact to 13.3's
+`getHash160_33`. The manual EC *walk* alone still leads both compilers (+6.5% vs 13.3, +2.5% vs
+13.0); the residual ~1.1% on the full pipeline is the manual integration cost (per-site marshal +
+`BRXU` call/return + full-hash-every-time, ×1024/batch). Full detail in the
+`asm-tk-full-pipeline-lift` memory note.
+
 **2026-09-07 (branch f1m): re-validated against HEAD after commits #4–#7.** The compiled
 kernel had moved on — `counts256` dropped from the signature (7 params now), the host-negated
 `c_GyNeg` table added (#4), 128-bit loads (#5), split-column fused-MAC field arithmetic (#6,

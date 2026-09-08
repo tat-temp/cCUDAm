@@ -12,9 +12,15 @@
 # README/memory. inc_full.asm (inc.asm + the hash FUNCTION + getPublish) is generated here and
 # gitignored -- RCAsm's build.sh concatenates exactly one INC file.
 #
-# PREREQUISITE for the publish_found path (hd_publish_inc.asm): run ./teach_publish_atomics.sh ONCE
-# first -- the default RCAsm sm_120 InsAsmRepos cannot encode ATOMG.E.CAS.STRONG.SYS or the
-# MEMBAR/ERRBAR/CGAERRBAR fence, and that script teaches them (additively; Gate-1 stays byte-identical).
+# PREREQUISITES (run ONCE each; both additive, Gate-1 stays byte-identical):
+#   ./teach_publish_atomics.sh  -- ATOMG.E.CAS.STRONG.SYS + MEMBAR/ERRBAR/CGAERRBAR (the publish path).
+#   ./teach_iadd.sh             -- plain 32-bit IADD (+ .reuse + source-neg), which the DEFAULT hash body
+#                                  (the CUDA-13.3 lift) uses; the stock repo only knows IADD.64.
+#
+# HASH BODY: builds the CUDA-13.3-lifted getHash160_33 by default (hd_hash33_inc_133_param.asm) -- it
+# schedules with plain IADD + .reuse and runs ~1.1% off the 13.3 compiler / +8% over 13.0, vs the older
+# 13.0 lift which trailed the 13.3 compiler by ~9%. Set HASH_PARAM=hd_hash33_inc_param.asm to build the
+# 13.0 lift instead (needs no teach_iadd.sh). See the asm-tk-full-pipeline-lift note.
 set -e
 cd "$(dirname "$0")"
 # 1. (re)generate the PARAMETRIZED hash FUNCTIONs (Ri/Rio/Rt/URt slots) from the lifted bodies, if
@@ -28,7 +34,10 @@ fi
 # 2. concatenate the field routines + the FULL-hash FUNCTION + the publish_found FUNCTION into one INC.
 # main_full.asm calls getHash160_33 (full 5-word) so full_match can gate publish+EXIT; getHash160_w2
 # (hd_hash_inc_param.asm) stays parametrized on disk as the word-2-only sibling but is not linked here.
-cat inc.asm hd_hash33_inc_param.asm hd_publish_inc.asm > inc_full.asm
+# HASH_PARAM selects the hash body: default = the CUDA-13.3 lift; override to the 13.0 lift for rollback.
+HASH_PARAM="${HASH_PARAM:-hd_hash33_inc_133_param.asm}"
+echo "build_full: hash body = $HASH_PARAM"
+cat inc.asm "$HASH_PARAM" hd_publish_inc.asm > inc_full.asm
 # 3. build (CRLF-safe: run a CR-stripped copy so `dirname "$0"` still resolves).
 sed 's/\r$//' build.sh > _build_lf.sh
 MAIN="$(pwd)/main_full.asm" INC="$(pwd)/inc_full.asm" OUTNAME=TestKernel_hash.cubin bash _build_lf.sh
