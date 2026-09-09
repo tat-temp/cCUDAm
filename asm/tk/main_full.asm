@@ -86,6 +86,24 @@ KERNEL TestKernel(regcnt=128, \
 call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH0
     [B------:R-:W-:-:S06]    MOV R60, 0xc040
     [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
+// HANG FIX (BSSY/BSYNC reconvergence -- mirrors nvcc): the stock per-lane `@!P2 BRA .hskip` peels the
+// non-matching lanes so the matching lane reaches getPublish ALONE (getPublish's ATOMG.CAS is designed
+// for single-lane entry, inc_full.asm:2929 -- so this peel is REQUIRED for detection to work). BUT on a
+// spurious 32-bit w2 hit (rate ~points/2^32) that peel diverged the warp and the un-reconverged rejoin
+// at .hskip deadlocked the next batch's InvMod256 (BRA.CONV ~URZ, "requires all active threads"). The
+// kernel had NO reconvergence barriers. FIX: wrap the whole filter divergence in a convergence barrier
+// exactly like nvcc's own if(__any_sync) publish block (GpuCore: `BSSY B7,tgt` / `BSYNC B7`): `BSSY B0,
+// .hsrc` before ISETP P2 sets the barrier; @!P2 and @!P3 both branch to .hskip (the BSYNC); `BSYNC B0`
+// at .hskip reconverges every non-exited lane before the walk continues -> InvMod256 sees a converged
+// warp. The matching lane (real full match) runs getPublish then @P3 EXITs (removed from B0) before
+// BSYNC, so it never rejoins. Two REJECTED alternatives (both GPU-verified to break plant_runner,
+// claimed=0): (a) VOTE.ANY + uniform @!P5 gate, (b) delete @!P2 and always run the chain -- BOTH let all
+// 32 lanes reach @!P3 so it becomes a live divergence on a real match, and thread0 runs the CAS
+// mid-divergence with nothing to reconverge. Keeping @!P2 (single-lane getPublish) + BSSY/BSYNC is the
+// only structure that fixes the hang AND preserves detection. BUILD PREREQ: teach_bssy.sh (BSSY/BSYNC
+// were new opcodes; B# is a native RCAsm operand). Prereqs: teach_publish_atomics.sh + teach_iadd.sh +
+// teach_bssy.sh. (teach_vote.sh is now moot.)
+    [B------:R-:W-:-:S04]    BSSY B0, `(.hsrc_s)
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P2, PT, R54, R62, PT
     [B------:R-:W-:Y:S05] @!P2 BRA `(.hskip_s)
     [B------:R-:W5:-:S02]    LDC.64 R48, c[0x3][R60+0x0]
@@ -107,6 +125,8 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
 call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP0
     [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_s:
+    [B------:R-:W-:-:S05]    BSYNC B0
+.hsrc_s:
 //@@HASHS_END
 
 //@@CALL_BEGIN
@@ -253,6 +273,7 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH1
     [B------:R-:W-:-:S06]    MOV R60, 0xc040
     [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
+    [B------:R-:W-:-:S04]    BSSY B0, `(.hsrc_p)
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P2, PT, R54, R62, PT
     [B------:R-:W-:Y:S05] @!P2 BRA `(.hskip_p)
     [B------:R-:W5:-:S02]    LDC.64 R48, c[0x3][R60+0x0]
@@ -276,6 +297,8 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
 call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP1
     [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_p:
+    [B------:R-:W-:-:S05]    BSYNC B0
+.hsrc_p:
 //@@HASHP_END
 //@@PACC_BEGIN
 //@@PACC_END
@@ -316,6 +339,7 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH2
     [B------:R-:W-:-:S06]    MOV R60, 0xc040
     [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
+    [B------:R-:W-:-:S04]    BSSY B0, `(.hsrc_m)
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P2, PT, R54, R62, PT
     [B------:R-:W-:Y:S05] @!P2 BRA `(.hskip_m)
     [B------:R-:W5:-:S02]    LDC.64 R48, c[0x3][R60+0x0]
@@ -339,6 +363,8 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
 call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP2
     [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_m:
+    [B------:R-:W-:-:S05]    BSYNC B0
+.hsrc_m:
 //@@HASHM_END
 //@@PACCM_BEGIN
 //@@PACCM_END
@@ -409,6 +435,7 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH3
     [B------:R-:W-:-:S06]    MOV R60, 0xc040
     [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
+    [B------:R-:W-:-:S04]    BSSY B0, `(.hsrc_t)
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P2, PT, R54, R62, PT
     [B------:R-:W-:Y:S05] @!P2 BRA `(.hskip_t)
     [B------:R-:W5:-:S02]    LDC.64 R48, c[0x3][R60+0x0]
@@ -432,6 +459,8 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
 call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP3
     [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_t:
+    [B------:R-:W-:-:S05]    BSYNC B0
+.hsrc_t:
 //@@HASHT_END
 //@@PACCT_BEGIN
 //@@PACCT_END

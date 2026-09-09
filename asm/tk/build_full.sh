@@ -12,10 +12,14 @@
 # README/memory. inc_full.asm (inc.asm + the hash FUNCTION + getPublish) is generated here and
 # gitignored -- RCAsm's build.sh concatenates exactly one INC file.
 #
-# PREREQUISITES (run ONCE each; both additive, Gate-1 stays byte-identical):
+# PREREQUISITES (run ONCE each; all additive, Gate-1 stays byte-identical):
 #   ./teach_publish_atomics.sh  -- ATOMG.E.CAS.STRONG.SYS + MEMBAR/ERRBAR/CGAERRBAR (the publish path).
 #   ./teach_iadd.sh             -- plain 32-bit IADD (+ .reuse + source-neg), which the DEFAULT hash body
 #                                  (the CUDA-13.3 lift) uses; the stock repo only knows IADD.64.
+#   ./teach_bssy.sh             -- BSSY/BSYNC convergence barriers (the slices>=2 HANG fix): each hash
+#                                  filter's divergent @!P2/@!P3 skip is wrapped in BSSY B0 .. BSYNC B0 so
+#                                  a spurious-w2 divergence RECONVERGES before the next InvMod256 instead
+#                                  of deadlocking. New opcodes (0 in the stock tree). See the lift note.
 #
 # HASH BODY: builds the CUDA-13.3-lifted getHash160_33 by default (hd_hash33_inc_133_param.asm) -- it
 # schedules with plain IADD + .reuse and runs ~1.1% off the 13.3 compiler / +8% over 13.0, vs the older
