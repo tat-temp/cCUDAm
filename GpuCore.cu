@@ -116,18 +116,24 @@ __device__ __forceinline__ void publish_found_2(
     uint64_t* __restrict__ start_scalars,
 	uint32_t batches_done,
 	uint32_t batch_size,
-	uint32_t extra,
+	int32_t extra,
 	uint64_t idx)
 {
 	if (atomicCAS_system(&find_result->claimed, 0u, 1u) != 0u) return;
-	
+
 	__align__(16) uint64_t scalar[4];
-	
+
     LOAD_VAL_256(scalar, start_scalars, idx);
 
-    uint64_t add = uint64_t(batches_done * batch_size + extra);
-	
-	add256_u64(scalar, add)
+	// The offset is SIGNED and the total can be negative: the minus half of a batch reports keys
+	// below that batch's base scalar, and in the first batch (batches_done == 0) that is below
+	// start_scalars itself, i.e. a 256-bit BORROW. Computed in int64: a uint32 total wraps to
+	// ~2^32 and add256_u64 would then add it instead of subtracting. int64 also keeps
+	// batches_done * batch_size from overflowing 32 bits on a long launch.
+	const int64_t delta = (int64_t)batches_done * (int64_t)batch_size + (int64_t)extra;
+
+	if (delta >= 0) add256_u64(scalar, (uint64_t)delta);
+	else            sub256_u64(scalar, (uint64_t)-delta);
 
 	Copy_u64_x4(find_result->scalar, scalar);
 	__threadfence_system();								// scalar lands before the flag can
@@ -347,7 +353,7 @@ __global__ void TestKernel(
 			if (__any_sync(mask, pref)) {
 				bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 				if (full) {
-					publish_found_2(find_result, start_scalars, batches_done, B, -half, idx);
+					publish_found_2(find_result, start_scalars, batches_done, B, -(int32_t)half, idx);
 					//uint64_t hit[4];
 					//Copy_u64_x4(hit, s1);
 					//sub256_u64(hit, (uint64_t)half);
@@ -398,7 +404,7 @@ __global__ void TestKernel(
 
     __align__(16) uint64_t s1[4];
     LOAD_VAL_256(s1, start_scalars, idx);
-    add256_u64(s1, (uint64_t)(B * batches_done));
+    add256_u64(s1, (uint64_t)B * (uint64_t)batches_done);   // widen first: B*batches_done wraps at 2^32
 
 	SAVE_VAL_256(Px, x1, idx);
 	SAVE_VAL_256(Py, y1, idx);
