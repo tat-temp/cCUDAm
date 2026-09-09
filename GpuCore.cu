@@ -231,7 +231,6 @@ __global__ void TestKernel(
             mul_mod(acc, acc, tmp);
 			#pragma unroll
 		    for(int j = 0; j < 4; j++) subp[i][j] = acc[j];
-			//SAVE_VAL_256(subp[i], acc, 0);
         }
 
 		__align__(16) uint64_t inverse[5];
@@ -306,10 +305,6 @@ __global__ void TestKernel(
 					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 					if (full) {
 						publish_found_2(find_result, start_scalars, batches_done, B, -(i + 1), idx);
-						//uint64_t hit[4];
-						//Copy_u64_x4(hit, s1);
-						//sub256_u64(hit, (uint64_t)i + 1ull);
-						//publish_found(find_result, hit);
 					}
 
 					if (__any_sync(mask, full)) { __syncwarp(mask); return; }
@@ -354,10 +349,6 @@ __global__ void TestKernel(
 				bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 				if (full) {
 					publish_found_2(find_result, start_scalars, batches_done, B, -(int32_t)half, idx);
-					//uint64_t hit[4];
-					//Copy_u64_x4(hit, s1);
-					//sub256_u64(hit, (uint64_t)half);
-					//publish_found(find_result, hit);
 				}
 
 				if (__any_sync(mask, full)) { __syncwarp(mask); return; }
@@ -389,6 +380,7 @@ __global__ void TestKernel(
 
 			#pragma unroll
 		    for(int i = 0; i < 4; i++) x1[i] = x3[i];
+			#pragma unroll
 		    for(int i = 0; i < 4; i++) y1[i] = y3[i];
         }
 
