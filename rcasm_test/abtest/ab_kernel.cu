@@ -43,10 +43,16 @@ struct TFindResult {
 };
 
 #include "../../Math.cuh"
-// ge256_u64 / add256_u64 / sub256_u64 -- the batch loop's guard and its bookkeeping, taken
-// from the real kernel's header rather than retyped, so `rem >= B` means here what it means
-// there.
+// add256_u64 / sub256_u64 -- the batch loop's bookkeeping, taken from the real kernel's header
+// rather than retyped.
 #include "../../GpuCore.cuh"
+
+// The `rem >= B` loop guard. It used to live in GpuCore.cuh, but the real kernel has no `rem`
+// any more (the host owns the batch budget), so this bisect counterpart is now its only user.
+__device__ __forceinline__ bool ge256_u64(const uint64_t a[4], uint64_t b) {
+    if (a[3] | a[2] | a[1]) return true;  // >= 2^64
+    return a[0] >= b;
+}
 
 __device__ __constant__ uint32_t c_target_words[5];
 __device__ __constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];

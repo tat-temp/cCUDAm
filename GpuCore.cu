@@ -111,6 +111,35 @@ __device__ __forceinline__ void publish_found(TFindResult* __restrict__ find_res
 	atomicExch_system(&find_result->found, 1u);
 }
 
+__device__ __forceinline__ void publish_found_2(
+    TFindResult* __restrict__ find_result,
+    uint64_t* __restrict__ start_scalars,
+	uint32_t batches_done,
+	uint32_t batch_size,
+	int32_t extra,
+	uint64_t idx)
+{
+	if (atomicCAS_system(&find_result->claimed, 0u, 1u) != 0u) return;
+
+	__align__(16) uint64_t scalar[4];
+
+    LOAD_VAL_256(scalar, start_scalars, idx);
+
+	// The offset is SIGNED and the total can be negative: the minus half of a batch reports keys
+	// below that batch's base scalar, and in the first batch (batches_done == 0) that is below
+	// start_scalars itself, i.e. a 256-bit BORROW. Computed in int64: a uint32 total wraps to
+	// ~2^32 and add256_u64 would then add it instead of subtracting. int64 also keeps
+	// batches_done * batch_size from overflowing 32 bits on a long launch.
+	const int64_t delta = (int64_t)batches_done * (int64_t)batch_size + (int64_t)extra;
+
+	if (delta >= 0) add256_u64(scalar, (uint64_t)delta);
+	else            sub256_u64(scalar, (uint64_t)-delta);
+
+	Copy_u64_x4(find_result->scalar, scalar);
+	__threadfence_system();								// scalar lands before the flag can
+	atomicExch_system(&find_result->found, 1u);
+}
+
 extern "C" __launch_bounds__(THREADS_PER_BLOCK, BLOCKS_PER_SM)
 __global__ void TestKernel(
 	uint64_t* __restrict__ Px,
@@ -134,28 +163,11 @@ __global__ void TestKernel(
     // and word 2 is the cheapest of the five to produce (see CUDAHash.cu).
     const uint32_t target_prefix = c_target_words[2];
 	
-	// The per-thread remaining-key counter (rem, and the counts256 array behind it) is gone. The
-	// HOST now owns the batch budget: every thread is given the SAME number of batches, and the
-	// final launch is shortened by passing a smaller batches_per_launch rather than by letting
-	// each thread notice it has run out (GpuPuzzle.cpp, PrepareHost/Execute). That is the
-	// precondition asm/tk/main.asm always assumed and could not enforce.
-	//
-	// What this buys, in order of importance:
-	//   * Every lane of a warp now runs exactly the same number of iterations BY CONSTRUCTION.
-	//     InvMod256 "requires all active threads in warp" (asm/mod_inv.asm:189), and the
-	//     straddling warp H4 patched -- one lane leaving the loop an iteration early while still
-	//     live for the write-back -- can no longer be built, at any range, not just a
-	//     power-of-two one.
-	//   * A 256-bit compare and a 256-bit subtract leave the batch loop.
-	//   * 32 bytes/thread of device memory, its pinned host mirror and its H2D copy are gone,
-	//     as are four loads at entry and four stores at exit.
-	__align__(16) uint64_t x1[4], y1[4], s1[4];
-	// GS: cache lane ????
+	__align__(16) uint64_t x1[4], y1[4];
 
 	const uint64_t idx = gid*4 + 0;
 	LOAD_VAL_256(x1, Px, idx);
 	LOAD_VAL_256(y1, Py, idx);
-	LOAD_VAL_256(s1, start_scalars, idx);
 
 	// A mask handed to a warp intrinsic must name exactly the lanes that reach it: CUDA requires
 	// every NON-EXITED thread named in a mask to run the same intrinsic with the same mask, and on
@@ -197,7 +209,7 @@ __global__ void TestKernel(
 		if (__any_sync(mask, pref)) {
 			bool full = pref && hash160_full_match(prefix, u256_of(x1), c_target_words);
 			if (full) {
-				publish_found(find_result, s1);
+                publish_found_2(find_result, start_scalars, batches_done, B, 0, idx);
 			}
 
 			if (__any_sync(mask, full)) { __syncwarp(mask); return; }
@@ -217,7 +229,8 @@ __global__ void TestKernel(
 			load4_const(gx_i, &c_Gx[(size_t)(i + 1) * 4]);
             sub_mod(tmp, gx_i, x1);
             mul_mod(acc, acc, tmp);
-			SAVE_VAL_256(subp[i], acc, 0);
+			#pragma unroll
+		    for(int j = 0; j < 4; j++) subp[i][j] = acc[j];
         }
 
 		__align__(16) uint64_t inverse[5];
@@ -257,10 +270,7 @@ __global__ void TestKernel(
 					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 					if (full) {
 						// Add in registers, not as a read-modify-write over PCIe into the mapped struct.
-						uint64_t hit[4];
-						Copy_u64_x4(hit, s1);
-						add256_u64(hit, (uint64_t)i + 1ull);
-						publish_found(find_result, hit);
+						publish_found_2(find_result, start_scalars, batches_done, B, i + 1, idx);
 					}
 
 					if (__any_sync(mask, full)) { __syncwarp(mask); return; }
@@ -269,9 +279,9 @@ __global__ void TestKernel(
 			}
 			
 			{
-				uint64_t px3[4], s[4], lam[4];
+				uint64_t px3[4], lam[4], s[4];
                 __align__(16) uint64_t px_i[4], py_i[4];
-				
+
 				// GS: Cache lane???
                 load4_const(px_i, &c_Gx[(size_t)i*4]);
                 load4_const(py_i, &c_GyNeg[(size_t)i*4]);
@@ -294,10 +304,7 @@ __global__ void TestKernel(
 				if (__any_sync(mask, pref)) {
 					bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 					if (full) {
-						uint64_t hit[4];
-						Copy_u64_x4(hit, s1);
-						sub256_u64(hit, (uint64_t)i + 1ull);
-						publish_found(find_result, hit);
+						publish_found_2(find_result, start_scalars, batches_done, B, -(i + 1), idx);
 					}
 
 					if (__any_sync(mask, full)) { __syncwarp(mask); return; }
@@ -341,10 +348,7 @@ __global__ void TestKernel(
 			if (__any_sync(mask, pref)) {
 				bool full = pref && hash160_full_match(prefix, u256_of(px3), c_target_words);
 				if (full) {
-					uint64_t hit[4];
-					Copy_u64_x4(hit, s1);
-					sub256_u64(hit, (uint64_t)half);
-					publish_found(find_result, hit);
+					publish_found_2(find_result, start_scalars, batches_done, B, -(int32_t)half, idx);
 				}
 
 				if (__any_sync(mask, full)) { __syncwarp(mask); return; }
@@ -359,28 +363,27 @@ __global__ void TestKernel(
         }
 		
 		{
-            uint64_t lam[4], s[4], x3[4], y3[4];
-            uint64_t Jy_minus_y1[4];
+            uint64_t lam[4], x3[4], y3[4];//, s[4]
+            //uint64_t Jy_minus_y1[4];
+			__align__(16) uint64_t Jx_local[4];
 			
-            sub_mod(Jy_minus_y1, c_Jy, y1);
+			sub_mod(lam, c_Jy, y1);//sub_mod(Jy_minus_y1, c_Jy, y1);
 
-            mul_mod(lam, Jy_minus_y1, inverse);
+            mul_mod(lam, lam, inverse);//mul_mod(lam, Jy_minus_y1, inverse);
             sqr_mod(x3, lam);
-            __align__(16) uint64_t Jx_local[4];
+            
 			load4_const(Jx_local, c_Jx);
             sub_mod3(x3, x3, x1, Jx_local);   // x3 = lam^2 - x1 - Jx (fused, one reduction)
 
-            sub_mod(s, x1, x3);
-            mul_mod(y3, s, lam);
+            sub_mod(x1, x1, x3);//sub_mod(s, x1, x3);
+            mul_mod(y3, x1, lam);//mul_mod(y3, s, lam);
             sub_mod(y3, y3, y1);
 
-            x1[0] = x3[0]; y1[0] = y3[0];
-            x1[1] = x3[1]; y1[1] = y3[1];
-            x1[2] = x3[2]; y1[2] = y3[2];
-            x1[3] = x3[3]; y1[3] = y3[3];
+			#pragma unroll
+		    for(int i = 0; i < 4; i++) x1[i] = x3[i];
+			#pragma unroll
+		    for(int i = 0; i < 4; i++) y1[i] = y3[i];
         }
-		
-		add256_u64(s1, (uint64_t)B);
 
 		batches_done++;
 	}
@@ -389,8 +392,13 @@ __global__ void TestKernel(
 	// The one escape for the sink: without it nvcc deletes the walk (see NO_HASH above). Outside the
 	// loop, and compared against a value the arithmetic cannot be shown not to produce, which is what
 	// makes it un-eliminable. It will not fire (2^-64/thread), and this build cannot report a key.
-	if (sink == 0xD1CEB0EDFACADE01ull) publish_found(find_result, s1);
+	if (sink == 0xD1CEB0EDFACADE01ull) publish_found_2(find_result, start_scalars, batches_done, B, 0, idx);
 #endif
+
+    __align__(16) uint64_t s1[4];
+    LOAD_VAL_256(s1, start_scalars, idx);
+    add256_u64(s1, (uint64_t)B * (uint64_t)batches_done);   // widen first: B*batches_done wraps at 2^32
+
 	SAVE_VAL_256(Px, x1, idx);
 	SAVE_VAL_256(Py, y1, idx);
 	SAVE_VAL_256(start_scalars, s1, idx);
