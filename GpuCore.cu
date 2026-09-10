@@ -279,9 +279,9 @@ __global__ void TestKernel(
 			}
 			
 			{
-				uint64_t px3[4], s[4], lam[4];
+				uint64_t px3[4], lam[4], s[4];
                 __align__(16) uint64_t px_i[4], py_i[4];
-				
+
 				// GS: Cache lane???
                 load4_const(px_i, &c_Gx[(size_t)i*4]);
                 load4_const(py_i, &c_GyNeg[(size_t)i*4]);
@@ -363,19 +363,20 @@ __global__ void TestKernel(
         }
 		
 		{
-            uint64_t lam[4], s[4], x3[4], y3[4];
-            uint64_t Jy_minus_y1[4];
+            uint64_t lam[4], x3[4], y3[4];//, s[4]
+            //uint64_t Jy_minus_y1[4];
+			__align__(16) uint64_t Jx_local[4];
 			
-            sub_mod(Jy_minus_y1, c_Jy, y1);
+			sub_mod(lam, c_Jy, y1);//sub_mod(Jy_minus_y1, c_Jy, y1);
 
-            mul_mod(lam, Jy_minus_y1, inverse);
+            mul_mod(lam, lam, inverse);//mul_mod(lam, Jy_minus_y1, inverse);
             sqr_mod(x3, lam);
-            __align__(16) uint64_t Jx_local[4];
+            
 			load4_const(Jx_local, c_Jx);
             sub_mod3(x3, x3, x1, Jx_local);   // x3 = lam^2 - x1 - Jx (fused, one reduction)
 
-            sub_mod(s, x1, x3);
-            mul_mod(y3, s, lam);
+            sub_mod(x1, x1, x3);//sub_mod(s, x1, x3);
+            mul_mod(y3, x1, lam);//mul_mod(y3, s, lam);
             sub_mod(y3, y3, y1);
 
 			#pragma unroll
