@@ -39,6 +39,54 @@ Verified end to end on 2026-08-18: CUDA 13.0.88, `python3` 3.10, sympy 1.14 —
 **Read `cuobjdump`, never `nvdisasm`.** `nvdisasm` refuses any kernel containing `BRXU`,
 which is RCAsm's own call idiom, so it rejects every cubin here for a non-reason.
 
+## `main_ur.asm` — the constant tables in uniform registers
+
+An unmeasured variant, built the same way with `MAIN=`/`INC=`:
+
+```bash
+RCASM=… PYDEPS=… CUDA=/usr/local/cuda-13.0 \
+MAIN=$PWD/main_ur.asm INC=$PWD/inc_ur.asm OUTNAME=TestKernel_ur.cubin ./build.sh
+```
+
+`c_Gx`/`c_Gy`/`c_GyNeg` are warp-uniform — the index is a loop counter, not a thread id —
+so they can be read with **`LDCU.128` into uniform registers** and subtracted from there.
+Two consequences, and the second is the larger one:
+
+- four `LDC.64` become two `LDCU.128` per site, and
+- **the walk stops re-reading `c_Gx[i]` three times per trip.** It did that because `MulB`
+  is the only free 256-bit block and the `c_Gy`/`c_GyNeg` reads overwrite it; a uniform
+  register is not in that contest and survives the multiplies. Five table sites collapse to
+  one block of six loads at the top of the trip, and four barrier-wait `NOP`s go with them.
+
+| | committed | variant |
+|---|---:|---:|
+| walk loop body | 1111 | **1094** (−17/trip) |
+| ladder loop body | 146 | **145** (−1/trip) |
+| static instructions | 3224 | 3208 |
+| registers | 128 | 128 |
+
+At 511 trips each that is **9,198 instructions per batch**, or **1.40%** of the 657,279
+`dyncount.py` attributes to this kernel — the largest instruction-count lever this project
+has found, and about six times the F4 win. Whether it converts is a hardware question: the
+ml2 calibration says marginal instructions convert at ~91%, which would put it near 1.3%,
+comfortably above the 0.30% an A/B run can resolve.
+
+**What paid for it.** A UR can only be an instruction's *b* operand, and the tables feed
+`SubMod256`/`SubMod256_3`, not the multiply. `inc_ur.asm` therefore carries two variants of
+those routines with one operand moved into the b slot, and `rc_build.py` installs two
+encoders RCAsm does not have (`LDCU` with a UR index, `IADD3.X` with a UR source) — Fixes 5
+and 6 above.
+
+**What is checked, and what is not.** `sim_sub.py` interprets all four subtract bodies out
+of `inc.asm`/`inc_ur.asm` and runs them over 4,000 random operands plus the borrow edge
+cases: the interpreter reproduces `(a-b) mod P` and `(a-b-c) mod P` from the **committed**
+bodies, which is what validates its carry model, and the variants then match them
+**bit-for-bit**. `mk_ur.py` regenerates both files from the committed ones with every edit
+asserting its own match count, and building the committed kernel still reproduces
+`TestKernel.cubin` byte-identically. None of that is a hardware run: scheduling, barriers
+and uniform-register liveness are unproven until `rcasm_test/abtest` runs it against the
+oracle on a 5090.
+
 ## A/B against `GpuCore.cu`
 
 The harness is `rcasm_test/abtest`. Build the compiled side from the C++ and run the two

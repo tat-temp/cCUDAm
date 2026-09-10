@@ -115,6 +115,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ldcu_sm120
 ldcu_sm120.install()
 
+# Fix 6: IADD3.X with its second source in a uniform register (iadd3ur_sm120.py). The
+# walk's table reads feed SubMod256/SubMod256_3, so a UR-resident c_Gx/c_Gy has to sit in
+# the b slot -- a key the repository has no record for. Built from RCAsm's own register-form
+# encoder plus one measured delta, and declined for anything unverified.
+import iadd3ur_sm120
+iadd3ur_sm120.install()
+
 # Surface everything RCAsm would have shown in the GUI log pane.
 _orig_log = utils.to_log
 def loud(*a, **k):
