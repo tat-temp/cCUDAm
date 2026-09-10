@@ -105,6 +105,16 @@ try:
 except Exception as e:
     print("  Config identity: second import failed:", e)
 
+# Fix 5, likewise in-process: a correct LDCU encoder, from ldcu_sm120.py next to this
+# file. check_new_ops claims every sm_120 LDCU_UR_cAI before the matrix sees it but knows
+# only a .64 branch, so LDCU.128 assembles SILENTLY as a 32-bit load; and no UR-indexed
+# LDCU encodes at all, because URZ is 255 on sm_120 while CuInsParser still calls it 63,
+# a step the repository's linear fit cannot represent. The wrapper declines anything it
+# has not been verified on, so instructions that assemble today take the old path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ldcu_sm120
+ldcu_sm120.install()
+
 # Surface everything RCAsm would have shown in the GUI log pane.
 _orig_log = utils.to_log
 def loud(*a, **k):

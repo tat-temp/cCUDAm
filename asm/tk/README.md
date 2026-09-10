@@ -877,7 +877,43 @@ require anyone to have edited the RCAsm checkout:
 | 2 | comment out the bare `.tkinfo` | `build.sh` step 3 |
 | 3 | `.note.nv.cuver` is absent in CUDA 13; add `.note.nv.cuinfo` to the copy list | `rc_build.py` `_patch_cubin` |
 | 4 | `'@"STT_CUDA_OBJECT"': 13` in the symbol-type table | `rc_build.py` |
+| 5 | a correct `LDCU` encoder — `.128` and the UR-indexed form | `rc_build.py` + `ldcu_sm120.py` |
 
+
+Fix 5 is `ldcu_sm120.py`, and it fixes two things at once. `NewOpsHandler.check_new_ops`
+claims every sm_120 `LDCU_UR_cAI` before the matrix sees it, but that encoder knows only a
+`.64` branch and ignores any other size modifier — so **`LDCU.128` assembles silently as a
+32-bit load**, the same failure mode already recorded for `LDC.128`. It is latent today only
+because the one `LDCU.128` in the template (`c[0x0][0x380]`) sits in the kernel body
+`build.sh` replaces. And the UR-indexed form `LDCU.128 URd, c[0x3][URn+imm]` — legal
+sm_120, but no compiler emits it, since 13.0.88 and 13.3.73 both widen a constant load to
+`.128` only for a compile-time-constant offset — could not be encoded at all: the
+repository answers `Insufficient basis`, and teaching cannot fix it, because `URZ` encodes as
+**255** on sm_120 while `CuInsParser` still reports it as 63, and a linear fit cannot
+represent that step. `NewOpsHandler` says as much in its own sm_120 block; this is where such
+cases belong.
+
+The wrapper declines anything it has not been verified on — unknown modifier, negative
+immediate, misaligned destination — so every instruction that assembles today takes exactly
+the path it took before. Three gates, all reproducible without a GPU:
+
+- `python3 ldcu_sm120.py <dump>.sass ...` re-encodes every real `LDCU` in a corpus and
+  compares against the hardware's own bytes: **37 of 37 bit-exact**, against 20 of 37 wrong or
+  unencodable on the stock path (corpus: the shipped 13.3 cubin, both template builds, two
+  probe kernels).
+- assembling the six `LDCU.128 UR, c[0x3][UR+imm]` loads the walk would need and handing them
+  to `nvdisasm --binary SM120` returns exactly what was written.
+- `build.sh` still reproduces `TestKernel.cubin` **byte-identical**, and a variant with two
+  UR-indexed `LDCU.128`s inserted builds and disassembles them verbatim.
+
+**The same `URZ` step bites every other uniform instruction, and Fix 5 does not cover them.**
+Assembling the real `U*` instructions that take `URZ` as a source and comparing with ptxas's
+own bytes: `UIADD3`, `UISETP`, `ULOP3`, `UMOV` and `USHF` all come out with `0x3f` where the
+hardware wrote `0xff` — RCAsm puts **UR63**, a general register on Blackwell, where the zero
+register belongs. Silent, and wrong by whatever UR63 happens to hold. `main_full.asm` already
+neutralises it in one line — `UMOV URZ, 0x00` in the prologue zeroes UR63 so the substitution
+cannot matter — and `main.asm` does not have that line because it uses no uniform arithmetic
+yet. Any new uniform code here needs one or the other: that prologue line, or no `URZ`.
 Fix 4 is needed because the device linker rewrites `.nv.reservedSmem.offset0`'s type to a
 CUDA-specific value the validation table does not know. It is safe: that table is
 validation-only, and `__updateSymtab` copies `st_info` verbatim from the source cubin.
