@@ -89,21 +89,11 @@ ub3 = [l.replace("~RSecond", "~URSecond") for l in body_sub3]
 
 inc_ur = inc.rstrip(NL) + NL + NL.join([
     "",
-    "//====================================================================================",
-    "// SubMod256 and SubMod256_3 with ONE operand moved into the b slot, so that",
-    "// c_Gx/c_Gy/c_GyNeg can be read into uniform registers by LDCU.128 and subtracted from",
-    "// there. Everything else -- stalls, barriers, the correction tail -- is the committed",
-    "// body, unchanged. mk_ur.py carries the argument for why no carry moves.",
-    "//====================================================================================",
-    "",
-    "// Ro = URFirst - RSecond. URFirst is a UNIFORM register block (the constant table);",
-    "// RSecond is the per-thread point coordinate.",
     "FUNCTION SubMod256_UB()",
     "{ //Ri_cnt=8(UR)+8, Ro_cnt=8, Pt=[0..1]",
 ] + ub + [
     "}",
     "",
-    "// Ro = RFirst - URSecond - RThird. URSecond is the UNIFORM table, RThird the point.",
     "FUNCTION SubMod256_3_UB()",
     "{ //Ri_cnt=8+8(UR)+8, Ro_cnt=8, Rt_cnt=2, Pt=[0..2]",
 ] + ub3 + [
@@ -123,8 +113,6 @@ m = sub(m, "    uDesc=UR4, uCallI=UR8, uInvT=UR10 )",
 # ---- 2. UR63 must hold zero before any uniform ALU op uses URZ -------------------------
 anchor = "    [B------:R-:W1:-:S01]    S2R BlockID, SR_CTAID.X"
 m = sub(m, anchor, anchor + NL +
-        "// RCAsm encodes URZ as UR63, which on Blackwell is a REAL register, so every URZ" + NL +
-        "// source below (UIADD3, USHF) would otherwise read whatever it holds. Zero it once." + NL +
         "    [B------:R-:W-:-:S01]    UMOV URZ, 0x00", 1, "URZ zeroing")
 
 # ---- 3. seed the uniform offset in the ladder ------------------------------------------
@@ -133,8 +121,6 @@ seed = [l for l in m.split(NL)
 if len(seed) != 1:
     sys.exit("expected exactly one ladder seed instruction, found %d" % len(seed))
 m = sub(m, seed[0], seed[0] + NL +
-        "// The same value on the uniform side: batch_size * 16. Barrier 5 is the one the Half" + NL +
-        "// load already uses, and a wait on it drains both." + NL +
         "    [B------:R-:W5:-:S02]    LDCU uCOfs, c[0x0][0x3a8]" + NL +
         "    [B-----5:R-:W-:-:S05]    USHF.L.U32 uCOfs, uCOfs, 0x4, URZ", 1, "ladder seed")
 
@@ -213,11 +199,7 @@ for i in sorted(gx + gyn, reverse=True):
 a = blocks(lines, 0x40)[0]
 if lines[a + 4] != NOP4:
     sys.exit("expected a barrier-wait NOP after the c_Gy site, found %r" % lines[a + 4])
-lines[a:a + 4] = ([
-    "// All three tables for this trip, once each: a uniform register is not clobbered by the",
-    "// multiplies below, which is what made the old code re-read c_Gx three times. One",
-    "// barrier arming, one wait, and the other four NOPs went with the loads.",
-] + ldcu([("uGy", 0x40), ("uGx", 0x4040), ("uGyN", 0x8040)],
+lines[a:a + 4] = (ldcu([("uGy", 0x40), ("uGx", 0x4040), ("uGyN", 0x8040)],
          "    [B-1----:R-:W4:-:S01]"))
 
 # the two y-subtracts, in program order: the + branch reads c_Gy, the - branch c_GyNeg

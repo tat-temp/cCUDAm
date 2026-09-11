@@ -1,9 +1,3 @@
-// Stage-2 hashdump (branch f2m): load X[gid] + prefix, call the LIFTED getHash160_w2, store hw2.
-// Verifies the lifted hash bit-exact vs hashgolden.bin (run: ./hd_runner hd_hash.cubin golden).
-//
-// Register discipline: the lifted hash owns R0..R58 (inputs R4=prefix, R6..R13=x-words e7..e0;
-// output hw2=R4; UR4 = its uniform temp). The kernel keeps everything live across the call at R60+
-// and uDesc/uCallH off UR4, so the hash body needs no renumbering. Template: Px=X, Py=prefix, Scal=out.
 KERNEL TestKernel(regcnt=80, \
     gID=R60, ThrID=R61, BlockID=R62, \
     AddrX=R64, AddrP=R66, AddrO=R68, Thr=R70, \
@@ -28,15 +22,12 @@ KERNEL TestKernel(regcnt=80, \
     [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrP, gID, 0x08, AddrP
     [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrO, gID, 0x04, AddrO
 
-// load X[gid] as four u64 straight into R6..R13 (v0=R6:R7, v1=R8:R9, v2=R10:R11, v3=R12:R13)
     [B--2---:R-:W0:-:S01]    LDG.E.64 R6,  desc[uDesc][AddrX.64]
     [B------:R-:W0:-:S01]    LDG.E.64 R8,  desc[uDesc][AddrX.64+0x8]
     [B------:R-:W0:-:S01]    LDG.E.64 R10, desc[uDesc][AddrX.64+0x10]
     [B------:R-:W0:-:S01]    LDG.E.64 R12, desc[uDesc][AddrX.64+0x18]
-// prefix byte (0x02/0x03) -> R4 low word
     [B------:R-:W1:-:S01]    LDG.E R4, desc[uDesc][AddrP.64]
 
-// call the lifted hash (drain the input loads first). hw2 returns in R4.
     [B01----:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_w2) //RCASM:CallPointH
 call_func getHash160_w2(Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH
 

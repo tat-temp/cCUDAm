@@ -1,9 +1,3 @@
-// Lifted getHash160_w2 (SHA-256 + trimmed RIPEMD-160 word-2), extracted from a fresh compile of
-// GpuCore.cu's getHash160_w2_from_limbs. 2009 instrs, 32-bit only, no barriers/align. Inputs:
-// prefix=R4, e0..e7 = R13,R12,R11,R10,R9,R8,R7,R6 (e0=hi32(x.v[3]) .. e7=lo32(x.v[0])). Output
-// hw2=R4. The hash's only uniform reg is UR4 (a PRMT-sel temp); the kernel keeps uDesc/uCallH OFF
-// UR4 so the body lifts VERBATIM. RET.ABS.NODEC R20 dropped; call_func appends the BRXU return.
-// Do NOT edit instructions -- verified bit-exact vs hashgolden.bin.
 FUNCTION getHash160_w2()
 {
     [B------:R-:W-:-:S01]    PRMT R4, R4, 0x7770, RZ

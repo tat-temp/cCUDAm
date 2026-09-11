@@ -1,10 +1,3 @@
-// Lifted getHash160_33_from_limbs (SHA-256 + FULL RIPEMD-160, all 5 words), extracted from a fresh
-// compile of GpuCore.cu -- the __noinline__ sibling of getHash160_w2, used by hash160_full_match on
-// the cold path (~2^-32). 32-bit only, no barriers/align/mem, single RET dropped. Raw body (registers
-// as compiled); parametrize_hash.py maps it to Ri/Rio/Rt/URt. Do NOT hand-edit instructions.
-//   inputs : prefix=R4 ; x-words e7..e0 = R6..R13 (same input ABI as getHash160_w2)
-//   outputs: 5 hash160 words, LE -- word0=R4, word1=R5, word2=R6, word3=R7, word4=R8 (contiguous)
-//            (the 5 IV adds 0xEFCDAB89/0x98BADCFE/0x10325476/0xC3D2E1F0/0x67452301 finalize them)
 FUNCTION getHash160_33()
 {
     [B------:R-:W-:-:S01]     PRMT R4, R4, 0x7770, RZ

@@ -495,7 +495,7 @@ bool PrepareHost(THparams* hParams, const uint64_t* start, const uint8_t* hash16
 	// the kernel to carry a per-thread remaining-key counter: with unequal budgets no single
 	// batches_per_launch could describe the final launch, so each thread had to notice its own
 	// end, and a warp straddling the r1 boundary then diverged mid-loop (H4) while InvMod256
-	// requires every active lane of the warp to arrive (asm/mod_inv.asm:189).
+	// requires every active lane of the warp to arrive.
 	//
 	// Uniform budgets cost at most (threadsTotal - 1) extra batches of over-scan at the very end
 	// -- the last thread runs past the range end, exactly as the batch round-up already did.

@@ -1,9 +1,3 @@
-// Call-mechanism test / hashdump skeleton (branch f2m). The native CALL.REL.NOINC/RET.REL.NODEC
-// call type (what GpuCore.cu uses) was tried and FAILS in RCAsm injection: the forward CALL and
-// MOV-of-label resolve, but RET.REL.NODEC's base fixup is miscomputed (-0x1f060 regardless of the
-// base operand) and the kernel dies ILLEGAL_INSTRUCTION at launch. So this uses RCAsm's proven
-// call_func/BRXU (uniform-pair return, like InvMod256) -- which also costs zero R registers.
-// Stub "hash": Res = Xlow + 0x1234, trivially checkable. Reuses the 7-param TestKernel template.
 KERNEL TestKernel(regcnt=40, \
     gID=R2, ThrID=R3, BlockID=R4, \
     AddrX=R6, AddrO=R8, Thr=R10, \
@@ -29,7 +23,6 @@ KERNEL TestKernel(regcnt=40, \
     [B------:R-:W-:-:S01]    IMAD.WIDE.U32 AddrO, gID, 0x04, AddrO
     [B--2---:R4:W0:-:S01]    LDG.E.64 Xin0, desc[uDesc][AddrX.64]
 
-// ---- call the stub via call_func / BRXU (proven mechanism) ----
     [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_stubhash) //RCASM:CallPointH
 call_func stubhash(Rin=Xin, Rout=Res, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH
     [B------:R-:W-:-:S02]    STG.E desc[uDesc][AddrO.64], Res0

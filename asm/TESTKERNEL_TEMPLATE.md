@@ -321,9 +321,9 @@ ends the route cheaply.
   and an author comment, never executed.
 - Kernel02's sources compile through RCAsm's front end but have **never been injected or
   assembled** — it ships no template.
-- `InvMod256` carries "requires all active threads in warp!" (`mod_inv.asm:189`). `TestKernel`'s
+- Upstream's `InvMod256` is annotated "requires all active threads in warp!" (Kernel02 `mod_inv.asm`). `TestKernel`'s
   divergence structure has not been checked against that.
-- Register bank conflicts are tracked by hand upstream (`mod_sub.asm:24`) with no tooling.
+- Register bank conflicts are tracked by hand upstream (a comment in Kernel02's `mod_sub.asm`) with no tooling.
 - Control codes in every probe so far were copied from Kernel01 and are almost certainly wrong for
   a real kernel — they assemble, which says nothing about whether they schedule correctly.
 - `__launch_bounds__(256,2)` implies ≤128 registers/thread arithmetically; not measured. RCAsm

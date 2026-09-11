@@ -41,7 +41,7 @@ which is RCAsm's own call idiom, so it rejects every cubin here for a non-reason
 
 ## `main_ur.asm` — the constant tables in uniform registers
 
-An unmeasured variant, built the same way with `MAIN=`/`INC=`:
+**Measured +1.13% (two waves) / +1.47% (one wave)**, built the same way with `MAIN=`/`INC=`:
 
 ```bash
 RCASM=… PYDEPS=… CUDA=/usr/local/cuda-13.0 \
@@ -67,9 +67,19 @@ Two consequences, and the second is the larger one:
 
 At 511 trips each that is **9,198 instructions per batch**, or **1.40%** of the 657,279
 `dyncount.py` attributes to this kernel — the largest instruction-count lever this project
-has found, and about six times the F4 win. Whether it converts is a hardware question: the
-ml2 calibration says marginal instructions convert at ~91%, which would put it near 1.3%,
-comfortably above the 0.30% an A/B run can resolve.
+has found, and about six times the F4 win.
+
+**Raced on an RTX 5090** (`abtest` loop mode, one discarded warm-up, argument order swapped every
+round, launches interleaved within each round):
+
+| grid | rounds won | speed-up | 95% CI |
+|---|---:|---:|---:|
+| 174080 (2 waves) | 6 / 6 | **+1.13%** | [+1.12%, +1.14%] |
+| 43520 (1 wave) | 4 / 4 | **+1.47%** | [+1.45%, +1.48%] |
+
+Launch position contributed −0.01%. Every run was EXACT thread-for-thread against the oracle and
+agreed with the committed kernel on every limb (grids 256–174080, batch 4/6/64/1024). Both kernels
+need **batch ≥ 4**: at batch 2 the walk's do-while runs off the local frame in either one.
 
 **What paid for it.** A UR can only be an instruction's *b* operand, and the tables feed
 `SubMod256`/`SubMod256_3`, not the multiply. `inc_ur.asm` therefore carries two variants of
@@ -83,9 +93,8 @@ cases: the interpreter reproduces `(a-b) mod P` and `(a-b-c) mod P` from the **c
 bodies, which is what validates its carry model, and the variants then match them
 **bit-for-bit**. `mk_ur.py` regenerates both files from the committed ones with every edit
 asserting its own match count, and building the committed kernel still reproduces
-`TestKernel.cubin` byte-identically. None of that is a hardware run: scheduling, barriers
-and uniform-register liveness are unproven until `rcasm_test/abtest` runs it against the
-oracle on a 5090.
+`TestKernel.cubin` byte-identically. The hardware run above is what settles scheduling,
+barriers and uniform-register liveness.
 
 ## A/B against `GpuCore.cu`
 
@@ -678,7 +687,7 @@ instructions where ptxas spends 1,504 on the same path.
 Three things about it shaped the code around it, and all three are the kind that fail
 quietly:
 
-- **It requires all active threads in the warp** (`mod_inv.asm:189`). A data-dependent loop
+- **It requires all active threads in the warp.** A data-dependent loop
   with a warp-collective step, so a thread that reached it by a different path is a hang or
   a wrong answer for its neighbours. This kernel's two early exits are uniform by
   construction and that is a **precondition**, not an accident — it is H4's straddling warp
