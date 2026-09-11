@@ -35,4 +35,5 @@ rcasm_test/abtest/ab_compiled.cubin
 
 # Full-pipeline build: generated concatenation of inc.asm + the renumbered hash FUNCTION
 asm/tk/inc_full.asm
+asm/tk/inc_full_ur.asm
 asm/tk/hd_hash_rn.cubin
