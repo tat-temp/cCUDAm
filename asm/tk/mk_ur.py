@@ -162,6 +162,22 @@ def blocks(lines, ofs):
     return hits
 
 
+GYN_BASE = "IADD3 SAdr, PT, PT, COfs, 0x8000, RZ"
+
+
+def blocks_gyn(lines):
+    """c_GyNeg starts at 0x8040, past the signed 16-bit LDC offset, so its sites index from
+    SAdr = COfs + 0x8000, formed on the line before. First LDC line of every such site."""
+    hits = []
+    for i, l in enumerate(lines):
+        if "LDC.64 MulB0, c[0x3][SAdr+0x40]" in l and l.startswith("    [B"):
+            assert GYN_BASE in lines[i - 1], lines[i - 1]
+            for k in range(1, 4):
+                assert "LDC.64 MulB%d, c[0x3][SAdr+%#x]" % (2 * k, 0x40 + 8 * k) in lines[i + k], lines[i + k]
+            hits.append(i)
+    return hits
+
+
 def region(text, start, end):
     i = text.index(start)
     return i, text.index(end, i)
@@ -183,17 +199,18 @@ m = m[:li] + ladder + m[lj:]
 # walk: five sites -> one block of six loads at the first of them
 wi, wj = region(m, ".label_walk_loop:", "@P0 BRA.U `(.label_walk_loop)")
 lines = m[wi:wj].split(NL)
-gy, gx, gyn = blocks(lines, 0x40), blocks(lines, 0x4040), blocks(lines, 0x8040)
+gy, gx, gyn = blocks(lines, 0x40), blocks(lines, 0x4040), blocks_gyn(lines)
 if (len(gy), len(gx), len(gyn)) != (1, 3, 1):
     sys.exit("walk sites: expected 1 c_Gy, 3 c_Gx, 1 c_GyNeg, found %d/%d/%d"
              % (len(gy), len(gx), len(gyn)))
 
-# every site but the first also owns the barrier-wait NOP that follows it
+# every site but the first also owns the barrier-wait NOP that follows it, and the c_GyNeg
+# site the SAdr base line before it
 for i in sorted(gx + gyn, reverse=True):
     if lines[i + 4] != NOP4:
         sys.exit("expected a barrier-wait NOP after the site at line %d, found %r"
                  % (i, lines[i + 4]))
-    lines = lines[:i] + lines[i + 5:]
+    lines = lines[:i - (i in gyn)] + lines[i + 5:]
 
 # the first site becomes all three tables; its own NOP stays and drains them all
 a = blocks(lines, 0x40)[0]

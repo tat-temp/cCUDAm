@@ -244,10 +244,11 @@ call_func getPublish2(Ri=R72, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S0
 //@@HASHP_END
 //@@PACC_BEGIN
 //@@PACC_END
-    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x8040]
-    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x8048]
-    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x8050]
-    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x8058]
+    [B------:R-:W-:-:S04]    IADD3 SAdr, PT, PT, COfs, 0x8000, RZ //c_GyNeg is past the signed 16-bit LDC offset
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][SAdr+0x40]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][SAdr+0x48]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][SAdr+0x50]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][SAdr+0x58]
     [B----4-:R-:W-:-:S01]    NOP
 inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)
 inc_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0)
@@ -329,10 +330,11 @@ inc_func MulMod256(RFirst=MulA, RSecond=Rinv, Ro=Dxi, Rt=Tmp, Pt=0)
 //@@WACCT_BEGIN
 //@@WACCT_END
 //@@PLUST_BEGIN
-    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x8040]
-    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x8048]
-    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x8050]
-    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x8058]
+    [B------:R-:W-:-:S04]    IADD3 SAdr, PT, PT, COfs, 0x8000, RZ //c_GyNeg is past the signed 16-bit LDC offset
+    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][SAdr+0x40]
+    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][SAdr+0x48]
+    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][SAdr+0x50]
+    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][SAdr+0x58]
     [B----4-:R-:W-:-:S01]    NOP
 inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)
 inc_func MulMod256(RFirst=MulB, RSecond=Dxi, Ro=Lam, Rt=Tmp, Pt=0)

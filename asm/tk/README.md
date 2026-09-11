@@ -367,6 +367,16 @@ issue side does not matter here.** Removing dead arithmetic is a maintenance win
 longer needs `NegMod256`, and the template now agrees with `GpuCore.cu` exactly), not a speed
 one.
 
+**2026-09-11 (f5): correction — port 2 read the wrong table.** `c[0x3][COfs+0x8040]` is past the
+signed 16-bit offset of a register-indexed `LDC`, and RCAsm assembled it without complaint as
+`c[0x3][R122+-0x7fc0]`. From this port until f5 every minus and tail point was built from the wrong
+constant. The timings above stand — the same loads ran, from the wrong address — but no key below a
+batch centre could ever be found: `proof.py` through `cCUDAHurricane` built with
+`NATIVE_CUBIN=asm/tk/TestKernel_hash.cubin` missed every one, while the compiled kernel, plain and
+through the same native path, found them all. abtest could not see it: its oracle checks only the
+jumped end point, which the minus points never feed. The sites now form `SAdr = COfs + 0x8000` and
+load `c[0x3][SAdr+0x40..0x58]`; a negative offset in `c[0x3][R..+-0x..]` in a build's SASS is this bug.
+
 **2026-09-07 (f1m, port 3): widened the global I/O to 128-bit (`LDG.E.64`→`LDG.E.128`,
 `STG.E.64`→`STG.E.128`); the high-volume `LDC.64` constant reads CANNOT be widened.** Register-
 indexed constant-bank loads are 64-bit max in the sm_120 ISA — the compiled kernel, even after
