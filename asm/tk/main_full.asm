@@ -38,13 +38,11 @@ KERNEL TestKernel(regcnt=128, \
     [B------:R4:W0:-:S01]    LDG.E.128 PntX4, desc[uDesc][AddrX.64+0x10]
     [B------:R4:W1:-:S01]    LDG.E.128 PntY0, desc[uDesc][AddrY.64]
     [B------:R4:W1:-:S01]    LDG.E.128 PntY4, desc[uDesc][AddrY.64+0x10]
-    [B------:R4:W2:-:S01]    LDG.E.128 Scal0, desc[uDesc][AddrS.64]
-    [B------:R4:W2:-:S01]    LDG.E.128 Scal4, desc[uDesc][AddrS.64+0x10]
     [B----4-:R-:W-:-:S01]    NOP
 
-//@@LOOPTOP_BEGIN
     [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]
     [B-----5:R-:W-:-:S05]    IMAD BDone, RZ, RZ, RZ
+//@@LOOPTOP_BEGIN
 .label_batch_loop:
     [B------:R-:W5:-:S02]    LDC BpL, c[0x0][0x3ac]
     [B-----5:R-:W-:Y:S13]    ISETP.GE.U32.AND P1, PT, BDone, BpL, PT
@@ -76,16 +74,12 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
     [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_s)
-    [B------:R-:W-:-:S02]    IMAD R64, RZ, RZ, Scal0
-    [B------:R-:W-:-:S02]    MOV  R65, Scal1
-    [B------:R-:W-:-:S02]    IMAD R66, RZ, RZ, Scal2
-    [B------:R-:W-:-:S02]    MOV  R67, Scal3
-    [B------:R-:W-:-:S02]    IMAD R68, RZ, RZ, Scal4
-    [B------:R-:W-:-:S02]    MOV  R69, Scal5
-    [B------:R-:W-:-:S02]    IMAD R70, RZ, RZ, Scal6
-    [B------:R-:W-:-:S04]    MOV  R71, Scal7
-    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP0
-call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP0
+    [B------:R-:W-:-:S02]    MOV R72, RZ //extra = 0
+    [B------:R-:W-:-:S02]    MOV R73, BDone
+    [B------:R-:W-:-:S02]    MOV R74, Half
+    [B------:R-:W-:-:S04]    MOV R75, gID
+    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish2) //RCASM:CallPointP0
+call_func getPublish2(Ri=R72, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP0
     [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_s:
     [B------:R-:W-:-:S05]    BSYNC B0
@@ -236,18 +230,13 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
     [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_p)
-    [B------:R-:W-:-:S02]    SHF.R.U32 R79, COfs, 0x5, RZ
-    [B------:R-:W-:-:S04]    IADD3 R79, R79, 0x1, RZ
-    [B------:R-:W-:-:S02]    IADD3 R64, P4, PT, Scal0, R79, RZ
-    [B------:R-:W-:-:S04]    IADD3.X R65, P4, PT, Scal1, RZ, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R66, P4, PT, Scal2, RZ, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R67, P4, PT, Scal3, RZ, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R68, P4, PT, Scal4, RZ, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R69, P4, PT, Scal5, RZ, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R70, P4, PT, Scal6, RZ, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R71, P4, PT, Scal7, RZ, RZ, P4, !PT
-    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP1
-call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP1
+    [B------:R-:W-:-:S04]    SHF.R.U32 R72, COfs, 0x5, RZ
+    [B------:R-:W-:-:S04]    IADD3 R72, R72, 0x1, RZ //extra = i+1
+    [B------:R-:W-:-:S02]    MOV R73, BDone
+    [B------:R-:W-:-:S02]    MOV R74, Half
+    [B------:R-:W-:-:S04]    MOV R75, gID
+    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish2) //RCASM:CallPointP1
+call_func getPublish2(Ri=R72, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP1
     [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_p:
     [B------:R-:W-:-:S05]    BSYNC B0
@@ -297,18 +286,13 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
     [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_m)
-    [B------:R-:W-:-:S02]    SHF.R.U32 R79, COfs, 0x5, RZ
-    [B------:R-:W-:-:S04]    IADD3 R79, R79, 0x1, RZ
-    [B------:R-:W-:-:S04]    IADD3.X R64, P4, PT, Scal0, ~R79, RZ, !PT, PT
-    [B------:R-:W-:-:S04]    IADD3.X R65, P4, PT, Scal1, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R66, P4, PT, Scal2, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R67, P4, PT, Scal3, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R68, P4, PT, Scal4, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R69, P4, PT, Scal5, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R70, P4, PT, Scal6, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R71, P4, PT, Scal7, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP2
-call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP2
+    [B------:R-:W-:-:S04]    SHF.R.U32 R72, COfs, 0x5, RZ
+    [B------:R-:W-:-:S04]    IADD3.X R72, PT, PT, RZ, ~R72, RZ, !PT, !PT //extra = ~i = -(i+1)
+    [B------:R-:W-:-:S02]    MOV R73, BDone
+    [B------:R-:W-:-:S02]    MOV R74, Half
+    [B------:R-:W-:-:S04]    MOV R75, gID
+    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish2) //RCASM:CallPointP2
+call_func getPublish2(Ri=R72, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP2
     [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_m:
     [B------:R-:W-:-:S05]    BSYNC B0
@@ -387,18 +371,13 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
     [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_t)
-    [B------:R-:W-:-:S02]    SHF.R.U32 R79, COfs, 0x5, RZ
-    [B------:R-:W-:-:S04]    IADD3 R79, R79, 0x1, RZ
-    [B------:R-:W-:-:S04]    IADD3.X R64, P4, PT, Scal0, ~R79, RZ, !PT, PT
-    [B------:R-:W-:-:S04]    IADD3.X R65, P4, PT, Scal1, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R66, P4, PT, Scal2, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R67, P4, PT, Scal3, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R68, P4, PT, Scal4, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R69, P4, PT, Scal5, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R70, P4, PT, Scal6, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S04]    IADD3.X R71, P4, PT, Scal7, 0xFFFFFFFF, RZ, P4, !PT
-    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish) //RCASM:CallPointP3
-call_func getPublish(Ri=Prod, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP3
+    [B------:R-:W-:-:S04]    SHF.R.U32 R72, COfs, 0x5, RZ
+    [B------:R-:W-:-:S04]    IADD3.X R72, PT, PT, RZ, ~R72, RZ, !PT, !PT //extra = ~i = -(i+1)
+    [B------:R-:W-:-:S02]    MOV R73, BDone
+    [B------:R-:W-:-:S02]    MOV R74, Half
+    [B------:R-:W-:-:S04]    MOV R75, gID
+    [B------:R-:W-:-:S01]    UMOV uCallP0, `(.relN_end_getPublish2) //RCASM:CallPointP3
+call_func getPublish2(Ri=R72, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S06] BRXU.U uCallP, 0x00") //RCASM:CallPointP3
     [B------:R-:W-:Y:S05] @P3 EXIT
 .hskip_t:
     [B------:R-:W-:-:S05]    BSYNC B0
@@ -470,14 +449,6 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 //@@JUMP_END
 
 //@@LOOPEND_BEGIN
-    [B--2---:R-:W-:-:S04]    IADD3 Scal0, P0, PT, Scal0, Half, RZ
-    [B------:R-:W-:-:S04]    IADD3.X Scal1, P0, PT, Scal1, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal2, P0, PT, Scal2, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal3, P0, PT, Scal3, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal4, P0, PT, Scal4, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal5, P0, PT, Scal5, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal6, P0, PT, Scal6, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal7, PT, PT, Scal7, RZ, RZ, P0, !PT
     [B------:R-:W-:-:S05]    IADD3 BDone, PT, PT, BDone, 0x1, RZ
     [B------:R-:W-:Y:S05]    BRA.U `(.label_batch_loop)
 .label_batch_end:
@@ -511,7 +482,18 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrY.64+0x10], PntY4
 //@@STOREPNTY_END
 //@@STOREID_BEGIN
-    [B--2---:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrS.64], Scal0
+    [B------:R-:W2:-:S01]    LDG.E.128 Scal0, desc[uDesc][AddrS.64] //s1 = start_scalars + BDone*B
+    [B------:R-:W2:-:S01]    LDG.E.128 Scal4, desc[uDesc][AddrS.64+0x10]
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Tmp0, BDone, Half, RZ
+    [B--2---:R-:W-:-:S04]    IADD3 Scal0, P0, PT, Scal0, Tmp0, RZ
+    [B------:R-:W-:-:S04]    IADD3.X Scal1, P0, PT, Scal1, Tmp1, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal2, P0, PT, Scal2, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal3, P0, PT, Scal3, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal4, P0, PT, Scal4, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal5, P0, PT, Scal5, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal6, P0, PT, Scal6, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal7, PT, PT, Scal7, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrS.64], Scal0
     [B------:R-:W-:-:S05]    STG.E.128 desc[uDesc][AddrS.64+0x10], Scal4
 //@@STOREID_END
 //@@STORELAM_BEGIN

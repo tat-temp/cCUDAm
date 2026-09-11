@@ -38,13 +38,11 @@ KERNEL TestKernel(regcnt=128, \
     [B------:R4:W0:-:S01]    LDG.E.128 PntX4, desc[uDesc][AddrX.64+0x10]
     [B------:R4:W1:-:S01]    LDG.E.128 PntY0, desc[uDesc][AddrY.64]
     [B------:R4:W1:-:S01]    LDG.E.128 PntY4, desc[uDesc][AddrY.64+0x10]
-    [B------:R4:W2:-:S01]    LDG.E.128 Scal0, desc[uDesc][AddrS.64]
-    [B------:R4:W2:-:S01]    LDG.E.128 Scal4, desc[uDesc][AddrS.64+0x10]
     [B----4-:R-:W-:-:S01]    NOP
 
-//@@LOOPTOP_BEGIN
     [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]
     [B-----5:R-:W-:-:S05]    IMAD BDone, RZ, RZ, RZ
+//@@LOOPTOP_BEGIN
 .label_batch_loop:
     [B------:R-:W5:-:S02]    LDC BpL, c[0x0][0x3ac]
     [B-----5:R-:W-:Y:S13]    ISETP.GE.U32.AND P1, PT, BDone, BpL, PT
@@ -355,14 +353,6 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 //@@JUMP_END
 
 //@@LOOPEND_BEGIN
-    [B--2---:R-:W-:-:S04]    IADD3 Scal0, P0, PT, Scal0, Half, RZ
-    [B------:R-:W-:-:S04]    IADD3.X Scal1, P0, PT, Scal1, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal2, P0, PT, Scal2, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal3, P0, PT, Scal3, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal4, P0, PT, Scal4, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal5, P0, PT, Scal5, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal6, P0, PT, Scal6, RZ, RZ, P0, !PT
-    [B------:R-:W-:-:S04]    IADD3.X Scal7, PT, PT, Scal7, RZ, RZ, P0, !PT
     [B------:R-:W-:-:S05]    IADD3 BDone, PT, PT, BDone, 0x1, RZ
     [B------:R-:W-:Y:S05]    BRA.U `(.label_batch_loop)
 .label_batch_end:
@@ -444,7 +434,18 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrY.64+0x10], PntY4
 //@@STOREPNTY_END
 //@@STOREID_BEGIN
-    [B--2---:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrS.64], Scal0
+    [B------:R-:W2:-:S01]    LDG.E.128 Scal0, desc[uDesc][AddrS.64] //s1 = start_scalars + BDone*B
+    [B------:R-:W2:-:S01]    LDG.E.128 Scal4, desc[uDesc][AddrS.64+0x10]
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Tmp0, BDone, Half, RZ
+    [B--2---:R-:W-:-:S04]    IADD3 Scal0, P0, PT, Scal0, Tmp0, RZ
+    [B------:R-:W-:-:S04]    IADD3.X Scal1, P0, PT, Scal1, Tmp1, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal2, P0, PT, Scal2, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal3, P0, PT, Scal3, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal4, P0, PT, Scal4, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal5, P0, PT, Scal5, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal6, P0, PT, Scal6, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S04]    IADD3.X Scal7, PT, PT, Scal7, RZ, RZ, P0, !PT
+    [B------:R-:W-:-:S01]    STG.E.128 desc[uDesc][AddrS.64], Scal0
     [B------:R-:W-:-:S05]    STG.E.128 desc[uDesc][AddrS.64+0x10], Scal4
 //@@STOREID_END
 //@@STORELAM_BEGIN
