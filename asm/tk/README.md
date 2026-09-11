@@ -39,6 +39,59 @@ Verified end to end on 2026-08-18: CUDA 13.0.88, `python3` 3.10, sympy 1.14 —
 **Read `cuobjdump`, never `nvdisasm`.** `nvdisasm` refuses any kernel containing `BRXU`,
 which is RCAsm's own call idiom, so it rejects every cubin here for a non-reason.
 
+## Build recipes — the four manual cubins
+
+Each cubin builds in two steps: **(1) build the `.asm`** (generate any derived source) then
+**(2) build the cubin** (RCAsm injection). All four share one environment; set a unique
+`WORK=` if two builds run at once (`build.sh` defaults to `/tmp/tkbuild`). The cubins are
+committed, so this is only needed when an `.asm` changed.
+
+```bash
+# common environment (adjust paths); run from asm/tk/
+export RCASM=/path/to/RCAsm PYDEPS=/path/to/pydeps CUDA=/usr/local/cuda-13.0
+```
+
+| cubin | pipeline | tables | source |
+|---|---|---|---|
+| `TestKernel.cubin`         | points-only           | `LDC.64`           | `main.asm` |
+| `TestKernel_ur.cubin`      | points-only           | `LDCU.128` uniform | `main_ur.asm` (generated) |
+| `TestKernel_hash.cubin`    | walk + hash + publish | `LDC.64`           | `main_full.asm` |
+| `TestKernel_hash_ur.cubin` | walk + hash + publish | `LDCU.128` uniform | `main_full_ur.asm` (generated) |
+
+**`TestKernel.cubin`** — points, `LDC.64`
+```bash
+# 1. build asm: none — main.asm and inc.asm are hand-written
+# 2. build cubin
+MAIN=$PWD/main.asm INC=$PWD/inc.asm OUTNAME=TestKernel.cubin ./build.sh
+```
+
+**`TestKernel_ur.cubin`** — points, uniform tables
+```bash
+# 1. build asm: mk_ur.py writes main_ur.asm + inc_ur.asm (and main_full_ur.asm)
+python3 mk_ur.py
+# 2. build cubin
+MAIN=$PWD/main_ur.asm INC=$PWD/inc_ur.asm OUTNAME=TestKernel_ur.cubin ./build.sh
+```
+
+**`TestKernel_hash.cubin`** — full pipeline, `LDC.64`
+```bash
+# 1. build asm: main_full.asm is hand-written; build_full.sh runs parametrize_hash.py and
+#    concatenates inc_full.asm (= inc.asm + hash + hd_publish_inc.asm) for you
+# 2. build cubin (runs step 1's generation itself)
+./build_full.sh
+```
+
+**`TestKernel_hash_ur.cubin`** — full pipeline, uniform tables
+```bash
+# 1. build asm: mk_ur.py writes main_full_ur.asm (and the points UR files)
+python3 mk_ur.py
+# 2. build cubin: build_full_ur.sh concatenates inc_full_ur.asm (= inc_ur.asm + hash + publish)
+./build_full_ur.sh
+```
+
+The two `build_full*.sh` need three one-time RCAsm teaches first (additive; they leave Gate-1
+byte-identical): `./teach_publish_atomics.sh`, `./teach_iadd.sh`, `./teach_bssy.sh`.
+
 ## `main_ur.asm` — the constant tables in uniform registers
 
 **Measured +1.13% (two waves) / +1.47% (one wave)**, built the same way with `MAIN=`/`INC=`:
