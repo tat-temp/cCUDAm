@@ -127,19 +127,22 @@ inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulA, Pt=0)
     [B----4-:R-:W-:-:S01]    NOP
 inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulB, Pt=0)
 inc_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)
-    [B------:R-:W-:-:S01]    IMAD MulA0, RZ, RZ, MulR0
-    [B------:R-:W-:-:S01]    MOV MulA1, MulR1
-    [B------:R-:W-:-:S01]    IMAD MulA2, RZ, RZ, MulR2
-    [B------:R-:W-:-:S01]    MOV MulA3, MulR3
-    [B------:R-:W-:-:S01]    IMAD MulA4, RZ, RZ, MulR4
-    [B------:R-:W-:-:S01]    MOV MulA5, MulR5
-    [B------:R-:W-:-:S01]    IMAD MulA6, RZ, RZ, MulR6
-    [B------:R-:W-:-:S02]    MOV MulA7, MulR7
-    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
-    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
-
     [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
     [B------:R-:W-:-:S05]    UIADD3 uCOfs, uCOfs, -0x20, URZ
+    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulR0
+    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulR4
+    [B------:R-:W-:Y:S13]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
+    [B------:R-:W-:Y:S05] @!P0 BRA.U `(.label_sufp_end)
+    [B---3--:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
+    [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][uCOfs+0x4040]
+    [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][uCOfs+0x4050]
+    [B----4-:R-:W-:-:S01]    NOP
+inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulB, Pt=0)
+inc_func MulMod256(RFirst=MulR, RSecond=MulB, Ro=MulA, Rt=Tmp, Pt=0)
+    [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ
+    [B------:R-:W-:-:S05]    UIADD3 uCOfs, uCOfs, -0x20, URZ
+    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
+    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
     [B------:R-:W-:Y:S13]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT
     [B------:R-:W-:Y:S05] @P0 BRA.U `(.label_sufp_loop)
 .label_sufp_end:

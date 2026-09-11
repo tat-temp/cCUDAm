@@ -351,6 +351,80 @@ def once_per_batch(m):
     return m
 
 
+def ping_pong_sufp(m):
+    """Full kernel only: eliminate the 8-instruction MulR->MulA copy in the sufp ladder by
+    ping-ponging the running product between MulA and MulR across an unroll-by-2.
+
+    The ladder builds subp[i] = subp[i+1] * (c_Gx[i+1]-x1). Each trip's MulMod cannot write
+    its result in place over its RFirst input (aliasing), so the committed loop writes MulR
+    then copies MulR->MulA for the next trip and the store. Instead:
+      * trip A: MulMod(RFirst=MulA -> Ro=MulR), store MulR
+      * trip B: MulMod(RFirst=MulR -> Ro=MulA), store MulA        (R64 read, R56 written: safe)
+    No copy; the accumulator just alternates registers. The loop back-edge lands on trip A,
+    which reads MulA -- so trip B leaves the accumulator in MulA, trip A in MulR.
+
+    Runtime parity: the trip count (half-1) is a runtime value, so the pair can end on either
+    trip. Each trip keeps its own COfs==0 test and exit branch; whichever trip hits COfs==0
+    exits. The accumulator's final register is dead (INV reloads subp[0] from [R1]), so the
+    odd/even landing does not matter -- only that every subp[i] was stored, which both trips do.
+
+    Scheduling: MulMod's last Ro limbs are written by IADD3.X (needs ~5 cumulative stall before
+    a consumer). The copies used to be that gap; here the COfs/uCOfs updates are moved ahead of
+    the STL to supply it. The [B---3--]/R3 SAdr scoreboard is kept on every IADD3 SAdr / STL,
+    so the chain still reaches INV's `LDL.128 MulA0, [R1]` wait.
+    """
+    old = (
+        ".label_sufp_loop:" + NL +
+        "    [B---3--:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ" + NL +
+        "    [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][uCOfs+0x4040]" + NL +
+        "    [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][uCOfs+0x4050]" + NL +
+        "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+        "inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulB, Pt=0)" + NL +
+        "inc_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)" + NL +
+        "    [B------:R-:W-:-:S01]    IMAD MulA0, RZ, RZ, MulR0" + NL +
+        "    [B------:R-:W-:-:S01]    MOV MulA1, MulR1" + NL +
+        "    [B------:R-:W-:-:S01]    IMAD MulA2, RZ, RZ, MulR2" + NL +
+        "    [B------:R-:W-:-:S01]    MOV MulA3, MulR3" + NL +
+        "    [B------:R-:W-:-:S01]    IMAD MulA4, RZ, RZ, MulR4" + NL +
+        "    [B------:R-:W-:-:S01]    MOV MulA5, MulR5" + NL +
+        "    [B------:R-:W-:-:S01]    IMAD MulA6, RZ, RZ, MulR6" + NL +
+        "    [B------:R-:W-:-:S02]    MOV MulA7, MulR7" + NL +
+        "    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0" + NL +
+        "    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4" + NL +
+        "" + NL +
+        "    [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ" + NL +
+        "    [B------:R-:W-:-:S05]    UIADD3 uCOfs, uCOfs, -0x20, URZ" + NL +
+        "    [B------:R-:W-:Y:S13]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT" + NL +
+        "    [B------:R-:W-:Y:S05] @P0 BRA.U `(.label_sufp_loop)")
+    new = (
+        ".label_sufp_loop:" + NL +
+        "    [B---3--:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ" + NL +
+        "    [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][uCOfs+0x4040]" + NL +
+        "    [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][uCOfs+0x4050]" + NL +
+        "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+        "inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulB, Pt=0)" + NL +
+        "inc_func MulMod256(RFirst=MulA, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)" + NL +
+        "    [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ" + NL +
+        "    [B------:R-:W-:-:S05]    UIADD3 uCOfs, uCOfs, -0x20, URZ" + NL +
+        "    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulR0" + NL +
+        "    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulR4" + NL +
+        "    [B------:R-:W-:Y:S13]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT" + NL +
+        "    [B------:R-:W-:Y:S05] @!P0 BRA.U `(.label_sufp_end)" + NL +
+        "    [B---3--:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ" + NL +
+        "    [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][uCOfs+0x4040]" + NL +
+        "    [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][uCOfs+0x4050]" + NL +
+        "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+        "inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulB, Pt=0)" + NL +
+        "inc_func MulMod256(RFirst=MulR, RSecond=MulB, Ro=MulA, Rt=Tmp, Pt=0)" + NL +
+        "    [B------:R-:W-:-:S05]    IADD3 COfs, PT, PT, COfs, -0x20, RZ" + NL +
+        "    [B------:R-:W-:-:S05]    UIADD3 uCOfs, uCOfs, -0x20, URZ" + NL +
+        "    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0" + NL +
+        "    [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4" + NL +
+        "    [B------:R-:W-:Y:S13]    ISETP.NE.U32.AND P0, PT, COfs, RZ, PT" + NL +
+        "    [B------:R-:W-:Y:S05] @P0 BRA.U `(.label_sufp_loop)")
+    return sub(m, old, new, 1, "ping-pong sufp ladder")
+
+
 MAIN_HDR_OLD = "    uDesc=UR4, uCallI=UR8, uInvT=UR10 )"
 MAIN_HDR_NEW = ("    uDesc=UR4, uCallI=UR8, uInvT=UR10, \\" + NL +
                 "    uCOfs=UR16, uGx=UR20, uGy=UR28, uGyN=UR36 )")
@@ -361,6 +435,6 @@ FULL_HDR_NEW = ("    uDesc=UR4, uHashSel=UR6, uCallI=UR8, uInvT=UR10, uCallH=UR1
 # Compute both transforms BEFORE opening any output file: "w" truncates on open, so a crash
 # mid-transform must not be able to leave a committed *_ur.asm empty.
 main_ur = transform_main(load("main.asm"), MAIN_HDR_OLD, MAIN_HDR_NEW)
-main_full_ur = once_per_batch(transform_main(load("main_full.asm"), FULL_HDR_OLD, FULL_HDR_NEW))
+main_full_ur = ping_pong_sufp(once_per_batch(transform_main(load("main_full.asm"), FULL_HDR_OLD, FULL_HDR_NEW)))
 io.open(os.path.join(DST, "main_ur.asm"), "w", newline="").write(main_ur)
 io.open(os.path.join(DST, "main_full_ur.asm"), "w", newline="").write(main_full_ur)
