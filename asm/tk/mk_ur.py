@@ -162,10 +162,11 @@ def transform_main(m, hdr_old, hdr_new):
     # ---- 1. uniform register allocation ------------------------------------------------
     m = sub(m, hdr_old, hdr_new, 1, "KERNEL header")
 
-    # ---- 2. UR63 must hold zero before any uniform ALU op uses URZ ----------------------
-    anchor = "    [B------:R-:W1:-:S01]    S2R BlockID, SR_CTAID.X"
-    m = sub(m, anchor, anchor + NL +
-            "    [B------:R-:W-:-:S01]    UMOV URZ, 0x00", 1, "URZ zeroing")
+    # ---- 2. UR63 must hold zero before any uniform ALU op uses URZ. Both main.asm and
+    #    main_full.asm already zero it in the prologue, so ASSERT that rather than inserting a
+    #    second (redundant) UMOV URZ, 0x00. RCAsm encodes URZ as UR63, a real Blackwell register.
+    if m.count("    [B------:R-:W-:-:S01]    UMOV URZ, 0x00") < 1:
+        sys.exit("source does not zero URZ (UR63) in the prologue")
 
     # ---- 3. seed the uniform offset in the ladder --------------------------------------
     seed = [l for l in m.split(NL)

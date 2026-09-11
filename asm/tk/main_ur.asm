@@ -14,7 +14,6 @@ KERNEL TestKernel(regcnt=128, \
     [B------:R-:W1:-:S01]    S2R ThrID, SR_TID.X
     [B------:R-:W1:-:S01]    S2R BlockID, SR_CTAID.X
     [B------:R-:W-:-:S01]    UMOV URZ, 0x00
-    [B------:R-:W-:-:S01]    UMOV URZ, 0x00
     [B------:R-:W-:-:S01]    UMOV uCallI1, 0xFFFFFFFF
     [B------:R-:W2:-:S01]    LDCU.64 uDesc, c[0x0][0x358]
     [B------:R-:W3:-:S01]    LDC.64 AddrX, c[0x0][0x380]
