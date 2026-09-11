@@ -230,7 +230,7 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
     [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_p)
-    [B------:R-:W-:-:S04]    SHF.R.U32 R72, COfs, 0x5, RZ
+    [B------:R-:W-:-:S05]    SHF.R.U32 R72, COfs, 0x5, RZ
     [B------:R-:W-:-:S04]    IADD3 R72, R72, 0x1, RZ //extra = i+1
     [B------:R-:W-:-:S02]    MOV R73, BDone
     [B------:R-:W-:-:S02]    MOV R74, Half
@@ -287,7 +287,7 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
     [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_m)
-    [B------:R-:W-:-:S04]    SHF.R.U32 R72, COfs, 0x5, RZ
+    [B------:R-:W-:-:S05]    SHF.R.U32 R72, COfs, 0x5, RZ
     [B------:R-:W-:-:S04]    IADD3.X R72, PT, PT, RZ, ~R72, RZ, !PT, !PT //extra = ~i = -(i+1)
     [B------:R-:W-:-:S02]    MOV R73, BDone
     [B------:R-:W-:-:S02]    MOV R74, Half
@@ -373,7 +373,7 @@ call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-
     [B------:R-:W-:-:S05]    ISETP.EQ.U32.AND P3, PT, R55, R63, P3
     [B-----5:R-:W-:Y:S13]    ISETP.EQ.U32.AND P3, PT, R56, R50, P3
     [B------:R-:W-:Y:S05] @!P3 BRA `(.hskip_t)
-    [B------:R-:W-:-:S04]    SHF.R.U32 R72, COfs, 0x5, RZ
+    [B------:R-:W-:-:S05]    SHF.R.U32 R72, COfs, 0x5, RZ
     [B------:R-:W-:-:S04]    IADD3.X R72, PT, PT, RZ, ~R72, RZ, !PT, !PT //extra = ~i = -(i+1)
     [B------:R-:W-:-:S02]    MOV R73, BDone
     [B------:R-:W-:-:S02]    MOV R74, Half
