@@ -170,133 +170,101 @@ FUNCTION MulMod256()
 }
 
 FUNCTION SqrMod256(First=Ri0)
-{ //Ri_cnt=8, Ro_cnt=8, Ro_tmp=26, P=[0..5]
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt0, First0, First2, RZ
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Ro2, First1, First1, RZ
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt2, First0, First4, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Ro2, Pt0, Pt1, Ro2, Rt0, Rt0, !PT, !PT
-
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Ro4, First2, First2, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Ro3, Pt0, Pt1, Ro3, Rt1, Rt1, Pt0, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt4, First1, First3, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Ro4, Pt0, Pt1, Ro4, Rt2, Rt2, Pt0, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Ro0, First0, First0, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Ro4, Pt2, Pt3, Ro4, Rt4, Rt4, !PT, !PT
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32 Rt6, First0, First6, RZ
-    [B------:R-:W-:-:S02]    IADD3.X Ro5, Pt0, Pt1, Ro5, Rt3, Rt3, Pt0, Pt1
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32 Ro6, First3, First3, RZ
-    [B------:R-:W-:-:S02]    IADD3.X Ro5, Pt2, Pt3, Ro5, Rt5, Rt5, Pt2, Pt3
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32 Rt8,  First1, First5, RZ
-    [B------:R-:W-:-:S02]    IADD3.X Ro6, Pt0, Pt1, Ro6, Rt6, Rt6, Pt0, Pt1
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32 Rt10,  First2, First4, RZ
-    [B------:R-:W-:-:S02]    IADD3.X Ro6, Pt2, Pt3, Ro6, Rt8, Rt8, Pt2, Pt3
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32 Rt12, First1, First7, RZ
-    [B------:R-:W-:-:S02]    IADD3.X Ro6, Pt4, Pt5, Ro6, Rt10, Rt10, !PT, !PT
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32 Rt14, First2, First6, RZ
-    [B------:R-:W-:-:S02]    IADD3.X Ro7, Pt0, Pt1, Ro7, Rt7, Rt7, Pt0, Pt1
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32 Rt0, First3, First5, RZ
-    [B------:R-:W-:-:S02]    IADD3.X Ro7, Pt2, Pt3, Ro7, Rt9, Rt9, Pt2, Pt3
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32 Rt18, First4, First4, RZ
-    [B------:R-:W-:-:S03]    IADD3.X Ro7, Pt4, Pt5, Ro7, Rt11, Rt11, Pt4, Pt5
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt10, First3, First7, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Rt18, Pt0, Pt1, Rt18, Rt12, Rt12, Pt0, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt6, First4, First6, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Rt18, Pt2, Pt3, Rt18, Rt14, Rt14, Pt2, Pt3
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt8, First5, First7, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Rt18, Pt4, Pt5, Rt18, Rt0, Rt0, Pt4, Pt5
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt24, First7, First7, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Rt19, Pt4, Pt5, Rt19, Rt1, Rt1, Pt4, Pt5
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt0, First0, First1, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Rt19, Pt0, Pt1, Rt19, Rt13, Rt13, Pt0, Pt1
-    [B------:R-:W-:-:S01]    IADD3.X Rt14, RZ, RZ, RZ, Pt5, !PT
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt20, PT, First5, First5, RZ, Pt4
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt0, Pt5, First1, First0, Rt0
-    [B------:R-:W-:-:S01]    IADD3.X Rt19, Pt2, Pt3, Rt19, Rt15, Rt15, Pt2, Pt3
-    [B------:R-:W-:-:S01]    IADD3.X Rt20, Pt4, Pt1, Rt20, Rt10, Rt10, Pt0, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt2, First0, First3, RZ, Pt5
-    [B------:R-:W-:-:S01]    IADD3.X Rt20, Pt2, Pt3, Rt20, Rt6, Rt6, Pt2, Pt3
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt2, Pt5, First1, First2, Rt2
-    [B------:R-:W-:-:S02]    IADD3.X Rt21, Pt4, Pt1, Rt21, Rt11, Rt11, Pt4, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt4, First0, First5, RZ, Pt5
-    [B------:R-:W-:-:S01]    IADD3.X Rt21, Pt2, Pt3, Rt21, Rt7, Rt7, Pt2, Pt3
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt2, Pt0, First2, First1, Rt2
-    [B------:R-:W-:-:S01]    IADD3.X Rt15, RZ, RZ, RZ, Pt3, !PT
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt22, PT, First6, First6, RZ, Pt2
-    [B------:R-:W-:-:S01]    IADD3 Ro1, Pt3, Ro1, Rt0, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Rt22, Pt4, Pt1, Rt22, Rt8, Rt8, Pt4, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt4, Pt0, First1, First4, Rt4, Pt0
-    [B------:R-:W-:-:S02]    IADD3.X Rt23, Pt4, Pt1, Rt23, Rt9, Rt9, Pt4, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt6, First0, First7, RZ, Pt0
-    [B------:R-:W-:-:S01]    IADD3.X Rt24, Pt4, Pt1, Rt24, RZ, RZ, Pt4, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt2, Pt0, First3, First0, Rt2
-    [B------:R-:W-:-:S01]    IADD3.X Rt25, PT, PT, Rt25, RZ, RZ, Pt4, Pt1
-    [B------:R-:W-:-:S01]    IADD3.X Ro2, Pt3, Ro2, Rt1, RZ, Pt3, !PT
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32.X Rt4, Pt0, First2, First3, Rt4, Pt0
-    [B------:R-:W-:-:S01]    IADD3.X Ro3, Pt3, Ro3, Rt2, RZ, Pt3, !PT
-    [B------:R-:W-:-:S03]    IMAD.WIDE.U32.X Rt6, Pt0, First1, First6, Rt6, Pt0
-    [B------:R-:W-:-:S01]    IADD3.X Ro4, Pt3, Ro4, Rt3, RZ, Pt3, !PT
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt8, First2, First7, RZ, Pt0
-    [B------:R-:W-:Y:S04]    IMAD.WIDE.U32 Rt4, Pt0, First3, First2, Rt4
-    [B------:R-:W-:Y:S04]    IMAD.WIDE.U32.X Rt6, Pt0, First2, First5, Rt6, Pt0
-    [B------:R-:W-:Y:S04]    IMAD.WIDE.U32.X Rt8, Pt0, First3, First6, Rt8, Pt0
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt10, First4, First7, RZ, Pt0
-    [B------:R-:W-:Y:S04]    IMAD.WIDE.U32 Rt4, Pt0, First4, First1, Rt4
-    [B------:R-:W-:Y:S04]    IMAD.WIDE.U32.X Rt6, Pt0, First3, First4, Rt6, Pt0
-    [B------:R-:W-:Y:S04]    IMAD.WIDE.U32.X Rt8, Pt0, First4, First5, Rt8, Pt0
-    [B------:R-:W-:Y:S04]    IMAD.WIDE.U32.X Rt10, Pt0, First5, First6, Rt10, Pt0
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt12, First6, First7, RZ, Pt0
-    [B------:R-:W-:Y:S04]    IMAD.WIDE.U32 Rt4, Pt0, First5, First0, Rt4
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32.X Rt6, Pt0, First4, First3, Rt6, Pt0
-    [B------:R-:W-:-:S01]    IADD3.X Ro5, Pt3, Ro5, Rt4, RZ, Pt3, !PT
-    [B------:R-:W-:-:S02]    IMAD.WIDE.U32.X Rt8, Pt0, First5, First4, Rt8, Pt0
-    [B------:R-:W-:-:S01]    IADD3.X Ro6, Pt3, Ro6, Rt5, RZ, Pt3, !PT
-    [B------:R-:W-:Y:S04]    IMAD.WIDE.U32.X Rt10, Pt0, First6, First5, Rt10, Pt0
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt12, Pt4, First7, First6, Rt12, Pt0
-    [B------:R-:W-:-:S03]    IMAD.WIDE.U32 Rt6, Pt0, First5, First2, Rt6
-    [B------:R-:W-:-:S01]    IADD3.X Rt25, PT, PT, Rt25, RZ, RZ, !PT, Pt4
-    [B------:R-:W-:Y:S04]    IMAD.WIDE.U32.X Rt8, Pt0, First6, First3, Rt8, Pt0
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt10, Pt2, First7, First4, Rt10, Pt0
-    [B------:R-:W-:-:S03]    IMAD.WIDE.U32 Rt6, Pt0, First6, First1, Rt6
-    [B------:R-:W-:-:S01]    IADD3.X Rt17, RZ, RZ, RZ, Pt2, !PT
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt8, Pt2, First7, First2, Rt8, Pt0
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt6, Pt4, First7, First0, Rt6
-    [B------:R-:W-:-:S01]    IADD3.X Rt16, RZ, RZ, RZ, Pt2, !PT
-    [B------:R-:W-:Y:S04]    IADD3.X Ro7, Pt3, Ro7, Rt6, RZ, Pt3, !PT
-    [B------:R-:W-:Y:S04]    IADD3.X Rt18, Pt3, Rt18, Rt7, RZ, Pt3, !PT
-    [B------:R-:W-:-:S01]    IADD3.X Rt19, Pt3, Pt4, Rt19, Rt8, RZ, Pt3, Pt4
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt0, Rt18, 0x3D1, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Rt20, Pt3, Pt4, Rt20, Rt9, Rt14, Pt3, Pt4
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt2, Pt2, Rt19, 0x3D1, Rt18, !PT
-    [B------:R-:W-:-:S01]    IADD3.X Rt21, Pt3, Pt4, Rt21, Rt10, Rt16, Pt3, Pt4
-    [B------:R-:W-:-:S01]    IADD3.X Ro0, Pt0, Pt1, Ro0, Rt0, RZ, !PT, !PT
-    [B------:R-:W-:-:S01]    IADD3.X Rt22, Pt3, Pt4, Rt22, Rt11, Rt15, Pt3, Pt4
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt4, Rt20, 0x3D1, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Rt23, Pt3, Pt4, Rt23, Rt12, Rt17, Pt3, Pt4
-    [B------:R-:W-:-:S01]    IADD3.X Ro1, Pt0, Pt1, Rt1, Rt2, Ro1, Pt0, Pt1
-    [B------:R-:W-:-:S01]    IADD3.X Rt24, Pt3, Pt4, Rt24, Rt13, RZ, Pt3, Pt4
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt6, Pt2, Rt21, 0x3D1, Rt20, Pt2
-    [B------:R-:W-:-:S01]    IADD3.X Rt25, Rt25, RZ, RZ, Pt3, Pt4
-    [B------:R-:W-:-:S01]    IADD3.X Ro2, Pt0, Pt1, Rt3, Rt4, Ro2, Pt0, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt8, Rt22, 0x3D1, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Ro3, Pt0, Pt1, Rt5, Rt6, Ro3, Pt0, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt10, Pt2, Rt23, 0x3D1, Rt22, Pt2
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt12, Rt24, 0x3D1, RZ
-    [B------:R-:W-:-:S01]    IADD3.X Ro4, Pt0, Pt1, Rt7, Rt8, Ro4, Pt0, Pt1
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt14, Pt2, Rt25, 0x3D1, Rt24, Pt2
-    [B------:R-:W-:Y:S04]    IADD3.X Ro5, Pt0, Pt1, Rt9, Rt10, Ro5, Pt0, Pt1
-    [B------:R-:W-:Y:S04]    IADD3.X Ro6, Pt0, Pt1, Rt11, Rt12, Ro6, Pt0, Pt1
-    [B------:R-:W-:Y:S04]    IADD3.X Ro7, Pt0, Pt1, Rt13, Rt14, Ro7, Pt0, Pt1
-    [B------:R-:W-:Y:S04]    IADD3.X Rt8, Pt0, PT, Rt15, RZ, RZ, Pt0, Pt1
-    [B------:R-:W-:-:S01]    IADD3.X Rt9, Pt0, Pt1, RZ, RZ, RZ, Pt0, Pt2
-    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Ro0, Pt3, Rt8, 0x3D1, Ro0, !PT
-    [B------:R-:W-:-:S03]    IMAD.WIDE.U32 Rt2, Rt9, 0x3D1, Rt8 //no carry occurs!
-    [B------:R-:W-:Y:S04]    IADD3.X Ro1, Pt0, PT, Ro1, Rt2, RZ, !PT, !PT
-    [B------:R-:W-:Y:S04]    IADD3.X Ro2, Pt0, Pt1, Rt3, Ro2, RZ, Pt0, Pt3
-    [B------:R-:W-:Y:S04]    IADD3.X Ro3, Pt0, PT, Ro3, RZ, RZ, Pt0, Pt1
-    [B------:R-:W-:Y:S04]    IADD3.X Ro4, Pt0, PT, Ro4, RZ, RZ, Pt0, !PT
-    [B------:R-:W-:Y:S04]    IADD3.X Ro5, Pt0, PT, Ro5, RZ, RZ, Pt0, !PT
-    [B------:R-:W-:Y:S04]    IADD3.X Ro6, Pt0, PT, Ro6, RZ, RZ, Pt0, !PT
-    [B------:R-:W-:Y:S04]    IADD3.X Ro7, PT, PT, Ro7, RZ, RZ, Pt0, !PT
+{ //Ri_cnt=8, Ro_cnt=8, Rt_cnt=26 (SqrT=R96..R121), P=[0..6]. Z+V square core + F/G/M fold:
+  // compute the 28 cross products once (12 even, 16 odd), double, add the 8 squares, then
+  // fold by C=2^32+977 as MulMod256 does. -33 instr / -49 wslots vs the compute-twice form.
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Rt14, First0, First3, RZ                     // O3  = a0a3
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Rt12, First0, First1, RZ                     // O1  = a0a1
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt14, Pt0, First1, First2, Rt14              // O3 += a1a2            ->d1
+    [B------:R-:W-:-:S03]    IADD3 Rt12, Pt1, Rt12, Rt12, RZ                            // v1 = 2*o1   (in place)
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Rt0, First0, First2, RZ                      // E2  = a0a2
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Rt2, First0, First4, RZ                      // E4  = a0a4
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Ro0, First0, First0, RZ                      // Z0  = a0^2
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt16, First0, First5, RZ, Pt0              // O5  = a0a5 +d1
+    [B------:R-:W-:-:S03]    IADD3 Ro1, Pt0, Ro1, Rt12, RZ                              // S1 = z1 + v1
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Rt2, Pt2, First1, First3, Rt2                // E4 += a1a3            ->c1
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Ro2, Pt3, First1, First1, Rt0                // Z1  = a1^2 + E2        ->z1
+    [B------:R-:W-:-:S03]    IADD3.X Rt0, Pt1, Pt4, Rt0, Rt13, Rt13, Pt1, !PT           // v2 = e2 + 2*o2
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32 Rt16, Pt5, First1, First4, Rt16              // O5 += a1a4            ->d2
+    [B------:R-:W-:-:S02]    IADD3.X Rt1, Pt1, Pt4, Rt1, Rt14, Rt14, Pt1, Pt4           // v3 = e3 + 2*o3
+    [B------:R-:W-:-:S01]    IADD3.X Ro2, Pt0, Ro2, Rt0, RZ, Pt0, !PT                   // S[2:3] = Z1 + V[2:3] (lo)
+    [B------:R-:W-:-:S03]    IMAD.WIDE.U32.X Rt4, First0, First6, RZ, Pt2               // E6  = a0a6 +c1
+    [B------:R-:W-:-:S01]    IADD3.X Ro3, Pt0, Ro3, Rt1, RZ, Pt0, !PT                   // S[2:3] = Z1 + V[2:3] (hi)
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Rt16, Pt2, First2, First3, Rt16              // O5 += a2a3            ->d3
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32.X Rt18, First0, First7, RZ, Pt5              // O7  = a0a7 +d2
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Rt4, Pt5, First1, First5, Rt4                // E6 += a1a5            ->c2
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Ro4, Pt3, First2, First2, Rt2, Pt3         // Z2  = a2^2 + E4 +z1    ->z2
+    [B------:R-:W-:-:S03]    IADD3.X Rt2, Pt1, Pt4, Rt2, Rt15, Rt15, Pt1, Pt4           // v4 = e4 + 2*o4
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt18, Pt2, First1, First6, Rt18, Pt2       // O7 += a1a6 +d3        ->d3b
+    [B------:R-:W-:-:S02]    IADD3.X Rt3, Pt1, Pt4, Rt3, Rt16, Rt16, Pt1, Pt4           // v5 = e5 + 2*o5
+    [B------:R-:W-:-:S01]    IADD3.X Ro4, Pt0, Ro4, Rt2, RZ, Pt0, !PT                   // S[4:5] = Z2 + V[4:5] (lo)
+    [B------:R-:W-:-:S03]    IMAD.WIDE.U32 Rt4, Pt6, First2, First4, Rt4                // E6 += a2a4            ->c3
+    [B------:R-:W-:-:S01]    IADD3.X Ro5, Pt0, Ro5, Rt3, RZ, Pt0, !PT                   // S[4:5] = Z2 + V[4:5] (hi)
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32.X Rt6, First1, First7, RZ, Pt5               // E8  = a1a7 +c2
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Rt18, Pt5, First2, First5, Rt18              // O7 += a2a5            ->d4
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32.X Rt6, Pt6, First2, First6, Rt6, Pt6         // E8 += a2a6 +c3        ->c3b
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Ro6, Pt3, First3, First3, Rt4, Pt3         // Z3  = a3^2 + E6 +z2    ->z3
+    [B------:R-:W-:-:S03]    IADD3.X Rt4, Pt1, Pt4, Rt4, Rt17, Rt17, Pt1, Pt4           // v6 = e6 + 2*o6
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt20, First2, First7, RZ, Pt2              // O9  = a2a7 +d3b
+    [B------:R-:W-:-:S03]    IADD3.X Ro6, Pt0, Ro6, Rt4, RZ, Pt0, !PT                   // S[6:7] = Z3 + V[6:7] (lo)
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Rt18, Pt2, First3, First4, Rt18              // O7 += a3a4            ->d5
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt20, Pt5, First3, First6, Rt20, Pt5       // O9 += a3a6 +d4        ->d4b
+    [B------:R-:W-:-:S03]    IADD3.X Rt5, Pt1, Pt4, Rt5, Rt18, Rt18, Pt1, Pt4           // v7 = e7 + 2*o7
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt8, First3, First7, RZ, Pt6               // E10 = a3a7 +c3b
+    [B------:R-:W-:-:S03]    IADD3.X Ro7, Pt0, Ro7, Rt5, RZ, Pt0, !PT                   // S[6:7] = Z3 + V[6:7] (hi)
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32 Rt6, Pt6, First3, First5, Rt6                // E8 += a3a5            ->c4
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt12, Pt3, First4, First4, Rt6, Pt3        // Z4  = a4^2 + E8 +z3    ->z4
+    [B------:R-:W-:-:S03]    IADD3.X Rt6, Pt1, Pt4, Rt6, Rt19, Rt19, Pt1, Pt4           // v8 = e8 + 2*o8
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt20, Pt2, First4, First5, Rt20, Pt2       // O9 += a4a5 +d5        ->d5b
+    [B------:R-:W-:-:S03]    IADD3.X Rt6, Pt0, Rt12, Rt6, RZ, Pt0, !PT                  // H[0:1] = S[8:9] = Z4 + V[8:9] (lo)
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt8, Pt6, First4, First6, Rt8, Pt6         // E10+= a4a6 +c4        ->c4b
+    [B------:R-:W-:-:S03]    IADD3.X Rt7, Pt1, Pt4, Rt7, Rt20, Rt20, Pt1, Pt4           // v9 = e9 + 2*o9
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt22, First4, First7, RZ, Pt5              // O11 = a4a7 +d4b
+    [B------:R-:W-:-:S03]    IADD3.X Rt7, Pt0, Rt13, Rt7, RZ, Pt0, !PT                  // H[0:1] = S[8:9] = Z4 + V[8:9] (hi)
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt14, Pt3, First5, First5, Rt8, Pt3        // Z5  = a5^2 + E10 +z4   ->z5
+    [B------:R-:W-:-:S03]    IADD3.X Rt8, Pt1, Pt4, Rt8, Rt21, Rt21, Pt1, Pt4           // v10= e10 + 2*o10
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt22, Pt2, First5, First6, Rt22, Pt2       // O11+= a5a6 +d5b       ->d5c
+    [B------:R-:W-:-:S03]    IADD3.X Rt8, Pt0, Rt14, Rt8, RZ, Pt0, !PT                  // H[2:3] = S[10:11] = Z5 + V[10:11] (lo)
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt10, First5, First7, RZ, Pt6              // E12 = a5a7 +c4b
+    [B------:R-:W-:-:S03]    IADD3.X Rt9, Pt1, Pt4, Rt9, Rt22, Rt22, Pt1, Pt4           // v11= e11 + 2*o11
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Ro0, Pt5, Rt6, 0x3D1, Ro0, !PT             // F0: {Ro1:Ro0} += h0*977          ->f
+    [B------:R-:W-:-:S03]    IADD3.X Rt9, Pt0, Rt15, Rt9, RZ, Pt0, !PT                  // H[2:3] = S[10:11] = Z5 + V[10:11] (hi)
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32.X Rt0, Pt6, Rt7, 0x3D1, Rt6, !PT             // G0: {Rt1:Rt0} = h1*977 + {h1:h0} ->g
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt16, Pt3, First6, First6, Rt10, Pt3       // Z6  = a6^2 + E12 +z5   ->z6
+    [B------:R-:W-:-:S03]    IADD3.X Rt10, Pt1, Pt4, Rt10, Rt23, Rt23, Pt1, Pt4         // v12= e12 + 2*o12
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt24, First6, First7, RZ, Pt2              // O13 = a6a7 +d5c
+    [B------:R-:W-:-:S02]    IADD3 Ro1, Pt2, Ro1, Rt0, RZ                               // M1: Ro1 += G0lo
+    [B------:R-:W-:-:S01]    IADD3.X Rt10, Pt0, Rt16, Rt10, RZ, Pt0, !PT                // H[4:5] = S[12:13] = Z6 + V[12:13] (lo)
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Ro2, Pt5, Rt8, 0x3D1, Ro2, Pt5             // F1: {Ro3:Ro2} += h2*977 +f      ->f
+    [B------:R-:W-:-:S03]    IADD3.X Rt11, Pt1, Pt4, Rt11, Rt24, Rt24, Pt1, Pt4         // v13= e13 + 2*o13
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt2, Pt6, Rt9, 0x3D1, Rt8, Pt6             // G1: {Rt3:Rt2} = h3*977 + {h3:h2} +g
+    [B------:R-:W-:-:S02]    IADD3.X Ro2, Pt2, Ro2, Rt1, RZ, Pt2, !PT                   // M2: Ro2 += G0hi
+    [B------:R-:W-:-:S01]    IADD3.X Rt24, Pt1, PT, Rt25, Rt25, RZ, Pt1, Pt4            // v14= 2*o14 (+carry<=1)
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt18, First7, First7, RZ, Pt3              // Z7  = a7^2 +z6
+    [B------:R-:W-:-:S02]    IADD3.X Rt11, Pt0, Rt17, Rt11, RZ, Pt0, !PT                // H[4:5] = S[12:13] = Z6 + V[12:13] (hi)
+    [B------:R-:W-:-:S01]    IADD3.X Ro3, Pt2, Ro3, Rt2, RZ, Pt2, !PT                   // M3: Ro3 += G1lo
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Ro4, Pt3, Rt10, 0x3D1, Ro4, Pt5            // F2: {Ro5:Ro4} += h4*977 +f      ->f
+    [B------:R-:W-:-:S02]    IADD3.X Rt25, RZ, RZ, RZ, Pt1, !PT                         // v15= carry
+    [B------:R-:W-:-:S01]    IADD3.X Rt18, Pt0, Rt18, Rt24, RZ, Pt0, !PT                // H[6:7] = S[14:15] = Z7 + V[14:15] (lo)
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt4, Pt1, Rt11, 0x3D1, Rt10, Pt6           // G2: {Rt5:Rt4} = h5*977 + {h5:h4} +g
+    [B------:R-:W-:-:S02]    IADD3.X Ro4, Pt2, Ro4, Rt3, RZ, Pt2, !PT                   // M4: Ro4 += G1hi
+    [B------:R-:W-:-:S01]    IADD3.X Rt19, Rt19, Rt25, RZ, Pt0, !PT                     // H[6:7] = S[14:15] = Z7 + V[14:15] (hi)
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Ro6, Pt0, Rt18, 0x3D1, Ro6, Pt3            // F3: {Ro7:Ro6} += h6*977 +f      ->f(word 8)
+    [B------:R-:W-:-:S03]    IADD3.X Ro5, Pt2, Ro5, Rt4, RZ, Pt2, !PT                   // M5: Ro5 += G2lo
+    [B------:R-:W-:-:S01]    IMAD.WIDE.U32.X Rt12, Pt1, Rt19, 0x3D1, Rt18, Pt1          // G3: {Rt13:Rt12} = h7*977 + {h7:h6} +g ->g(word 9)
+    [B------:R-:W-:-:S04]    IADD3.X Ro6, Pt2, Ro6, Rt5, RZ, Pt2, !PT                   // M6: Ro6 += G2hi
+    [B------:R-:W-:-:S04]    IADD3.X Ro7, Pt2, Ro7, Rt12, RZ, Pt2, !PT                  // M7: Ro7 += G3lo
+    [B------:R-:W-:-:S04]    IADD3.X Rt14, Pt0, Rt13, RZ, RZ, Pt2, Pt0                  // OVlo = G3hi + m + f
+    [B------:R-:W-:-:S01]    IADD3.X Rt15, RZ, RZ, RZ, Pt1, Pt0                         // OVhi = g + x  (<=2)
+    [B------:R-:W-:-:S04]    IMAD.WIDE.U32.X Ro0, Pt0, Rt14, 0x3D1, Ro0, !PT            // {Ro1:Ro0} += OVlo*977          ->t (word 2)
+    [B------:R-:W-:-:S05]    IMAD.WIDE.U32 Rt16, Rt15, 0x3D1, Rt14                      // {Rt17:Rt16} = OVhi*977 + {OVhi:OVlo} (no carry)
+    [B------:R-:W-:-:S04]    IADD3 Ro1, Pt1, Ro1, Rt16, RZ                              // Ro1 += lo
+    [B------:R-:W-:-:S04]    IADD3.X Ro2, Pt0, Ro2, Rt17, RZ, Pt1, Pt0                  // Ro2 += hi + r + t (carry<=1)
+    [B------:R-:W-:-:S04]    IADD3.X Ro3, Pt0, Ro3, RZ, RZ, Pt0, !PT                    // Ro3 += r
+    [B------:R-:W-:-:S04]    IADD3.X Ro4, Pt0, Ro4, RZ, RZ, Pt0, !PT                    // {Ro5:Ro4} += r (lo)
+    [B------:R-:W-:-:S04]    IADD3.X Ro5, Pt0, Ro5, RZ, RZ, Pt0, !PT                    // {Ro5:Ro4} += r (hi)
+    [B------:R-:W-:-:S04]    IADD3.X Ro6, Pt0, Ro6, RZ, RZ, Pt0, !PT                    // {Ro7:Ro6} += r, final carry dropped (= Math.cuh) (lo)
+    [B------:R-:W-:-:S06]    IADD3.X Ro7, Ro7, RZ, RZ, Pt0, !PT                         // {Ro7:Ro6} += r, final carry dropped (= Math.cuh) (hi)
 }
 
 FUNCTION _fast_find_first_bit()
