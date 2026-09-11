@@ -244,6 +244,113 @@ def transform_main(m, hdr_old, hdr_new):
     return m
 
 
+def once_per_batch(m):
+    """Full kernel only: convert the seven once-per-batch bank-3 table loads (SUFP c_Jx,
+    INV c_Gx[0], PLUST c_GyNeg + c_Gx, JUMP c_Gx + c_Jy + c_Jx) from 4x LDC.64 to
+    2x LDCU.128 + a _UB subtract -- the same win the walk/ladder already take, but for the
+    prologue/tail that runs once per batch. These sites sit outside the loop regions
+    transform_main rewrites, so they are still LDC.64 here.
+
+      * uCOfs == COfs across the whole tail: both step from 0 in the walk and neither is
+        touched afterward, so the COfs-indexed tail loads (PLUST/JUMP c_Gx, PLUST c_GyNeg)
+        reindex directly on uCOfs.
+      * the three fixed loads (c_Jx at 0x0, c_Gx[0] at 0x4040, c_Jy at 0x20) use LDCU's
+        no-index form c[0x3][imm] (LDCU_UR_cAI), which needs no index register.
+      * PLUST's c_GyNeg drops its `IADD3 SAdr, COfs, 0x8000` wrap-workaround: LDCU's
+        immediate reaches 0x8040 directly, unlike LDC.64's signed 16-bit offset.
+
+    uGx/uGy/uGyN are dead outside a walk trip, so they are reused as the scratch table reg
+    at each site; each load's W4 + drain NOP is kept exactly as the LDC.64 block had it.
+    """
+    E = [
+        # SUFP c_Jx (fixed 0x0) -> uGx; the LDC Half + Ro=MulA make the block unique
+        ("    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x0]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x8]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x10]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB6, c[0x3][0x18]" + NL +
+         "    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]" + NL +
+         "    [B0---4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0)",
+         "    [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][0x0]" + NL +
+         "    [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][0x10]" + NL +
+         "    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]" + NL +
+         "    [B0---4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulA, Pt=0)", "SUFP c_Jx"),
+        # INV c_Gx[0] (fixed 0x4040) -> uGx
+        ("    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x4040]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x4048]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x4050]" + NL +
+         "    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][0x4058]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)",
+         "    [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][0x4040]" + NL +
+         "    [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][0x4050]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulB, Pt=0)", "INV c_Gx[0]"),
+        # PLUST c_GyNeg (SAdr+0x40) -> uGyN, dropping the IADD3 SAdr wrap line
+        ("    [B------:R-:W-:-:S04]    IADD3 SAdr, PT, PT, COfs, 0x8000, RZ //c_GyNeg is past the signed 16-bit LDC offset" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][SAdr+0x40]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][SAdr+0x48]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][SAdr+0x50]" + NL +
+         "    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][SAdr+0x58]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)",
+         "    [B------:R-:W4:-:S01]    LDCU.128 uGyN0, c[0x3][uCOfs+0x8040]" + NL +
+         "    [B------:R-:W4:-:S02]    LDCU.128 uGyN4, c[0x3][uCOfs+0x8050]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256_UB(URFirst=uGyN, RSecond=PntY, Ro=MulB, Pt=0)", "PLUST c_GyNeg"),
+        # PLUST c_Gx (COfs+0x4040 -> uCOfs) -> uGx; SubMod256_3 makes it unique vs JUMP c_Gx
+        ("    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]" + NL +
+         "    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0)",
+         "    [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][uCOfs+0x4040]" + NL +
+         "    [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][uCOfs+0x4050]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256_3_UB(RFirst=Sqr, URSecond=uGx, RThird=PntX, Ro=PxN, Rt=Pt3T, Pt=0)", "PLUST c_Gx"),
+        # JUMP c_Gx (COfs+0x4040 -> uCOfs) -> uGx; the trailing MulMod(Rinv,..) makes it unique
+        ("    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][COfs+0x4040]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][COfs+0x4048]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][COfs+0x4050]" + NL +
+         "    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][COfs+0x4058]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulB, Pt=0)" + NL +
+         "inc_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)",
+         "    [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][uCOfs+0x4040]" + NL +
+         "    [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][uCOfs+0x4050]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulB, Pt=0)" + NL +
+         "inc_func MulMod256(RFirst=Rinv, RSecond=MulB, Ro=MulR, Rt=Tmp, Pt=0)", "JUMP c_Gx"),
+        # JUMP c_Jy (fixed 0x20) -> uGy
+        ("    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x20]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x28]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x30]" + NL +
+         "    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][0x38]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256(RFirst=MulB, RSecond=PntY, Ro=MulB, Pt=0)",
+         "    [B------:R-:W4:-:S01]    LDCU.128 uGy0, c[0x3][0x20]" + NL +
+         "    [B------:R-:W4:-:S02]    LDCU.128 uGy4, c[0x3][0x30]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256_UB(URFirst=uGy, RSecond=PntY, Ro=MulB, Pt=0)", "JUMP c_Jy"),
+        # JUMP c_Jx (fixed 0x0, MulB6 at S02) -> uGx; SubMod256_3 makes it unique vs SUFP c_Jx
+        ("    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x0]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x8]" + NL +
+         "    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x10]" + NL +
+         "    [B------:R-:W4:-:S02]    LDC.64 MulB6, c[0x3][0x18]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0)",
+         "    [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][0x0]" + NL +
+         "    [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][0x10]" + NL +
+         "    [B----4-:R-:W-:-:S01]    NOP" + NL +
+         "inc_func SubMod256_3_UB(RFirst=Sqr, URSecond=uGx, RThird=PntX, Ro=PxN, Rt=Pt3T, Pt=0)", "JUMP c_Jx"),
+    ]
+    for old, new, what in E:
+        m = sub(m, old, new, 1, what)
+    return m
+
+
 MAIN_HDR_OLD = "    uDesc=UR4, uCallI=UR8, uInvT=UR10 )"
 MAIN_HDR_NEW = ("    uDesc=UR4, uCallI=UR8, uInvT=UR10, \\" + NL +
                 "    uCOfs=UR16, uGx=UR20, uGy=UR28, uGyN=UR36 )")
@@ -254,6 +361,6 @@ FULL_HDR_NEW = ("    uDesc=UR4, uHashSel=UR6, uCallI=UR8, uInvT=UR10, uCallH=UR1
 # Compute both transforms BEFORE opening any output file: "w" truncates on open, so a crash
 # mid-transform must not be able to leave a committed *_ur.asm empty.
 main_ur = transform_main(load("main.asm"), MAIN_HDR_OLD, MAIN_HDR_NEW)
-main_full_ur = transform_main(load("main_full.asm"), FULL_HDR_OLD, FULL_HDR_NEW)
+main_full_ur = once_per_batch(transform_main(load("main_full.asm"), FULL_HDR_OLD, FULL_HDR_NEW))
 io.open(os.path.join(DST, "main_ur.asm"), "w", newline="").write(main_ur)
 io.open(os.path.join(DST, "main_full_ur.asm"), "w", newline="").write(main_full_ur)
