@@ -1,11 +1,11 @@
-KERNEL TestKernel(regcnt=128, \
+KERNEL TestKernel(regcnt=123, \
     BDone=R0, gID=R2, TmpA=R3, TmpB=R4, Idx=R5, Half=R6, SAdr=R7, \
-    PntX=R8, PntY=R16, Scal=R24, \
+    PntX=R8, PntY=R16, Scal=R40, \
     ThrID=R32, BlockID=R33, AddrX=R34, AddrY=R36, AddrS=R38, AddrC=R40, Thr=R42, \
-    Inv=R32, InvO=R42, InvT=R52, \
+    Inv=R24, InvO=R34, InvT=R44, \
     Rinv=R32, Dxi=R40, MulB=R48, MulA=R56, MulR=R64, Prod=R64, \
     Lam=R72, Sqr=R80, PxN=R88, \
-    Tmp=R96, SqrT=R96, Pt3T=R96, COfs=R122, BpL=R123, \
+    Tmp=R96, SqrT=R96, Pt3T=R96, COfs=R122, BpL=R4, \
     Acc=R128, \
     uDesc=UR4, uHashSel=UR6, uCallI=UR8, uInvT=UR10, uCallH=UR12, uCallP=UR14 )
 {
