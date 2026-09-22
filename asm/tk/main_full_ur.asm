@@ -1,4 +1,4 @@
-KERNEL TestKernel(regcnt=123, \
+KERNEL TestKernel(regcnt=128, \
     BDone=R0, gID=R2, TmpA=R3, TmpB=R4, Idx=R5, Half=R6, SAdr=R7, \
     PntX=R8, PntY=R16, Scal=R40, \
     ThrID=R32, BlockID=R33, AddrX=R34, AddrY=R36, AddrS=R38, AddrC=R40, Thr=R42, \
