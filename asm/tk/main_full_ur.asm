@@ -104,11 +104,10 @@ call_func getPublish2(Ri=R72, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S0
 // GpuCore.cu:215-221  for(i=half-2..0){ sub_mod(tmp,&c_Gx[(i+1)*4],x1); mul_mod(acc,acc,tmp); subp[i]=acc; }
     [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][0x0]
     [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][0x10]
-    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]
     [B0---4-:R-:W-:-:S01]    NOP
 inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulA, Pt=0)
 
-    [B-----5:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
+    [B------:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
     [B------:R-:W5:-:S02]    LDCU uCOfs, c[0x0][0x3a8]
     [B-----5:R-:W-:-:S05]    USHF.L.U32 uCOfs, uCOfs, 0x4, URZ
     [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ

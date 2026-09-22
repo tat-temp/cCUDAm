@@ -263,17 +263,16 @@ def once_per_batch(m):
     at each site; each load's W4 + drain NOP is kept exactly as the LDC.64 block had it.
     """
     E = [
-        # SUFP c_Jx (fixed 0x0) -> uGx; the LDC Half + Ro=MulA make the block unique
+        # SUFP c_Jx (fixed 0x0) -> uGx; the [B0---4-] NOP + Ro=MulA make the block unique
+        # (Half is already resident from the prologue LDC, so the loop-body reload was dropped)
         ("    [B------:R-:W4:-:S01]    LDC.64 MulB0, c[0x3][0x0]" + NL +
          "    [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x8]" + NL +
          "    [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x10]" + NL +
          "    [B------:R-:W4:-:S01]    LDC.64 MulB6, c[0x3][0x18]" + NL +
-         "    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]" + NL +
          "    [B0---4-:R-:W-:-:S01]    NOP" + NL +
          "inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0)",
          "    [B------:R-:W4:-:S01]    LDCU.128 uGx0, c[0x3][0x0]" + NL +
          "    [B------:R-:W4:-:S02]    LDCU.128 uGx4, c[0x3][0x10]" + NL +
-         "    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]" + NL +
          "    [B0---4-:R-:W-:-:S01]    NOP" + NL +
          "inc_func SubMod256_UB(URFirst=uGx, RSecond=PntX, Ro=MulA, Pt=0)", "SUFP c_Jx"),
         # INV c_Gx[0] (fixed 0x4040) -> uGx

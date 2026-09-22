@@ -105,11 +105,10 @@ call_func getPublish2(Ri=R72, Rt=MulB, URt=uDesc, Pt=3, Ret="[B------:R-:W-:-:S0
     [B------:R-:W4:-:S01]    LDC.64 MulB2, c[0x3][0x8]
     [B------:R-:W4:-:S01]    LDC.64 MulB4, c[0x3][0x10]
     [B------:R-:W4:-:S01]    LDC.64 MulB6, c[0x3][0x18]
-    [B------:R-:W5:-:S02]    LDC Half, c[0x0][0x3a8]
     [B0---4-:R-:W-:-:S01]    NOP
 inc_func SubMod256(RFirst=MulB, RSecond=PntX, Ro=MulA, Pt=0)
 
-    [B-----5:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
+    [B------:R-:W-:-:S05]    IMAD COfs, Half, 0x10, RZ
     [B------:R-:W-:-:S05]    IADD3 SAdr, PT, PT, R1, COfs, RZ
     [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x20], MulA0
     [B------:R3:W-:-:S02]    STL.128 [SAdr+-0x10], MulA4
