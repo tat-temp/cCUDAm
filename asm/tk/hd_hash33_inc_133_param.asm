@@ -1,25 +1,26 @@
-FUNCTION getHash160_33(x=Ri0, pfx=Rio0, tmp=Rt0, sel=URt0)
+FUNCTION getHash160_33(x=Ri0, pfx=Rio0, tmp=Rt0, sel=URt0, src=Rsrc0)
 {
     [B------:R-:W-:-:S01]     PRMT Rio0, Rio0, 0x7770, RZ
     [B------:R-:W-:Y:S03]     UMOV URt0, 0x455
-    [B------:R-:W-:-:S02]     PRMT Rio0, Ri7, 0x4321, Rio0
-    [B------:R-:W-:-:S02]     PRMT Ri7, Ri6, 0x4321, Ri7
-    [B------:R-:W-:-:S01]     PRMT Ri6, Ri5, 0x4321, Ri6
+    [B------:R-:W-:-:S02]     PRMT Rio0, Rsrc7, 0x4321, Rio0
+    [B------:R-:W-:-:S02]     PRMT Ri7, Rsrc6, 0x4321, Rsrc7
+    [B------:R-:W-:-:S01]     PRMT Ri6, Rsrc5, 0x4321, Rsrc6
     [B------:R-:W-:-:S01]     IADD Rt0, Rio0.reuse, 0x3587272b
     [B------:R-:W-:-:S01]     IADD Rt5, Rio0, -0x67381d5e
-    [B------:R-:W-:-:S02]     PRMT Ri5, Ri4, 0x4321, Ri5
-    [B------:R-:W-:-:S01]     PRMT Ri4, Ri3, 0x4321, Ri4
+    [B------:R-:W-:-:S02]     PRMT Ri5, Rsrc4, 0x4321, Rsrc5
+    [B------:R-:W-:-:S01]     PRMT Ri4, Rsrc3, 0x4321, Rsrc4
     [B------:R-:W-:-:S01]     IADD Rt3, -Rt0, -0x6340bb78
     [B------:R-:W-:Y:S03]     LOP3.LUT Rt0, Rt5, 0x510e527f, RZ, 0xc0, !PT
     [B------:R-:W-:-:S01]     IADD Rt49, Ri4, Rt5
-    [B------:R-:W-:-:S02]     PRMT Ri3, Ri2, 0x4321, Ri3
+    [B------:R-:W-:-:S02]     PRMT Ri3, Rsrc2, 0x4321, Rsrc3
     [B------:R-:W-:-:S02]     LOP3.LUT Rt14, Rt0, 0x9b05688c, Rt3, 0xf8, !PT
     [B------:R-:W-:-:S02]     SHF.R.W.U32 Rt0, Rt5.reuse, 0x5, Rt5.reuse
     [B------:R-:W-:-:S01]     SHF.R.W.U32 Rt3, Rt5, 0x13, Rt5
     [B------:R-:W-:-:S01]     IADD Rt15, Ri7, Rt14
-    [B------:R-:W-:-:S02]     PRMT Ri2, Ri1, 0x4321, Ri2
+    [B------:R-:W-:-:S02]     PRMT Ri2, Rsrc1, 0x4321, Rsrc2
     [B------:R-:W-:Y:S02]     LOP3.LUT Rt0, Rt5, Rt0, Rt3, 0x96, !PT
-    [B------:R-:W-:-:S02]     PRMT Ri1, Ri0, 0x4321, Ri1
+    [B------:R-:W-:-:S02]     PRMT Ri1, Rsrc0, 0x4321, Rsrc1
+    [B------:R-:W-:-:S01]     IMAD Ri0, RZ, RZ, Rsrc0
     [B------:R-:W-:-:S01]     LEA.HI Rt3, Rt0, Rt15, Rt0, 0x1a
     [B------:R-:W-:Y:S04]     IADD Rt15, Rio0, -0x3f777b3
     [B------:R-:W-:-:S01]     IADD Rt0, Rt3.reuse, -0x32d5ee52

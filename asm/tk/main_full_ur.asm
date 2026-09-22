@@ -59,16 +59,16 @@ KERNEL TestKernel(regcnt=123, \
 // GpuCore.cu:194-204  hw2=getHash160_33(prefix,x1); if(hash160_full_match) publish_found(find_result,s1); return;
     [B01----:R-:W-:-:S04]    LOP3.LUT R52, PntY0, 0x1, RZ, 0xc0, !PT
     [B------:R-:W-:-:S02]    IADD3 R52, R52, 0x2, RZ
-    [B------:R-:W-:-:S02]    IMAD R54, RZ, RZ, PntX0
-    [B------:R-:W-:-:S02]    MOV  R55, PntX1
-    [B------:R-:W-:-:S02]    IMAD R56, RZ, RZ, PntX2
-    [B------:R-:W-:-:S02]    MOV  R57, PntX3
-    [B------:R-:W-:-:S02]    IMAD R58, RZ, RZ, PntX4
-    [B------:R-:W-:-:S02]    MOV  R59, PntX5
-    [B------:R-:W-:-:S02]    IMAD R60, RZ, RZ, PntX6
-    [B------:R-:W-:-:S06]    MOV  R61, PntX7
+    [B------:R-:W-:-:S02]    IMAD PxN0, RZ, RZ, PntX0
+    [B------:R-:W-:-:S02]    MOV  PxN1, PntX1
+    [B------:R-:W-:-:S02]    IMAD PxN2, RZ, RZ, PntX2
+    [B------:R-:W-:-:S02]    MOV  PxN3, PntX3
+    [B------:R-:W-:-:S02]    IMAD PxN4, RZ, RZ, PntX4
+    [B------:R-:W-:-:S02]    MOV  PxN5, PntX5
+    [B------:R-:W-:-:S02]    IMAD PxN6, RZ, RZ, PntX6
+    [B------:R-:W-:-:S06]    MOV  PxN7, PntX7
     [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_33) //RCASM:CallPointH0
-call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH0
+call_func getHash160_33(Ri=R54, Rsrc=PxN, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH0
     [B------:R-:W-:-:S06]    MOV R60, 0xc040
     [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
     [B------:R-:W-:-:S04]    BSSY B0, `(.hsrc_s)
@@ -223,16 +223,8 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 // GpuCore.cu:250  uint8_t prefix = sub_mod_is_odd_prefix(s, y1);
 // GpuCore.cu:254-267  hw2=getHash160_33(prefix,px3); if(full_match){ hit=s1; add256_u64(hit,i+1); publish_found; } return;
     [B------:R-:W-:-:S02]    IADD3 R52, TmpA, 0x2, RZ
-    [B------:R-:W-:-:S02]    IMAD R54, RZ, RZ, PxN0
-    [B------:R-:W-:-:S02]    MOV  R55, PxN1
-    [B------:R-:W-:-:S02]    IMAD R56, RZ, RZ, PxN2
-    [B------:R-:W-:-:S02]    MOV  R57, PxN3
-    [B------:R-:W-:-:S02]    IMAD R58, RZ, RZ, PxN4
-    [B------:R-:W-:-:S02]    MOV  R59, PxN5
-    [B------:R-:W-:-:S02]    IMAD R60, RZ, RZ, PxN6
-    [B------:R-:W-:-:S06]    MOV  R61, PxN7
     [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_33) //RCASM:CallPointH1
-call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH1
+call_func getHash160_33(Ri=R54, Rsrc=PxN, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH1
     [B------:R-:W-:-:S06]    MOV R60, 0xc040
     [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
     [B------:R-:W-:-:S04]    BSSY B0, `(.hsrc_p)
@@ -274,16 +266,8 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 // GpuCore.cu:288  uint8_t prefix = sub_mod_is_odd_prefix(s, y1);
 // GpuCore.cu:292-305  hw2=getHash160_33(prefix,px3); if(full_match){ hit=s1; sub256_u64(hit,i+1); publish_found; } return;
     [B------:R-:W-:-:S02]    IADD3 R52, TmpA, 0x2, RZ
-    [B------:R-:W-:-:S02]    IMAD R54, RZ, RZ, PxN0
-    [B------:R-:W-:-:S02]    MOV  R55, PxN1
-    [B------:R-:W-:-:S02]    IMAD R56, RZ, RZ, PxN2
-    [B------:R-:W-:-:S02]    MOV  R57, PxN3
-    [B------:R-:W-:-:S02]    IMAD R58, RZ, RZ, PxN4
-    [B------:R-:W-:-:S02]    MOV  R59, PxN5
-    [B------:R-:W-:-:S02]    IMAD R60, RZ, RZ, PxN6
-    [B------:R-:W-:-:S06]    MOV  R61, PxN7
     [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_33) //RCASM:CallPointH2
-call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH2
+call_func getHash160_33(Ri=R54, Rsrc=PxN, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH2
     [B------:R-:W-:-:S06]    MOV R60, 0xc040
     [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
     [B------:R-:W-:-:S04]    BSSY B0, `(.hsrc_m)
@@ -357,16 +341,8 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
 // GpuCore.cu:335  uint8_t prefix = sub_mod_is_odd_prefix(s, y1);
 // GpuCore.cu:339-352  hw2=getHash160_33(prefix,px3); if(full_match){ hit=s1; sub256_u64(hit,half); publish_found; } return;
     [B------:R-:W-:-:S02]    IADD3 R52, TmpA, 0x2, RZ
-    [B------:R-:W-:-:S02]    IMAD R54, RZ, RZ, PxN0
-    [B------:R-:W-:-:S02]    MOV  R55, PxN1
-    [B------:R-:W-:-:S02]    IMAD R56, RZ, RZ, PxN2
-    [B------:R-:W-:-:S02]    MOV  R57, PxN3
-    [B------:R-:W-:-:S02]    IMAD R58, RZ, RZ, PxN4
-    [B------:R-:W-:-:S02]    MOV  R59, PxN5
-    [B------:R-:W-:-:S02]    IMAD R60, RZ, RZ, PxN6
-    [B------:R-:W-:-:S06]    MOV  R61, PxN7
     [B------:R-:W-:-:S01]    UMOV uCallH0, `(.relN_end_getHash160_33) //RCASM:CallPointH3
-call_func getHash160_33(Ri=R54, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH3
+call_func getHash160_33(Ri=R54, Rsrc=PxN, Rio=R52, Rt=MulB, URt=uHashSel, Ret="[B------:R-:W-:-:S06] BRXU.U uCallH, 0x00") //RCASM:CallPointH3
     [B------:R-:W-:-:S06]    MOV R60, 0xc040
     [B------:R-:W5:-:S02]    LDC.64 R62, c[0x3][R60+0x8]
     [B------:R-:W-:-:S04]    BSSY B0, `(.hsrc_t)
