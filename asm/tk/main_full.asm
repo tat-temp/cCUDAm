@@ -459,7 +459,7 @@ inc_func SqrMod256(Ri=Lam, Ro=Sqr, Rt=SqrT, Pt=0)
 inc_func SubMod256_3(RFirst=Sqr, RSecond=PntX, RThird=MulB, Ro=PxN, Rt=Pt3T, Pt=0)
 inc_func SubMod256(RFirst=PntX, RSecond=PxN, Ro=MulA, Pt=0)
 inc_func MulMod256(RFirst=MulA, RSecond=Lam, Ro=MulR, Rt=Tmp, Pt=0)
-inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
+inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=PntY, Pt=0)
     [B------:R-:W-:-:S01]    IMAD PntX0, RZ, RZ, PxN0
     [B------:R-:W-:-:S01]    MOV PntX1, PxN1
     [B------:R-:W-:-:S01]    IMAD PntX2, RZ, RZ, PxN2
@@ -468,14 +468,6 @@ inc_func SubMod256(RFirst=MulR, RSecond=PntY, Ro=MulA, Pt=0)
     [B------:R-:W-:-:S01]    MOV PntX5, PxN5
     [B------:R-:W-:-:S01]    IMAD PntX6, RZ, RZ, PxN6
     [B------:R-:W-:-:S01]    MOV PntX7, PxN7
-    [B------:R-:W-:-:S01]    IMAD PntY0, RZ, RZ, MulA0
-    [B------:R-:W-:-:S01]    MOV PntY1, MulA1
-    [B------:R-:W-:-:S01]    IMAD PntY2, RZ, RZ, MulA2
-    [B------:R-:W-:-:S01]    MOV PntY3, MulA3
-    [B------:R-:W-:-:S01]    IMAD PntY4, RZ, RZ, MulA4
-    [B------:R-:W-:-:S01]    MOV PntY5, MulA5
-    [B------:R-:W-:-:S01]    IMAD PntY6, RZ, RZ, MulA6
-    [B------:R-:W-:-:S05]    MOV PntY7, MulA7
 //@@JUMP_END
 
 //@@LOOPEND_BEGIN
